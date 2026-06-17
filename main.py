@@ -27,19 +27,44 @@ from pydantic import BaseModel, Field
 # ──────────────────────────────────────────────
 #  Configuration & Persistence
 # ──────────────────────────────────────────────
+def get_app_data_dir() -> Path:
+    import platform
+    home = Path.home()
+    if platform.system() == "Darwin":
+        p = home / "Library" / "Application Support" / "DownloadAnything"
+    elif platform.system() == "Windows":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            p = Path(appdata) / "DownloadAnything"
+        else:
+            p = home / "AppData" / "Roaming" / "DownloadAnything"
+    else:
+        p = home / ".config" / "DownloadAnything"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def get_default_download_path() -> Path:
+    downloads = Path.home() / "Downloads"
+    if downloads.exists():
+        return downloads / "DownloadAnything"
+    return Path.home() / "DownloadAnything"
+
+APP_DATA_DIR = get_app_data_dir()
+SETTINGS_FILE = APP_DATA_DIR / "settings.json"
 BASE_DIR = Path(__file__).resolve().parent
-SETTINGS_FILE = BASE_DIR / "settings.json"
-STATIC_DIR = BASE_DIR / "static"
+STATIC_DIR = BASE_DIR / "dist-frontend" / "static"
+TMP_DIR = APP_DATA_DIR / "tmp"
+TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "max_concurrent_downloads": 3,
     "fallback_codecs": ["av01", "vp09", "avc01"],
-    "default_download_path": str(BASE_DIR / "downloads"),
+    "default_download_path": str(get_default_download_path()),
     "categories": {
-        "Videos":   str(BASE_DIR / "downloads" / "videos"),
-        "Courses":  str(BASE_DIR / "downloads" / "courses"),
-        "Music":    str(BASE_DIR / "downloads" / "music"),
-        "Cinematic": str(BASE_DIR / "downloads" / "cinematic"),
+        "Videos":   str(get_default_download_path() / "videos"),
+        "Courses":  str(get_default_download_path() / "courses"),
+        "Music":    str(get_default_download_path() / "music"),
+        "Cinematic": str(get_default_download_path() / "cinematic"),
     },
     "rate_limit_bytes_per_sec": 0,   # 0 = unlimited
     "merge_output_format": "mp4",
@@ -173,10 +198,17 @@ def build_ydl_options(task: DownloadTask, extract_only: bool = False) -> Dict[st
     if ffmpeg_bin:
         ffmpeg_location = str(Path(ffmpeg_bin).parent)
     else:
-        for p in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
-            if (Path(p) / "ffmpeg").exists():
-                ffmpeg_location = p
-                break
+        import platform
+        if platform.system() == "Darwin":
+            for p in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+                if (Path(p) / "ffmpeg").exists():
+                    ffmpeg_location = p
+                    break
+        elif platform.system() == "Windows":
+            for p in ["C:\\ffmpeg\\bin", "C:\\Program Files\\ffmpeg\\bin"]:
+                if (Path(p) / "ffmpeg.exe").exists():
+                    ffmpeg_location = p
+                    break
 
     opts: Dict[str, Any] = {
         "quiet": True,
@@ -200,7 +232,7 @@ def build_ydl_options(task: DownloadTask, extract_only: bool = False) -> Dict[st
 
     # Route fragment temp files to the workspace temp folder so they don't
     # accumulate inside the user's actual download folder.
-    fragment_cache = BASE_DIR / "tmp" / "fragments"
+    fragment_cache = TMP_DIR / "fragments"
     fragment_cache.mkdir(parents=True, exist_ok=True)
     opts["paths"] = {
         "home": str(target_dir),
@@ -358,7 +390,7 @@ def _hook_sink(task: DownloadTask, d: Dict[str, Any], loop: asyncio.AbstractEven
 # ──────────────────────────────────────────────
 #  Tasks Disk Persistence
 # ──────────────────────────────────────────────
-TASKS_DIR = BASE_DIR / "tmp"
+TASKS_DIR = APP_DATA_DIR / "tmp"
 TASKS_FILE = TASKS_DIR / "tasks.json"
 _save_tasks_scheduled = False
 
@@ -606,7 +638,7 @@ if STATIC_DIR.exists():
 # ──────────────────────────────────────────────
 @app.get("/")
 async def index():
-    idx = BASE_DIR / "index.html"
+    idx = BASE_DIR / "dist-frontend" / "index.html"
     if idx.exists():
         return FileResponse(str(idx))
     return JSONResponse({"status": "ok", "service": "Media Acquisition Engine"})
@@ -874,19 +906,33 @@ async def handle_client_action(websocket: WebSocket, action: str, request_id: st
         # 9. reveal
         elif action == "reveal":
             import subprocess
+            import platform
             task_id = payload.get("task_id")
             task = TASKS.get(task_id)
             if not task:
                 raise ValueError("Task not found")
             path_to_open = task.final_path or task.filename
+            
+            system = platform.system()
             if path_to_open and os.path.exists(path_to_open):
-                subprocess.run(["open", "-R", path_to_open], check=False)
+                if system == "Darwin":
+                    subprocess.run(["open", "-R", path_to_open], check=False)
+                elif system == "Windows":
+                    subprocess.run(["explorer", "/select,", os.path.normpath(path_to_open)], check=False)
+                else:
+                    parent_dir = os.path.dirname(os.path.abspath(path_to_open))
+                    subprocess.run(["xdg-open", parent_dir], check=False)
             else:
                 target_dir = task.custom_path or (
                     SETTINGS["categories"].get(task.category) if task.category else SETTINGS["default_download_path"]
                 )
                 if os.path.exists(target_dir):
-                    subprocess.run(["open", target_dir], check=False)
+                    if system == "Darwin":
+                        subprocess.run(["open", target_dir], check=False)
+                    elif system == "Windows":
+                        subprocess.run(["explorer", os.path.normpath(target_dir)], check=False)
+                    else:
+                        subprocess.run(["xdg-open", target_dir], check=False)
                 else:
                     raise ValueError("Path does not exist on disk")
             
@@ -991,4 +1037,4 @@ async def websocket_progress(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True, log_level="info")
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False, log_level="info")

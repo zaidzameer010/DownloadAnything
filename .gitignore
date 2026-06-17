@@ -1,4 +1,10 @@
-/__pycache__/
+node_modules/
+__pycache__
 .DS_Store
 tmp
 settings.json
+build/
+dist/
+*.spec
+src-tauri/target/
+src-tauri/binaries/

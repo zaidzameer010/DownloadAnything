@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "tauri:build": "node build-backend.js && tauri build"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2"
+  }
+}

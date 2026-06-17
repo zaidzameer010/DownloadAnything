@@ -1,7 +1,7 @@
 /**
  * api.js — API Client Wrapper (WebSocket edition)
  */
-export const API = "";
+export const API = "http://127.0.0.1:8000";
 
 let ws = null;
 const pendingRequests = new Map();
