@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Stream Snatcher — Enterprise Media Acquisition",
+  "version": "1.0.0",
+  "description": "Silently sniff HLS/DASH/MP4 streams, overlay download buttons, and route to the local FastAPI acquisition engine.",
+  "minimum_chrome_version": "114",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "http://127.0.0.1:8000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "icons": {
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Stream Snatcher"
+  }
+}

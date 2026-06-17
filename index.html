@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Media Acquisition Engine</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/components.css">
+</head>
+<body>
+
+  <div class="app-layout">
+    <nav class="sidebar">
+      <div class="sidebar-brand">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+        </svg>
+        <span>Acquisition Engine</span>
+      </div>
+
+      <div class="sidebar-menu">
+        <button class="menu-item active" id="nav-downloads">
+          <i data-lucide="list-video"></i>
+          <span>Downloads</span>
+          <span class="nav-badge" id="nav-active-count">0</span>
+        </button>
+        <button class="menu-item" id="nav-settings">
+          <i data-lucide="settings"></i>
+          <span>Configuration</span>
+        </button>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="meta-item">
+          <i data-lucide="cpu"></i>
+          <div class="meta-item-info">
+            <label>Workers</label>
+            <span id="meta-workers">—</span>
+          </div>
+        </div>
+        <div class="meta-item">
+          <i data-lucide="terminal"></i>
+          <div class="meta-item-info">
+            <label>yt-dlp</label>
+            <span id="meta-ydlp">—</span>
+          </div>
+        </div>
+        <div class="meta-item">
+          <i data-lucide="activity"></i>
+          <div class="meta-item-info">
+            <label>Active Tasks</label>
+            <span id="meta-active">0</span>
+          </div>
+        </div>
+      </div>
+    </nav>
+
+    <main class="main-content">
+      <div class="offline-banner" id="offline-banner">
+        <i data-lucide="wifi-off" style="width:18px;height:18px;"></i>
+        Connection lost. Trying to reconnect to FastAPI engine...
+      </div>
+
+      <!-- Active Queue View -->
+      <div class="view-panel active" id="view-downloads">
+        <section class="card">
+          <h2><i data-lucide="list-video"></i> Downloads</h2>
+          <table>
+            <thead>
+              <tr>
+                <th class="checkbox-col"><input type="checkbox" id="select-all-tasks" style="cursor:pointer;" /></th>
+                <th style="width:70px;">Progress</th>
+                <th>Title</th>
+                <th>Size</th>
+                <th>Speed</th>
+                <th>ETA</th>
+                <th class="status-col">Status</th>
+                <th>Location</th>
+              </tr>
+            </thead>
+            <tbody id="task-body"></tbody>
+          </table>
+        </section>
+      </div>
+
+      <!-- Configuration View -->
+      <div class="view-panel" id="view-settings">
+        <section class="card">
+          <h2><i data-lucide="settings"></i> Configuration</h2>
+          <div class="form-row">
+            <label>Max Concurrent Downloads</label>
+            <input type="number" id="set-concurrency" min="1" max="16" />
+          </div>
+          <div class="form-row">
+            <label>Merge Container</label>
+            <select id="set-merge">
+              <option value="mp4">MP4</option>
+              <option value="mkv">MKV</option>
+              <option value="webm">WebM</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>Default Path</label>
+            <input type="text" id="set-default-path" />
+          </div>
+
+          <h2 style="margin-top:2rem;"><i data-lucide="folder-heart"></i> Categories</h2>
+          <div class="cat-list" id="cat-list"></div>
+          <button class="ghost" id="add-cat" style="width:100%;margin-bottom:1rem;">
+            <i data-lucide="plus" style="width:16px;height:16px;"></i> Add Category
+          </button>
+          <button class="primary" id="save-settings" style="width:100%;">
+            <i data-lucide="save" style="width:16px;height:16px;"></i> Save Settings
+          </button>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast" id="toast">
+    <i data-lucide="info" style="width:18px;height:18px;"></i>
+    <span id="toast-text"></span>
+  </div>
+
+  <!-- Context Menu Container -->
+  <div id="context-menu" class="context-menu"></div>
+
+  <!-- Bulk Actions Bar Container -->
+  <div id="bulk-actions-bar" class="bulk-actions-bar">
+    <span class="selection-count"><span id="bulk-count">0</span> selected</span>
+    <div class="bulk-buttons">
+      <button class="ghost" id="bulk-pause" title="Pause selected"><i data-lucide="pause" style="width:14px;height:14px;"></i> Pause</button>
+      <button class="ghost" id="bulk-resume" title="Resume/Retry selected"><i data-lucide="play" style="width:14px;height:14px;"></i> Resume</button>
+      <button class="ghost" id="bulk-remove" title="Remove selected from list"><i data-lucide="trash-2" style="width:14px;height:14px;"></i> Remove</button>
+      <button class="ghost danger" id="bulk-delete" title="Delete selected files from disk"><i data-lucide="file-x" style="width:14px;height:14px;"></i> Delete Files</button>
+      <button class="ghost" id="bulk-clear" style="padding: 8px 12px; font-size: 11px;">Clear</button>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
