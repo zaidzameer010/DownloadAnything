@@ -49,9 +49,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_PUBKEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'DownloadAnything ${{ github.ref_name }}'
           releaseBody: 'DownloadAnything Release'
           releaseDraft: true
           prerelease: false
+          # Dynamically overrides the plugins object at build-time
+          args: --config '{"plugins":{"updater":{"pubkey":"${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}"}}}'
+
