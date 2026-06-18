@@ -39,7 +39,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "${env:TAURI_SIGNING_PUBLIC_KEY}",
+      "pubkey": "TAURI_SIGNING_PUBLIC_KEY",
       "endpoints": [
         "https://github.com/zaidzameer010/DownloadAnything/releases/latest/download/latest.json"
       ]
