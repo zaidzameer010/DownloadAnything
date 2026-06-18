@@ -12,6 +12,7 @@ jobs:
       actions: write
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         platform: [macos-latest, windows-latest]
     runs-on: ${{ matrix.platform }}

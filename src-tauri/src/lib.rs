@@ -93,18 +93,43 @@ pub fn run() {
           Ok(updater) => {
             match updater.check().await {
               Ok(Some(update)) => {
-                log::info!("Found update: {}. Downloading...", update.version);
-                if let Err(e) = update.download_and_install(|chunk_len, total_len| {
-                  if let Some(total) = total_len {
-                    log::info!("Downloading update: {}/{} bytes", chunk_len, total);
-                  }
-                }, || {
-                  log::info!("Update downloaded, installing...");
-                }).await {
-                  log::error!("Failed to download and install update: {:?}", e);
-                } else {
-                  log::info!("Update successfully installed! Relaunching app...");
-                  handle.restart();
+                log::info!("Found update: {}. Prompting user...", update.version);
+                use tauri_plugin_dialog::DialogExt;
+                let message = format!(
+                    "A new version ({}) is available. Would you like to download and install it now?",
+                    update.version
+                );
+                let confirmed = handle.dialog()
+                    .message(&message)
+                    .title("Update Available")
+                    .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                    .buttons(tauri_plugin_dialog::MessageDialogButtons::YesNo)
+                    .blocking_show();
+
+                if confirmed {
+                    log::info!("User confirmed update. Downloading and installing...");
+                    if let Err(e) = update.download_and_install(|chunk_len, total_len| {
+                      if let Some(total) = total_len {
+                        log::info!("Downloading update: {}/{} bytes", chunk_len, total);
+                      }
+                    }, || {
+                      log::info!("Update downloaded, installing...");
+                    }).await {
+                      log::error!("Failed to download and install update: {:?}", e);
+                      let _ = handle.dialog()
+                          .message(&format!("Failed to install update: {:?}", e))
+                          .title("Update Error")
+                          .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                          .blocking_show();
+                    } else {
+                      log::info!("Update successfully installed! Relaunching app...");
+                      let _ = handle.dialog()
+                          .message("Update installed successfully. The application will now restart.")
+                          .title("Update Success")
+                          .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                          .blocking_show();
+                      handle.restart();
+                    }
                 }
               }
               Ok(None) => {
