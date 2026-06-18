@@ -9,6 +9,7 @@ jobs:
   release:
     permissions:
       contents: write
+      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -58,4 +59,10 @@ jobs:
           prerelease: false
           # Dynamically overrides the plugins object at build-time
           args: --config '{"plugins":{"updater":{"pubkey":"${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}"}}}'
+
+      - name: Cleanup old caches
+        run: |
+          gh cache delete --all --ref "${{ github.ref }}" || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
