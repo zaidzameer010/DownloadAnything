@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import platform
 import shutil
 import time
 import uuid
@@ -28,7 +29,6 @@ from pydantic import BaseModel, Field
 #  Configuration & Persistence
 # ──────────────────────────────────────────────
 def get_app_data_dir() -> Path:
-    import platform
     home = Path.home()
     if platform.system() == "Darwin":
         p = home / "Library" / "Application Support" / "DownloadAnything"
@@ -68,6 +68,12 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     },
     "rate_limit_bytes_per_sec": 0,   # 0 = unlimited
     "merge_output_format": "mp4",
+    "concurrent_fragments": 16,
+    "embed_thumbnail": False,
+    "embed_subtitles": False,
+    "subtitle_language": "en",
+    "proxy": "",
+    "cookies_from_browser": "none",
 }
 
 def load_settings() -> Dict[str, Any]:
@@ -166,11 +172,21 @@ class SettingsUpdate(BaseModel):
     categories: Optional[Dict[str, str]] = None
     rate_limit_bytes_per_sec: Optional[int] = None
     merge_output_format: Optional[str] = Field(default=None, pattern="^(mp4|mkv|webm)$")
+    concurrent_fragments: Optional[int] = None
+    embed_thumbnail: Optional[bool] = None
+    embed_subtitles: Optional[bool] = None
+    subtitle_language: Optional[str] = None
+    proxy: Optional[str] = None
+    cookies_from_browser: Optional[str] = None
 
 # ──────────────────────────────────────────────
 #  yt-dlp Options Builder
 # ──────────────────────────────────────────────
 def build_ydl_options(task: DownloadTask, extract_only: bool = False) -> Dict[str, Any]:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
     target_dir = task.custom_path or (
         SETTINGS["categories"].get(task.category) if task.category else SETTINGS["default_download_path"]
     )
@@ -185,8 +201,8 @@ def build_ydl_options(task: DownloadTask, extract_only: bool = False) -> Dict[st
 
     codec_pref = SETTINGS.get("fallback_codecs", ["av01", "vp09", "avc01"])
     format_sort = [f"vcodec:{c}" for c in codec_pref] + ["res", "ext:mp4:m4a"]
-
-    loop = asyncio.get_running_loop()
+    
+    # Determine format spec
     if task.format_id and task.format_id != "direct_stream":
         format_spec = f"{task.format_id}+ba/b" if task.is_video else task.format_id
     else:
@@ -194,21 +210,25 @@ def build_ydl_options(task: DownloadTask, extract_only: bool = False) -> Dict[st
 
     # Locate ffmpeg/ffprobe to ensure yt-dlp can merge/embed streams
     ffmpeg_location = None
-    ffmpeg_bin = shutil.which("ffmpeg")
-    if ffmpeg_bin:
-        ffmpeg_location = str(Path(ffmpeg_bin).parent)
+    local_bin = get_app_data_dir() / "bin"
+    ffmpeg_exe = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
+    if (local_bin / ffmpeg_exe).exists():
+        ffmpeg_location = str(local_bin)
     else:
-        import platform
-        if platform.system() == "Darwin":
-            for p in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
-                if (Path(p) / "ffmpeg").exists():
-                    ffmpeg_location = p
-                    break
-        elif platform.system() == "Windows":
-            for p in ["C:\\ffmpeg\\bin", "C:\\Program Files\\ffmpeg\\bin"]:
-                if (Path(p) / "ffmpeg.exe").exists():
-                    ffmpeg_location = p
-                    break
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if ffmpeg_bin:
+            ffmpeg_location = str(Path(ffmpeg_bin).parent)
+        else:
+            if platform.system() == "Darwin":
+                for p in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+                    if (Path(p) / "ffmpeg").exists():
+                        ffmpeg_location = p
+                        break
+            elif platform.system() == "Windows":
+                for p in ["C:\\ffmpeg\\bin", "C:\\Program Files\\ffmpeg\\bin"]:
+                    if (Path(p) / "ffmpeg.exe").exists():
+                        ffmpeg_location = p
+                        break
 
     opts: Dict[str, Any] = {
         "quiet": True,
@@ -217,7 +237,7 @@ def build_ydl_options(task: DownloadTask, extract_only: bool = False) -> Dict[st
         "merge_output_format": SETTINGS.get("merge_output_format", "mp4"),
         "format": format_spec,
         "format_sort": format_sort,
-        "concurrent_fragment_downloads": 16,
+        "concurrent_fragment_downloads": SETTINGS.get("concurrent_fragments", 16),
         "retries": 10,
         "fragment_retries": 10,
         "outtmpl": "%(title).200B.%(ext)s",
@@ -229,6 +249,25 @@ def build_ydl_options(task: DownloadTask, extract_only: bool = False) -> Dict[st
             {"key": "FFmpegMetadata", "add_chapters": True},
         ],
     }
+
+    # Embed thumbnail if enabled
+    if SETTINGS.get("embed_thumbnail", False):
+        opts["writethumbnail"] = True
+        opts["postprocessors"].append({
+            "key": "EmbedThumbnail",
+            "already_have_thumbnail": False
+        })
+
+    # Embed subtitles if enabled
+    if SETTINGS.get("embed_subtitles", False):
+        opts["writesubtitles"] = True
+        opts["writeautomaticsub"] = True
+        lang = SETTINGS.get("subtitle_language", "en")
+        opts["subtitleslangs"] = [lang]
+        opts["postprocessors"].append({
+            "key": "FFmpegEmbedSubtitle",
+            "already_have_subtitle": False
+        })
 
     # Route fragment temp files to the workspace temp folder so they don't
     # accumulate inside the user's actual download folder.
@@ -248,6 +287,16 @@ def build_ydl_options(task: DownloadTask, extract_only: bool = False) -> Dict[st
     if rate_limit and rate_limit > 0:
         opts["ratelimit"] = rate_limit
 
+    # Apply proxy if configured
+    proxy_val = SETTINGS.get("proxy", "").strip()
+    if proxy_val:
+        opts["proxy"] = proxy_val
+
+    # Apply cookies from browser if configured
+    cookies_browser = SETTINGS.get("cookies_from_browser", "none")
+    if cookies_browser and cookies_browser != "none":
+        opts["cookiesfrombrowser"] = (cookies_browser,)
+
     return opts
 
 # ──────────────────────────────────────────────
@@ -262,24 +311,26 @@ _GENERIC_STREAM_NAMES = frozenset({
     "media", "manifest", "chunklist", "output", "main", "live",
 })
 
+def _clean_page_title(pt: str) -> str:
+    """Strip common site-name suffixes and watch/download prefixes from a page title."""
+    for sep in (" | ", " - ", " \u2013 ", " \u2014 "):
+        if sep in pt:
+            parts = [p.strip() for p in pt.split(sep)]
+            if len(parts[0]) > 3:
+                pt = parts[0]
+                break
+    for prefix in ("Watch ", "Download "):
+        if pt.lower().startswith(prefix.lower()) and len(pt) > len(prefix):
+            pt = pt[len(prefix):]
+    return pt
+
 def _sanitise_stream_title(title: str, url: str, page_title: Optional[str] = None, prefer_page_title: bool = False) -> str:
     """Return a human-readable title, falling back to page_title or a URL-derived name
     when the raw title is a generic manifest placeholder."""
     stripped = title.strip()
-    
+
     if prefer_page_title and page_title:
-        pt = page_title.strip()
-        # Clean common page title suffixes (e.g. "Watch Movie | StreamingSite")
-        for sep in (" | ", " - ", " – ", " — "):
-            if sep in pt:
-                parts = [p.strip() for p in pt.split(sep)]
-                if len(parts[0]) > 3:
-                    pt = parts[0]
-                    break
-        # Clean common prefix words
-        for prefix in ("Watch ", "Download "):
-            if pt.lower().startswith(prefix.lower()) and len(pt) > len(prefix):
-                pt = pt[len(prefix):]
+        pt = _clean_page_title(page_title.strip())
         if pt:
             return pt
 
@@ -287,31 +338,18 @@ def _sanitise_stream_title(title: str, url: str, page_title: Optional[str] = Non
         return stripped
 
     if page_title:
-        pt = page_title.strip()
-        # Clean common page title suffixes (e.g. "Watch Movie | StreamingSite")
-        for sep in (" | ", " - ", " – ", " — "):
-            if sep in pt:
-                parts = [p.strip() for p in pt.split(sep)]
-                if len(parts[0]) > 3:
-                    pt = parts[0]
-                    break
-        # Clean common prefix words
-        for prefix in ("Watch ", "Download "):
-            if pt.lower().startswith(prefix.lower()) and len(pt) > len(prefix):
-                pt = pt[len(prefix):]
+        pt = _clean_page_title(page_title.strip())
         if pt:
             return pt
 
     try:
         from urllib.parse import urlparse
         p = urlparse(url)
-        # Build "<hostname> – <path stem>" as a readable fallback
         hostname = p.hostname or ""
         stem = os.path.basename(p.path.rstrip("/"))
-        stem = os.path.splitext(stem)[0]  # drop .m3u8/.mpd extension
+        stem = os.path.splitext(stem)[0]
         if stem and stem.lower() not in _GENERIC_STREAM_NAMES:
-            return f"{hostname} – {stem}" if hostname else stem
-        # Last resort: just use the hostname
+            return f"{hostname} \u2013 {stem}" if hostname else stem
         return hostname or stripped or "Stream"
     except Exception:
         return stripped or "Stream"
@@ -390,7 +428,7 @@ def _hook_sink(task: DownloadTask, d: Dict[str, Any], loop: asyncio.AbstractEven
 # ──────────────────────────────────────────────
 #  Tasks Disk Persistence
 # ──────────────────────────────────────────────
-TASKS_DIR = APP_DATA_DIR / "tmp"
+TASKS_DIR = TMP_DIR  # same as APP_DATA_DIR / "tmp" — use the single constant
 TASKS_FILE = TASKS_DIR / "tasks.json"
 _save_tasks_scheduled = False
 
@@ -432,27 +470,26 @@ def load_tasks() -> None:
     except Exception as e:
         print(f"Error loading tasks: {e}")
 
+def _write_tasks_to_disk() -> None:
+    """Atomic task persistence: write to .tmp then rename."""
+    TASKS_DIR.mkdir(parents=True, exist_ok=True)
+    data = {task_id: task.to_dict() for task_id, task in TASKS.items()}
+    temp_file = TASKS_FILE.with_suffix(".tmp")
+    with temp_file.open("w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    temp_file.replace(TASKS_FILE)
+
 async def save_tasks_async() -> None:
     global _save_tasks_scheduled
     _save_tasks_scheduled = False
     try:
-        TASKS_DIR.mkdir(parents=True, exist_ok=True)
-        data = {task_id: task.to_dict() for task_id, task in TASKS.items()}
-        temp_file = TASKS_FILE.with_suffix(".tmp")
-        with temp_file.open("w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2)
-        temp_file.replace(TASKS_FILE)
+        _write_tasks_to_disk()
     except Exception as e:
         print(f"Error saving tasks: {e}")
 
 def save_tasks_now() -> None:
     try:
-        TASKS_DIR.mkdir(parents=True, exist_ok=True)
-        data = {task_id: task.to_dict() for task_id, task in TASKS.items()}
-        temp_file = TASKS_FILE.with_suffix(".tmp")
-        with temp_file.open("w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2)
-        temp_file.replace(TASKS_FILE)
+        _write_tasks_to_disk()
     except Exception as e:
         print(f"Error saving tasks immediately: {e}")
 
@@ -465,15 +502,8 @@ def schedule_save_tasks() -> None:
         loop = asyncio.get_running_loop()
         loop.create_task(_delayed_save())
     except RuntimeError:
-        try:
-            TASKS_DIR.mkdir(parents=True, exist_ok=True)
-            data = {task_id: task.to_dict() for task_id, task in TASKS.items()}
-            temp_file = TASKS_FILE.with_suffix(".tmp")
-            with temp_file.open("w", encoding="utf-8") as fh:
-                json.dump(data, fh, indent=2)
-            temp_file.replace(TASKS_FILE)
-        except Exception:
-            pass
+        # No running loop (e.g. called from a sync context); save synchronously
+        save_tasks_now()
 
 async def _delayed_save() -> None:
     await asyncio.sleep(1.0)
@@ -602,20 +632,25 @@ async def lifespan(app: FastAPI):
     load_tasks()
     await spawn_workers(app)
     yield
-    try:
-        TASKS_DIR.mkdir(parents=True, exist_ok=True)
-        data = {task_id: task.to_dict() for task_id, task in TASKS.items()}
-        with TASKS_FILE.open("w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2)
-    except Exception:
-        pass
+    # Shutdown: save tasks atomically before stopping workers
+    save_tasks_now()
     await stop_workers(app)
 
 app = FastAPI(title="Media Acquisition Engine", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # Restrict to localhost origins only — the app is a local FastAPI server.
+    # Using allow_origins=["*"] with allow_credentials=True is forbidden by
+    # the CORS spec and silently broken in modern browsers.
+    allow_origins=[
+        "http://localhost",
+        "http://localhost:8000",
+        "http://127.0.0.1",
+        "http://127.0.0.1:8000",
+        "tauri://localhost",
+        "https://tauri.localhost",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -642,6 +677,173 @@ async def index():
     if idx.exists():
         return FileResponse(str(idx))
     return JSONResponse({"status": "ok", "service": "Media Acquisition Engine"})
+
+def check_binaries_status() -> Dict[str, bool]:
+    app_bin_dir = get_app_data_dir() / "bin"
+    ffmpeg_name = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
+    ytdlp_name = "yt-dlp.exe" if platform.system() == "Windows" else "yt-dlp"
+    
+    ffmpeg_ok = bool(shutil.which("ffmpeg")) or (app_bin_dir / ffmpeg_name).exists()
+    ytdlp_ok = bool(shutil.which("yt-dlp")) or (app_bin_dir / ytdlp_name).exists()
+    
+    return {
+        "ffmpeg": ffmpeg_ok,
+        "ytdlp": ytdlp_ok
+    }
+
+def download_file_with_progress(url: str, dest_path: Path, progress_callback):
+    import urllib.request
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req) as response:
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded = 0
+        block_size = 1024 * 64
+        with open(dest_path, 'wb') as f:
+            while True:
+                buffer = response.read(block_size)
+                if not buffer:
+                    break
+                downloaded += len(buffer)
+                f.write(buffer)
+                if total_size > 0:
+                    percent = int((downloaded / total_size) * 100)
+                    progress_callback(percent)
+
+def install_binaries_in_thread(websocket: WebSocket, request_id: str, loop: asyncio.AbstractEventLoop):
+    import urllib.request
+    import zipfile
+    import tempfile
+    
+    try:
+        app_bin_dir = get_app_data_dir() / "bin"
+        app_bin_dir.mkdir(parents=True, exist_ok=True)
+        system = platform.system()
+        
+        status = check_binaries_status()
+        
+        # 1. Download & install FFmpeg if missing
+        if not status["ffmpeg"]:
+            def ffmpeg_progress(pct):
+                asyncio.run_coroutine_threadsafe(
+                    websocket.send_json({
+                        "type": "onboarding",
+                        "binary": "ffmpeg",
+                        "status": "downloading",
+                        "progress": pct
+                    }),
+                    loop
+                )
+                
+            ffmpeg_progress(0)
+            
+            if system == "Darwin":
+                url = "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
+                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                    tmp_name = tmp.name
+                try:
+                    download_file_with_progress(url, Path(tmp_name), ffmpeg_progress)
+                    ffmpeg_progress(100)
+                    asyncio.run_coroutine_threadsafe(
+                        websocket.send_json({
+                            "type": "onboarding",
+                            "binary": "ffmpeg",
+                            "status": "extracting",
+                            "progress": 100
+                        }),
+                        loop
+                    )
+                    with zipfile.ZipFile(tmp_name) as z:
+                        for member in z.namelist():
+                            if member.endswith("ffmpeg") and not member.startswith("__MACOSX"):
+                                dest = app_bin_dir / "ffmpeg"
+                                with z.open(member) as source, open(dest, "wb") as target:
+                                    shutil.copyfileobj(source, target)
+                                dest.chmod(0o755)
+                                break
+                finally:
+                    if os.path.exists(tmp_name):
+                        os.unlink(tmp_name)
+                        
+            elif system == "Windows":
+                url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                    tmp_name = tmp.name
+                try:
+                    download_file_with_progress(url, Path(tmp_name), ffmpeg_progress)
+                    ffmpeg_progress(100)
+                    asyncio.run_coroutine_threadsafe(
+                        websocket.send_json({
+                            "type": "onboarding",
+                            "binary": "ffmpeg",
+                            "status": "extracting",
+                            "progress": 100
+                        }),
+                        loop
+                    )
+                    with zipfile.ZipFile(tmp_name) as z:
+                        for member in z.namelist():
+                            if member.endswith("ffmpeg.exe"):
+                                dest = app_bin_dir / "ffmpeg.exe"
+                                with z.open(member) as source, open(dest, "wb") as target:
+                                    shutil.copyfileobj(source, target)
+                                break
+                finally:
+                    if os.path.exists(tmp_name):
+                        os.unlink(tmp_name)
+                        
+            else:
+                raise NotImplementedError(f"Unsupported OS for FFmpeg installation: {system}")
+                
+        # 2. Download & install yt-dlp if missing
+        if not status["ytdlp"]:
+            def ytdlp_progress(pct):
+                asyncio.run_coroutine_threadsafe(
+                    websocket.send_json({
+                        "type": "onboarding",
+                        "binary": "ytdlp",
+                        "status": "downloading",
+                        "progress": pct
+                    }),
+                    loop
+                )
+                
+            ytdlp_progress(0)
+            
+            if system == "Windows":
+                url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+                dest = app_bin_dir / "yt-dlp.exe"
+            elif system == "Darwin":
+                url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+                dest = app_bin_dir / "yt-dlp"
+            else:
+                raise NotImplementedError(f"Unsupported OS for yt-dlp installation: {system}")
+                
+            download_file_with_progress(url, dest, ytdlp_progress)
+            if system != "Windows":
+                dest.chmod(0o755)
+            ytdlp_progress(100)
+            
+        asyncio.run_coroutine_threadsafe(
+            websocket.send_json({
+                "type": "response",
+                "action": "install_binaries",
+                "request_id": request_id,
+                "ok": True,
+                "data": {"status": "completed", "ffmpeg": True, "ytdlp": True}
+            }),
+            loop
+        )
+    except Exception as exc:
+        asyncio.run_coroutine_threadsafe(
+            websocket.send_json({
+                "type": "response",
+                "action": "install_binaries",
+                "request_id": request_id,
+                "ok": False,
+                "error": str(exc)
+            }),
+            loop
+        )
 
 async def handle_client_action(websocket: WebSocket, action: str, request_id: str, payload: Dict[str, Any]):
     global SETTINGS
@@ -983,6 +1185,20 @@ async def handle_client_action(websocket: WebSocket, action: str, request_id: st
                 "data": {"deleted": task_id}
             })
 
+        elif action == "check_binaries":
+            status = check_binaries_status()
+            await websocket.send_json({
+                "type": "response",
+                "action": action,
+                "request_id": request_id,
+                "ok": True,
+                "data": status
+            })
+
+        elif action == "install_binaries":
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, install_binaries_in_thread, websocket, request_id, loop)
+
         else:
             raise ValueError(f"Unknown action: {action}")
 
@@ -1037,4 +1253,4 @@ async def websocket_progress(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False, log_level="info")
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False, log_level="debug")

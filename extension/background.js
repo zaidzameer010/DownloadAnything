@@ -4,7 +4,11 @@
  *  - Observe webRequest traffic for HLS/DASH/media URLs
  *  - Cache discovered streams per-tab (backed by chrome.storage.session for SW resilience)
  *  - Relay sniffed URLs to content scripts on demand
- *  - Bridge content-script ⇆ FastAPI backend
+ *  - Bridge content-script ⇆ FastAPI backend via WebSocket
+ *
+ * NOTE: WebSocket connections and in-flight requests are intentionally re-created
+ * on every SW activation. The SW can be terminated at any time; chrome.storage.session
+ * backs the only state that must survive a restart (tab stream lists).
  */
 
 const STREAM_REGEX = /\.(m3u8|mpd|mp4|webm|mov|ogg|m4a|ts|mp3|aac|flac|wav|opus|zip|pdf|rar|7z|tar|gz|dmg|exe)(\?|#|$)/i;
@@ -46,11 +50,11 @@ async function recordStream(tabId, url) {
   // Notify content script if present
   try {
     await chrome.tabs.sendMessage(tabId, { type: "STREAM_FOUND", url });
-  } catch { /* content script may not be loaded */ }
+  } catch { /* content script may not be loaded yet */ }
 }
 
 // ── MV3 webRequest — non-blocking, read-only ──────────────────────────────
-// Observes URL patterns to detect HLS/DASH/media requests
+// Observes URL patterns to detect HLS/DASH/media requests.
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return;
@@ -61,46 +65,67 @@ chrome.webRequest.onBeforeRequest.addListener(
 );
 
 // Also catch MediaSource/XHR-loaded manifests via Content-Type header.
-// 'extraHeaders' is required in MV3 to access response headers that are
-// sent with CORS or other protective mechanisms.
+// "responseHeaders" alone is sufficient for Content-Type sniffing;
+// "extraHeaders" is not needed here and adds unnecessary overhead.
 chrome.webRequest.onResponseStarted.addListener(
   (details) => {
     if (details.tabId < 0) return;
     const ct = details.responseHeaders?.find(
       (h) => h.name.toLowerCase() === "content-type"
     );
-    if (ct && /(mpegurl|dash\+xml|video\/|audio\/|application\/pdf|application\/zip|application\/x-7z-compressed|application\/x-rar-compressed|application\/octet-stream)/i.test(ct.value || "")) {
+    if (
+      ct &&
+      /(mpegurl|dash\+xml|video\/|audio\/|application\/pdf|application\/zip|application\/x-7z-compressed|application\/x-rar-compressed|application\/octet-stream)/i.test(
+        ct.value || ""
+      )
+    ) {
       recordStream(details.tabId, details.url);
     }
   },
   { urls: ["http://*/*", "https://*/*"] },
-  ["responseHeaders", "extraHeaders"]
+  ["responseHeaders"] // removed "extraHeaders" — not needed for Content-Type
 );
 
-// ── WebSocket Connection for Service Worker ──────────────────────────────
-let ws = null;
-const pendingRequests = new Map();
-let requestCounter = 0;
+// ── WebSocket helper ──────────────────────────────────────────────────────
+//
+// Service workers are ephemeral. We do NOT cache `ws` across event handler
+// invocations — a cached socket will be stale after a SW restart. Instead,
+// each backend call opens a fresh connection (or reuses the current one if
+// it happens to still be open within the same SW activation), sends the
+// request, and awaits the response. The promise always settles (resolve or
+// reject) so there are no leaks.
+//
+// requestCounter is local to each SW activation; because a restarted SW
+// also gets a fresh WS connection, ID collisions across sessions cannot occur.
 
-function connectWS() {
-  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
-    return;
+let _ws = null;
+let _requestCounter = 0;
+// Map<requestId, { resolve, reject, timeoutId }>
+const _pending = new Map();
+
+const WS_REQUEST_TIMEOUT_MS = 30_000; // 30 s — matches typical backend timeout
+
+function _getOrCreateWS() {
+  if (_ws && (_ws.readyState === WebSocket.OPEN || _ws.readyState === WebSocket.CONNECTING)) {
+    return _ws;
   }
-  const wsUrl = BACKEND_BASE.replace(/^http/, "ws") + "/ws/progress";
-  ws = new WebSocket(wsUrl);
 
-  ws.onmessage = (event) => {
+  const wsUrl = BACKEND_BASE.replace(/^http/, "ws") + "/ws/progress";
+  _ws = new WebSocket(wsUrl);
+
+  _ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
       if (msg.type === "response") {
         const { request_id, ok, data, error } = msg;
-        if (pendingRequests.has(request_id)) {
-          const { resolve, reject } = pendingRequests.get(request_id);
-          pendingRequests.delete(request_id);
+        const pending = _pending.get(request_id);
+        if (pending) {
+          clearTimeout(pending.timeoutId);
+          _pending.delete(request_id);
           if (ok) {
-            resolve(data);
+            pending.resolve(data);
           } else {
-            reject(new Error(error || "Request failed"));
+            pending.reject(new Error(error || "Request failed"));
           }
         }
       }
@@ -109,35 +134,58 @@ function connectWS() {
     }
   };
 
-  ws.onclose = () => {
-    ws = null;
+  _ws.onclose = () => {
+    // Reject all in-flight requests so callers never hang
+    for (const [id, pending] of _pending) {
+      clearTimeout(pending.timeoutId);
+      pending.reject(new Error("WebSocket closed before response"));
+    }
+    _pending.clear();
+    _ws = null;
   };
 
-  ws.onerror = () => {
-    if (ws) ws.close();
-    ws = null;
+  _ws.onerror = () => {
+    // onclose fires immediately after onerror; cleanup happens there
+    if (_ws) _ws.close();
   };
+
+  return _ws;
 }
 
 function sendWSRequest(action, payload = {}) {
   return new Promise((resolve, reject) => {
-    connectWS();
+    const socket = _getOrCreateWS();
 
-    let attempts = 0;
-    const checkAndSend = () => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        const requestId = `ext-${Date.now()}-${requestCounter++}`;
-        pendingRequests.set(requestId, { resolve, reject });
-        ws.send(JSON.stringify({ action, request_id: requestId, payload }));
-      } else if (ws && ws.readyState === WebSocket.CONNECTING && attempts < 50) {
-        attempts++;
-        setTimeout(checkAndSend, 100);
-      } else {
-        reject(new Error("WebSocket server is offline or unreachable"));
+    const requestId = `ext-${Date.now()}-${_requestCounter++}`;
+
+    // Per-request timeout so promises never leak on silent server failures
+    const timeoutId = setTimeout(() => {
+      if (_pending.has(requestId)) {
+        _pending.delete(requestId);
+        reject(new Error("WebSocket request timed out"));
       }
+    }, WS_REQUEST_TIMEOUT_MS);
+
+    _pending.set(requestId, { resolve, reject, timeoutId });
+
+    const doSend = () => {
+      socket.send(JSON.stringify({ action, request_id: requestId, payload }));
     };
 
-    checkAndSend();
+    if (socket.readyState === WebSocket.OPEN) {
+      doSend();
+    } else if (socket.readyState === WebSocket.CONNECTING) {
+      socket.addEventListener("open", doSend, { once: true });
+      socket.addEventListener("error", () => {
+        clearTimeout(timeoutId);
+        _pending.delete(requestId);
+        reject(new Error("WebSocket server is offline or unreachable"));
+      }, { once: true });
+    } else {
+      clearTimeout(timeoutId);
+      _pending.delete(requestId);
+      reject(new Error("WebSocket server is offline or unreachable"));
+    }
   });
 }
 
@@ -147,27 +195,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const tabId = sender.tab?.id ?? msg.tabId;
     const set = tabStreams.get(tabId);
     sendResponse({ urls: set ? Array.from(set) : [] });
-    return true;
+    return; // synchronous — no need to return true
   }
 
   if (msg.type === "EXTRACT") {
-    sendWSRequest("extract", { url: msg.url, page_title: msg.page_title })
-      .then((data) => sendResponse({ ok: true, data }))
-      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    (async () => {
+      try {
+        const data = await sendWSRequest("extract", { url: msg.url, page_title: msg.page_title });
+        sendResponse({ ok: true, data });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
     return true; // keep channel open for async response
   }
 
   if (msg.type === "DOWNLOAD") {
-    sendWSRequest("download", msg.payload)
-      .then((data) => sendResponse({ ok: true, data }))
-      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    (async () => {
+      try {
+        const data = await sendWSRequest("download", msg.payload);
+        sendResponse({ ok: true, data });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
     return true;
   }
 
   if (msg.type === "GET_SETTINGS") {
-    sendWSRequest("get_settings", {})
-      .then((data) => sendResponse({ ok: true, data }))
-      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    (async () => {
+      try {
+        const data = await sendWSRequest("get_settings", {});
+        sendResponse({ ok: true, data });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
     return true;
   }
 });
@@ -181,6 +244,6 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 });
 
 // ── Service worker lifecycle ──────────────────────────────────────────────
-chrome.runtime.onStartup?.addListener?.(() => {
+chrome.runtime.onStartup.addListener(() => {
   console.info("[StreamSnatcher] Service worker initialised");
 });

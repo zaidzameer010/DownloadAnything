@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Media Acquisition Engine</title>
+  <title>DownloadAnything</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
@@ -67,18 +67,39 @@
       <!-- Active Queue View -->
       <div class="view-panel active" id="view-downloads">
         <section class="card">
-          <h2><i data-lucide="list-video"></i> Downloads</h2>
+          <div class="download-header-actions">
+            <h2><i data-lucide="list-video"></i> Downloads</h2>
+            <div class="header-search-bar">
+              <i data-lucide="search" class="search-icon"></i>
+              <input type="text" id="task-search" placeholder="Search downloads by title or URL..." autocomplete="off" />
+            </div>
+          </div>
+          
+          <div class="download-filters">
+            <div class="filter-group" id="download-category-filters">
+              <button class="filter-btn active" data-filter="all">All</button>
+              <button class="filter-btn" data-filter="Videos">Videos</button>
+              <button class="filter-btn" data-filter="Courses">Courses</button>
+              <button class="filter-btn" data-filter="Music">Music</button>
+              <button class="filter-btn" data-filter="Cinematic">Cinematic</button>
+            </div>
+            
+            <button class="ghost danger" id="clear-completed-btn" style="padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; height: 32px;">
+              <i data-lucide="trash-2" style="width: 14px; height: 14px;"></i> Clear Completed
+            </button>
+          </div>
+
           <table>
             <thead>
               <tr>
                 <th class="checkbox-col"><input type="checkbox" id="select-all-tasks" style="cursor:pointer;" /></th>
-                <th style="width:70px;">Progress</th>
-                <th>Title</th>
-                <th>Size</th>
-                <th>Speed</th>
-                <th>ETA</th>
+                <th class="progress-col">Progress</th>
+                <th class="title-col">Title</th>
+                <th class="size-col">Size</th>
+                <th class="speed-col">Speed</th>
+                <th class="eta-col">ETA</th>
                 <th class="status-col">Status</th>
-                <th>Location</th>
+                <th class="location-col">Location</th>
               </tr>
             </thead>
             <tbody id="task-body"></tbody>
@@ -88,33 +109,117 @@
 
       <!-- Configuration View -->
       <div class="view-panel" id="view-settings">
-        <section class="card">
+        <section class="card settings-card">
           <h2><i data-lucide="settings"></i> Configuration</h2>
-          <div class="form-row">
-            <label>Max Concurrent Downloads</label>
-            <input type="number" id="set-concurrency" min="1" max="16" />
+          
+          <div class="settings-layout">
+            <!-- Left panel: Sub-tabs -->
+            <div class="settings-tabs">
+              <button class="settings-tab-btn active" data-settings-tab="general">
+                <i data-lucide="sliders"></i> General
+              </button>
+              <button class="settings-tab-btn" data-settings-tab="ytdlp">
+                <i data-lucide="terminal"></i> yt-dlp Settings
+              </button>
+              <button class="settings-tab-btn" data-settings-tab="categories">
+                <i data-lucide="folder-heart"></i> Categories
+              </button>
+            </div>
+            
+            <!-- Right panel: Active view -->
+            <div class="settings-content">
+              <!-- General Settings tab -->
+              <div class="settings-tab-content active" id="stab-general">
+                <div class="form-row">
+                  <label>Max Concurrent Downloads</label>
+                  <input type="number" id="set-concurrency" min="1" max="16" />
+                </div>
+                <div class="form-row">
+                  <label>Merge Container</label>
+                  <select id="set-merge">
+                    <option value="mp4">MP4</option>
+                    <option value="mkv">MKV</option>
+                    <option value="webm">WebM</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label>Default Path</label>
+                  <input type="text" id="set-default-path" />
+                </div>
+              </div>
+              
+              <!-- yt-dlp Settings tab -->
+              <div class="settings-tab-content" id="stab-ytdlp">
+                <div class="form-row">
+                  <label>Concurrent Fragments (-N)</label>
+                  <input type="number" id="set-concurrent-fragments" placeholder="e.g. 16 (default)" min="1" max="64" />
+                </div>
+                
+                <div class="form-row">
+                  <label>Speed Limit (KB/s)</label>
+                  <input type="number" id="set-speed-limit" placeholder="e.g. 1024 (0 for unlimited)" min="0" />
+                </div>
+                
+                <div class="form-row">
+                  <label>Proxy Server</label>
+                  <input type="text" id="set-proxy" placeholder="e.g. socks5://127.0.0.1:1080" />
+                </div>
+                
+                <div class="form-row">
+                  <label>Load Cookies From Browser</label>
+                  <select id="set-cookies-browser">
+                    <option value="none">None</option>
+                    <option value="chrome">Chrome</option>
+                    <option value="firefox">Firefox</option>
+                    <option value="safari">Safari</option>
+                    <option value="edge">Edge</option>
+                    <option value="opera">Opera</option>
+                    <option value="brave">Brave</option>
+                    <option value="vivaldi">Vivaldi</option>
+                  </select>
+                </div>
+                
+                <div class="toggle-row">
+                  <div class="toggle-info">
+                    <span class="toggle-label" style="font-weight:600;font-size:0.85rem;">Embed Thumbnail</span>
+                    <p style="font-size:0.75rem;color:var(--muted);margin-top:2px;">Embed the best video thumbnail artwork as video cover art</p>
+                  </div>
+                  <label class="toggle">
+                    <input type="checkbox" id="set-embed-thumbnail" />
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                
+                <div class="toggle-row">
+                  <div class="toggle-info">
+                    <span class="toggle-label" style="font-weight:600;font-size:0.85rem;">Embed Subtitles</span>
+                    <p style="font-size:0.75rem;color:var(--muted);margin-top:2px;">Download subtitles and embed them directly into video file</p>
+                  </div>
+                  <label class="toggle">
+                    <input type="checkbox" id="set-embed-subtitles" />
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                
+                <div class="form-row" id="subtitle-lang-row" style="margin-top: 1rem; display: none;">
+                  <label>Subtitle Language Code</label>
+                  <input type="text" id="set-subtitle-lang" placeholder="e.g. en, es, fr" value="en" />
+                </div>
+              </div>
+              
+              <!-- Categories Mapping tab -->
+              <div class="settings-tab-content" id="stab-categories">
+                <div class="cat-list" id="cat-list"></div>
+                <button class="ghost" id="add-cat" style="width:100%;margin-bottom:1rem;">
+                  <i data-lucide="plus" style="width:16px;height:16px;"></i> Add Category
+                </button>
+              </div>
+              
+              <button class="primary" id="save-settings" style="width:100%;margin-top:1.5rem;">
+                <i data-lucide="save" style="width:16px;height:16px;"></i> Save Settings
+              </button>
+            </div>
           </div>
-          <div class="form-row">
-            <label>Merge Container</label>
-            <select id="set-merge">
-              <option value="mp4">MP4</option>
-              <option value="mkv">MKV</option>
-              <option value="webm">WebM</option>
-            </select>
-          </div>
-          <div class="form-row">
-            <label>Default Path</label>
-            <input type="text" id="set-default-path" />
-          </div>
-
-          <h2 style="margin-top:2rem;"><i data-lucide="folder-heart"></i> Categories</h2>
-          <div class="cat-list" id="cat-list"></div>
-          <button class="ghost" id="add-cat" style="width:100%;margin-bottom:1rem;">
-            <i data-lucide="plus" style="width:16px;height:16px;"></i> Add Category
-          </button>
-          <button class="primary" id="save-settings" style="width:100%;">
-            <i data-lucide="save" style="width:16px;height:16px;"></i> Save Settings
-          </button>
         </section>
       </div>
     </main>
@@ -137,6 +242,38 @@
       <button class="ghost" id="bulk-remove" title="Remove selected from list"><i data-lucide="trash-2" style="width:14px;height:14px;"></i> Remove</button>
       <button class="ghost danger" id="bulk-delete" title="Delete selected files from disk"><i data-lucide="file-x" style="width:14px;height:14px;"></i> Delete Files</button>
       <button class="ghost" id="bulk-clear" style="padding: 8px 12px; font-size: 11px;">Clear</button>
+    </div>
+  <!-- Onboarding Setup Overlay -->
+  <div id="onboarding-overlay" class="onboarding-overlay" style="display: none;">
+    <div class="onboarding-card">
+      <h2><i data-lucide="shield-alert"></i> Setting up DownloadAnything</h2>
+      <p>Before snatching media, we need to ensure that the required utilities (<code>ffmpeg</code> and <code>yt-dlp</code>) are installed and configured on your system.</p>
+      
+      <div class="onboarding-status-list">
+        <div class="onboarding-status-item" id="status-ffmpeg">
+          <div class="status-info">
+            <span class="status-name">FFmpeg (Audio & Video Merger)</span>
+            <span class="status-val" id="val-ffmpeg">Checking...</span>
+          </div>
+          <div class="status-progress-bar" style="display: none;"><div class="bar-fill" id="fill-ffmpeg"></div></div>
+        </div>
+        
+        <div class="onboarding-status-item" id="status-ytdlp">
+          <div class="status-info">
+            <span class="status-name">yt-dlp (Media Stream Downloader)</span>
+            <span class="status-val" id="val-ytdlp">Checking...</span>
+          </div>
+          <div class="status-progress-bar" style="display: none;"><div class="bar-fill" id="fill-ytdlp"></div></div>
+        </div>
+      </div>
+      
+      <div id="onboarding-error" style="display: none; color: var(--danger); font-size: 0.85rem; font-weight: 500; margin-top: 5px; text-align: center;"></div>
+
+      <div class="onboarding-actions">
+        <button id="btn-onboarding-install" class="primary" style="display: none;">
+          <i data-lucide="download-cloud"></i> Install Required Tools
+        </button>
+      </div>
     </div>
   </div>
 

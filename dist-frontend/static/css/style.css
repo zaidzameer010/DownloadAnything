@@ -129,7 +129,26 @@ body {
     height: auto;
     border-right: none;
     border-bottom: 1px solid var(--border);
-    padding: 1.5rem;
+    padding: 1rem 1.5rem;
+    flex-direction: row;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 2.5rem;
+  }
+  .sidebar-brand {
+    margin-bottom: 0;
+  }
+  .sidebar-menu {
+    flex-direction: row;
+    gap: 8px;
+    flex: 0;
+  }
+  .sidebar-menu .menu-item {
+    width: auto;
+    padding: 10px 14px;
+  }
+  .sidebar-footer {
+    display: none;
   }
   .main-content {
     margin-left: 0;

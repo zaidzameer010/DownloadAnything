@@ -4,10 +4,12 @@
 export const API = "http://127.0.0.1:8000";
 
 let ws = null;
-const pendingRequests = new Map();
+const pendingRequests = new Map(); // requestId -> { resolve, reject, timeoutId }
 let requestCounter = 0;
 
-export function connectWebSocket(onMessage, onClose) {
+const WS_REQUEST_TIMEOUT_MS = 30_000;
+
+export function connectWebSocket(onOpen, onMessage, onClose) {
   const loc = window.location;
   const wsProto = loc.protocol === "https:" ? "wss:" : "ws:";
   const host = API ? API.replace(/^https?:\/\//, "") : loc.host;
@@ -15,20 +17,25 @@ export function connectWebSocket(onMessage, onClose) {
 
   ws = new WebSocket(wsUrl);
 
+  ws.onopen = () => {
+    if (onOpen) onOpen();
+  };
+
   ws.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
-      if (msg.type === "tasks") {
+      if (msg.type === "tasks" || msg.type === "onboarding") {
         onMessage(msg);
       } else if (msg.type === "response") {
         const { request_id, ok, data, error } = msg;
-        if (pendingRequests.has(request_id)) {
-          const { resolve, reject } = pendingRequests.get(request_id);
+        const pending = pendingRequests.get(request_id);
+        if (pending) {
+          clearTimeout(pending.timeoutId);
           pendingRequests.delete(request_id);
           if (ok) {
-            resolve(data);
+            pending.resolve(data);
           } else {
-            reject(new Error(error || "Request failed"));
+            pending.reject(new Error(error || "Request failed"));
           }
         }
       }
@@ -38,11 +45,18 @@ export function connectWebSocket(onMessage, onClose) {
   };
 
   ws.onclose = () => {
+    // Reject all in-flight requests so callers never hang indefinitely
+    for (const [, pending] of pendingRequests) {
+      clearTimeout(pending.timeoutId);
+      pending.reject(new Error("WebSocket disconnected"));
+    }
+    pendingRequests.clear();
     ws = null;
     onClose();
   };
 
   ws.onerror = () => {
+    // onclose fires immediately after onerror; cleanup happens there
     if (ws) ws.close();
   };
 
@@ -56,7 +70,16 @@ function sendWSRequest(action, payload = {}) {
       return;
     }
     const requestId = `web-${Date.now()}-${requestCounter++}`;
-    pendingRequests.set(requestId, { resolve, reject });
+
+    // Per-request timeout so promises never leak on silent server failures
+    const timeoutId = setTimeout(() => {
+      if (pendingRequests.has(requestId)) {
+        pendingRequests.delete(requestId);
+        reject(new Error("Request timed out"));
+      }
+    }, WS_REQUEST_TIMEOUT_MS);
+
+    pendingRequests.set(requestId, { resolve, reject, timeoutId });
     ws.send(JSON.stringify({ action, request_id: requestId, payload }));
   });
 }
@@ -91,4 +114,12 @@ export async function resumeTask(id) {
 
 export async function revealTask(id) {
   return sendWSRequest("reveal", { task_id: id });
+}
+
+export async function checkBinaries() {
+  return sendWSRequest("check_binaries");
+}
+
+export async function installBinaries() {
+  return sendWSRequest("install_binaries");
 }

@@ -1,7 +1,9 @@
 import { cancelTask, deleteTask, saveSettings, pauseTask, resumeTask, revealTask } from "./api.js";
-import { updateSettings, notify, getState, switchTab } from "./state.js";
+import { updateSettings, notify, getState, switchTab, triggerBinaryInstall } from "./state.js";
 
 const selectedTaskIds = new Set();
+let currentCategoryFilter = "all";
+let currentSearchQuery = "";
 
 // ── Formatting Utilities ───────────────────────────────────────────────────
 export function fmtBytes(b) {
@@ -43,31 +45,94 @@ export function showToast(msg) {
   setTimeout(() => t.classList.remove("show"), 2200);
 }
 
-// ── Expose Global Callbacks for inline table markup ────────────────────────
-window.uiCancelTask = async (id) => {
-  try {
-    await cancelTask(id);
-    showToast("Cancellation requested");
-  } catch (err) {
-    showToast("Failed to cancel task");
-  }
-};
-
-window.uiDeleteTask = async (id) => {
-  try {
-    await deleteTask(id);
-    showToast("Task removed");
-  } catch (err) {
-    showToast("Failed to delete task");
-  }
-};
+// ── Window-Exposed Callbacks used from context menu (data-attr delegation) ─
+// uiCancelTask / uiDeleteTask were formerly used from inline onclick;
+// they are now dead — context menu uses uiRemoveTaskOnly / uiDeleteTaskAndFile.
 
 // ── Render Views ───────────────────────────────────────────────────────────
+export function renderOnboarding(state) {
+  const overlay = document.getElementById("onboarding-overlay");
+  if (!overlay) return;
+
+  if (!state.onboarding || !state.onboarding.visible) {
+    overlay.style.display = "none";
+    return;
+  }
+
+  overlay.style.display = "flex";
+
+  const renderStatus = (binaryKey, valElId, barElId, fillElId) => {
+    const bin = state.onboarding[binaryKey];
+    const valEl = document.getElementById(valElId);
+    const barEl = document.getElementById(barElId)?.querySelector(".status-progress-bar");
+    const fillEl = document.getElementById(fillElId);
+
+    if (!valEl) return;
+
+    valEl.className = "status-val";
+
+    if (bin.status === "checking") {
+      valEl.textContent = "Checking...";
+    } else if (bin.status === "installed") {
+      valEl.textContent = "Installed";
+      valEl.classList.add("installed");
+      if (barEl) barEl.style.display = "none";
+    } else if (bin.status === "missing") {
+      valEl.textContent = "Not Installed";
+      valEl.classList.add("missing");
+      if (barEl) barEl.style.display = "none";
+    } else if (bin.status === "downloading") {
+      valEl.textContent = `Downloading (${bin.progress}%)`;
+      valEl.classList.add("downloading");
+      if (barEl) barEl.style.display = "block";
+      if (fillEl) fillEl.style.width = `${bin.progress}%`;
+    } else if (bin.status === "extracting") {
+      valEl.textContent = "Extracting...";
+      valEl.classList.add("downloading");
+      if (barEl) barEl.style.display = "block";
+      if (fillEl) fillEl.style.width = "100%";
+    }
+  };
+
+  renderStatus("ffmpeg", "val-ffmpeg", "status-ffmpeg", "fill-ffmpeg");
+  renderStatus("ytdlp", "val-ytdlp", "status-ytdlp", "fill-ytdlp");
+
+  const errorEl = document.getElementById("onboarding-error");
+  if (errorEl) {
+    if (state.onboarding.error) {
+      errorEl.textContent = `Error: ${state.onboarding.error}`;
+      errorEl.style.display = "block";
+    } else {
+      errorEl.style.display = "none";
+    }
+  }
+
+  const installBtn = document.getElementById("btn-onboarding-install");
+  if (installBtn) {
+    const eitherMissing = state.onboarding.ffmpeg.status === "missing" || state.onboarding.ytdlp.status === "missing";
+    
+    if (state.onboarding.installing) {
+      installBtn.style.display = "inline-flex";
+      installBtn.disabled = true;
+      installBtn.innerHTML = '<i data-lucide="loader" class="spin" style="animation: spin 1s linear infinite; margin-right: 8px;"></i> Installing...';
+    } else if (eitherMissing) {
+      installBtn.style.display = "inline-flex";
+      installBtn.disabled = false;
+      installBtn.innerHTML = '<i data-lucide="download-cloud"></i> Install Required Tools';
+    } else {
+      installBtn.style.display = "none";
+    }
+    
+    if (window.lucide) window.lucide.createIcons();
+  }
+}
+
 export function renderDashboard(state) {
   renderOfflineBanner(state);
   renderMeta(state);
   renderNavigation(state);
   renderActiveView(state);
+  renderOnboarding(state);
 
   if (state.activeTab === "downloads") {
     renderTasks(state);
@@ -127,10 +192,49 @@ function renderMeta(state) {
   if (ydlp) ydlp.textContent = state.health.yt_dlp_version;
 }
 
+function renderCategoryFilters(state) {
+  const container = document.getElementById("download-category-filters");
+  if (!container) return;
+
+  const categories = Object.keys(state.settings.categories || {});
+  const hash = categories.join(",");
+  if (container.dataset.categoriesHash === hash) {
+    // Just update active class
+    container.querySelectorAll(".filter-btn").forEach(btn => {
+      if (btn.dataset.filter === currentCategoryFilter) {
+        btn.classList.add("active");
+      } else {
+        btn.classList.remove("active");
+      }
+    });
+    return;
+  }
+
+  container.dataset.categoriesHash = hash;
+  let html = `<button class="filter-btn ${currentCategoryFilter === "all" ? "active" : ""}" data-filter="all">All</button>`;
+  categories.forEach(cat => {
+    html += `<button class="filter-btn ${currentCategoryFilter === cat ? "active" : ""}" data-filter="${escapeHtml(cat)}">${escapeHtml(cat)}</button>`;
+  });
+  container.innerHTML = html;
+
+  container.querySelectorAll(".filter-btn").forEach(btn => {
+    btn.onclick = () => {
+      currentCategoryFilter = btn.dataset.filter;
+      container.querySelectorAll(".filter-btn").forEach(b => {
+        b.classList.toggle("active", b.dataset.filter === currentCategoryFilter);
+      });
+      renderTasks(getState());
+    };
+  });
+}
+
 function renderTasks(state) {
   const tbody = document.getElementById("task-body");
   const activeCountEl = document.getElementById("meta-active");
   if (!tbody) return;
+
+  // Render category filters dynamically
+  renderCategoryFilters(state);
 
   // Clean up selected task IDs that no longer exist
   const currentIds = new Set(state.tasks.map(t => t.task_id));
@@ -138,6 +242,22 @@ function renderTasks(state) {
     if (!currentIds.has(id)) {
       selectedTaskIds.delete(id);
     }
+  }
+
+  // Filter tasks by category
+  let filteredTasks = state.tasks;
+  if (currentCategoryFilter !== "all") {
+    filteredTasks = filteredTasks.filter(t => t.category === currentCategoryFilter);
+  }
+
+  // Filter tasks by search query
+  if (currentSearchQuery.trim()) {
+    const query = currentSearchQuery.toLowerCase().trim();
+    filteredTasks = filteredTasks.filter(t => {
+      const title = (t.title || "").toLowerCase();
+      const url = (t.url || "").toLowerCase();
+      return title.includes(query) || url.includes(query);
+    });
   }
 
   if (!state.tasks.length) {
@@ -148,10 +268,21 @@ function renderTasks(state) {
     return;
   }
 
+  if (!filteredTasks.length) {
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px;font-weight:500;">No matching downloads found</td></tr>`;
+    if (activeCountEl) {
+      const active = state.tasks.filter(t => t.status === "downloading").length;
+      activeCountEl.textContent = String(active);
+    }
+    updateSelectionUI();
+    if (window.lucide) window.lucide.createIcons();
+    return;
+  }
+
   const active = state.tasks.filter(t => t.status === "downloading").length;
   if (activeCountEl) activeCountEl.textContent = String(active);
 
-  tbody.innerHTML = state.tasks.map(t => {
+  tbody.innerHTML = filteredTasks.map(t => {
     const r = 16;
     const c = 2 * Math.PI * r;
     const off = c - (t.progress / 100) * c;
@@ -185,7 +316,8 @@ function renderTasks(state) {
         <td class="checkbox-col">
           <input type="checkbox" class="task-checkbox" data-id="${t.task_id}" ${isSelected ? "checked" : ""} style="cursor:pointer;" />
         </td>
-        <td>
+        <td class="progress-col">
+          ${t.status === "completed" ? "—" : `
           <div class="progress-ring">
             <svg width="36" height="36">
               <circle class="bg" cx="18" cy="18" r="${r}" fill="none" stroke-width="3"/>
@@ -193,24 +325,33 @@ function renderTasks(state) {
                 stroke-dasharray="${c}" stroke-dashoffset="${off}"/>
             </svg>
             <span>${Math.round(t.progress)}%</span>
-          </div>
+          </div>`}
         </td>
-        <td title="${t.url}" style="font-weight:600;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(t.title || t.url)}</td>
-        <td>${fmtBytes(t.total_bytes || t.downloaded_bytes)}</td>
-        <td>${fmtSpeed(t.speed)}</td>
-        <td>${fmtETA(t.eta)}</td>
+        <td class="title-col" title="${escapeHtml(t.title || t.url)}">${escapeHtml(t.title || t.url)}</td>
+        <td class="size-col">${fmtBytes(t.total_bytes || t.downloaded_bytes)}</td>
+        <td class="speed-col">${fmtSpeed(t.speed)}</td>
+        <td class="eta-col">${fmtETA(t.eta)}</td>
         <td class="status-col"><span class="badge ${t.status}">${badgeIcon}${t.status}</span></td>
-        <td title="${loc}" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:11px;">${escapeHtml(loc)}</td>
+        <td class="location-col" title="${escapeHtml(loc)}">${escapeHtml(loc)}</td>
       </tr>`;
   }).join("");
 
   updateSelectionUI();
+  if (window.lucide) window.lucide.createIcons();
 }
 
 function renderSettingsForm(state) {
   const conc = document.getElementById("set-concurrency");
   const merge = document.getElementById("set-merge");
   const path = document.getElementById("set-default-path");
+  const concurrentFragments = document.getElementById("set-concurrent-fragments");
+  const speedLimit = document.getElementById("set-speed-limit");
+  const proxy = document.getElementById("set-proxy");
+  const cookiesBrowser = document.getElementById("set-cookies-browser");
+  const embedThumbnail = document.getElementById("set-embed-thumbnail");
+  const embedSubtitles = document.getElementById("set-embed-subtitles");
+  const subtitleLang = document.getElementById("set-subtitle-lang");
+  const subtitleLangRow = document.getElementById("subtitle-lang-row");
 
   if (conc && document.activeElement !== conc) {
     conc.value = state.settings.max_concurrent_downloads || 3;
@@ -220,6 +361,31 @@ function renderSettingsForm(state) {
   }
   if (path && document.activeElement !== path) {
     path.value = state.settings.default_download_path || "";
+  }
+  if (concurrentFragments && document.activeElement !== concurrentFragments) {
+    concurrentFragments.value = state.settings.concurrent_fragments || 16;
+  }
+  if (speedLimit && document.activeElement !== speedLimit) {
+    const bytes = state.settings.rate_limit_bytes_per_sec || 0;
+    speedLimit.value = bytes ? Math.round(bytes / 1024) : "";
+  }
+  if (proxy && document.activeElement !== proxy) {
+    proxy.value = state.settings.proxy || "";
+  }
+  if (cookiesBrowser && document.activeElement !== cookiesBrowser) {
+    cookiesBrowser.value = state.settings.cookies_from_browser || "none";
+  }
+  if (embedThumbnail && document.activeElement !== embedThumbnail) {
+    embedThumbnail.checked = !!state.settings.embed_thumbnail;
+  }
+  if (embedSubtitles && document.activeElement !== embedSubtitles) {
+    embedSubtitles.checked = !!state.settings.embed_subtitles;
+    if (subtitleLangRow) {
+      subtitleLangRow.style.display = embedSubtitles.checked ? "flex" : "none";
+    }
+  }
+  if (subtitleLang && document.activeElement !== subtitleLang) {
+    subtitleLang.value = state.settings.subtitle_language || "en";
   }
 }
 
@@ -326,39 +492,55 @@ export function showContextMenu(taskId, x, y) {
 
   const isDownloading = task.status === "downloading" || task.status === "queued";
   const isPaused = task.status === "paused";
-  const isFinished = task.status === "completed";
-  
-  let html = "";
-  
+
+  // Build menu items using DOM (not innerHTML) so taskId is never embedded in
+  // attribute strings — avoids any potential XSS from unexpected ID formats.
+  menu.innerHTML = "";
+
+  const addItem = (icon, label, cls, handler) => {
+    const btn = document.createElement("button");
+    btn.className = cls ? `context-menu-item ${cls}` : "context-menu-item";
+    btn.dataset.taskId = taskId;
+    const ico = document.createElement("i");
+    ico.setAttribute("data-lucide", icon);
+    btn.appendChild(ico);
+    btn.append(` ${label}`);
+    btn.addEventListener("click", handler);
+    menu.appendChild(btn);
+  };
+
+  const addDivider = () => {
+    const d = document.createElement("div");
+    d.className = "context-menu-divider";
+    menu.appendChild(d);
+  };
+
   if (isDownloading) {
-    html += `<button class="context-menu-item" onclick="window.uiPauseTask('${taskId}')"><i data-lucide="pause"></i> Pause</button>`;
+    addItem("pause", "Pause", "", () => window.uiPauseTask(taskId));
   } else if (isPaused) {
-    html += `<button class="context-menu-item" onclick="window.uiResumeTask('${taskId}')"><i data-lucide="play"></i> Resume</button>`;
+    addItem("play", "Resume", "", () => window.uiResumeTask(taskId));
   } else if (task.status === "cancelled" || task.status === "error") {
-    html += `<button class="context-menu-item" onclick="window.uiResumeTask('${taskId}')"><i data-lucide="refresh-cw"></i> Restart / Resume</button>`;
+    addItem("refresh-cw", "Restart / Resume", "", () => window.uiResumeTask(taskId));
   }
 
-  html += `<button class="context-menu-item" onclick="window.uiRevealTask('${taskId}')"><i data-lucide="folder-open"></i> Reveal in Finder</button>`;
-  
-  html += `<div class="context-menu-divider"></div>`;
-  html += `<button class="context-menu-item" onclick="window.uiRemoveTaskOnly('${taskId}')"><i data-lucide="trash-2"></i> Remove from list</button>`;
-  html += `<button class="context-menu-item danger" onclick="window.uiDeleteTaskAndFile('${taskId}')"><i data-lucide="file-x"></i> Delete File</button>`;
+  addItem("folder-open", "Reveal in Finder", "", () => window.uiRevealTask(taskId));
+  addDivider();
+  addItem("trash-2", "Remove from list", "", () => window.uiRemoveTaskOnly(taskId));
+  addItem("file-x", "Delete File", "danger", () => window.uiDeleteTaskAndFile(taskId));
 
-  menu.innerHTML = html;
   menu.style.display = "flex";
-  
-  // Position menu
-  const menuWidth = 190;
-  const menuHeight = menu.offsetHeight || 200;
+
+  // Measure after display so offsetHeight is accurate
+  const menuWidth = menu.offsetWidth || 190;
+  const menuHeight = menu.offsetHeight || 160;
   const windowWidth = window.innerWidth;
   const windowHeight = window.innerHeight;
-  
+
   let left = x;
   let top = y;
-  
   if (x + menuWidth > windowWidth) left = windowWidth - menuWidth - 10;
   if (y + menuHeight > windowHeight) top = windowHeight - menuHeight - 10;
-  
+
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
 
@@ -591,6 +773,36 @@ export function setupUIEventListeners() {
     navSettings.onclick = () => switchTab("settings");
   }
 
+  // Settings view sub-tabs toggling
+  const settingsTabButtons = document.querySelectorAll(".settings-tab-btn");
+  settingsTabButtons.forEach(btn => {
+    btn.onclick = () => {
+      const tabName = btn.dataset.settingsTab;
+      
+      // Update active button
+      settingsTabButtons.forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      
+      // Update active content
+      const tabContents = document.querySelectorAll(".settings-tab-content");
+      tabContents.forEach(c => c.classList.remove("active"));
+      
+      const targetContent = document.getElementById(`stab-${tabName}`);
+      if (targetContent) {
+        targetContent.classList.add("active");
+      }
+    };
+  });
+
+  // Toggle subtitle language input display dynamically
+  const embedSubtitlesCb = document.getElementById("set-embed-subtitles");
+  const subtitleLangRow = document.getElementById("subtitle-lang-row");
+  if (embedSubtitlesCb && subtitleLangRow) {
+    embedSubtitlesCb.onchange = (e) => {
+      subtitleLangRow.style.display = e.target.checked ? "flex" : "none";
+    };
+  }
+
   if (addCatBtn) {
     addCatBtn.onclick = () => {
       const stateVal = getState();
@@ -607,11 +819,28 @@ export function setupUIEventListeners() {
       const concEl = document.getElementById("set-concurrency");
       const mergeEl = document.getElementById("set-merge");
       const pathEl = document.getElementById("set-default-path");
+      const concurrentFragmentsEl = document.getElementById("set-concurrent-fragments");
+      const speedLimitEl = document.getElementById("set-speed-limit");
+      const proxyEl = document.getElementById("set-proxy");
+      const cookiesBrowserEl = document.getElementById("set-cookies-browser");
+      const embedThumbnailEl = document.getElementById("set-embed-thumbnail");
+      const embedSubtitlesEl = document.getElementById("set-embed-subtitles");
+      const subtitleLangEl = document.getElementById("set-subtitle-lang");
+
+      const speedLimitKb = speedLimitEl ? parseInt(speedLimitEl.value, 10) : 0;
+      const rateLimitBytes = speedLimitKb > 0 ? speedLimitKb * 1024 : 0;
 
       const payload = {
         max_concurrent_downloads: concEl ? parseInt(concEl.value, 10) : 3,
         merge_output_format: mergeEl ? mergeEl.value : "mp4",
         default_download_path: pathEl ? pathEl.value : "",
+        concurrent_fragments: concurrentFragmentsEl ? parseInt(concurrentFragmentsEl.value, 10) : 16,
+        rate_limit_bytes_per_sec: rateLimitBytes,
+        proxy: proxyEl ? proxyEl.value.trim() : "",
+        cookies_from_browser: cookiesBrowserEl ? cookiesBrowserEl.value : "none",
+        embed_thumbnail: embedThumbnailEl ? embedThumbnailEl.checked : false,
+        embed_subtitles: embedSubtitlesEl ? embedSubtitlesEl.checked : false,
+        subtitle_language: subtitleLangEl ? subtitleLangEl.value.trim() : "en",
         categories: stateVal.settings.categories || {}
       };
 
@@ -622,6 +851,55 @@ export function setupUIEventListeners() {
       } catch (err) {
         showToast("Failed to save settings");
       }
+    };
+  }
+
+  const taskSearch = document.getElementById("task-search");
+  const clearCompletedBtn = document.getElementById("clear-completed-btn");
+
+  if (taskSearch) {
+    taskSearch.oninput = (e) => {
+      currentSearchQuery = e.target.value;
+      renderTasks(getState());
+    };
+  }
+
+  if (clearCompletedBtn) {
+    clearCompletedBtn.onclick = async () => {
+      const stateVal = getState();
+      const completedTasks = stateVal.tasks.filter(t => 
+        t.status === "completed" || t.status === "error" || t.status === "cancelled"
+      );
+      
+      if (completedTasks.length === 0) {
+        showToast("No completed or stopped tasks to clear");
+        return;
+      }
+
+      let successCount = 0;
+      clearCompletedBtn.disabled = true;
+      try {
+        await Promise.all(completedTasks.map(async (t) => {
+          try {
+            await deleteTask(t.task_id, false);
+            successCount++;
+          } catch (err) {
+            console.error(`Failed to clear task ${t.task_id}`, err);
+          }
+        }));
+        showToast(`Cleared ${successCount} completed/stopped tasks`);
+      } catch (err) {
+        showToast("Failed to clear tasks");
+      } finally {
+        clearCompletedBtn.disabled = false;
+      }
+    };
+  }
+
+  const onboardingInstallBtn = document.getElementById("btn-onboarding-install");
+  if (onboardingInstallBtn) {
+    onboardingInstallBtn.onclick = () => {
+      triggerBinaryInstall();
     };
   }
 }

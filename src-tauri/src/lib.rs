@@ -1,3 +1,4 @@
+use tauri::Manager;
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandEvent;
 
@@ -14,9 +15,13 @@ pub fn run() {
         )?;
       }
 
-      // Spawn the Python sidecar backend
+      // Spawn the Python sidecar backend.
+      // IMPORTANT: `child` must be kept alive for the entire app lifetime —
+      // dropping it here would immediately kill the sidecar process.
       let sidecar_command = app.shell().sidecar("main")?;
-      let (mut rx, _child) = sidecar_command.spawn()?;
+      let (mut rx, child) = sidecar_command.spawn()?;
+      // Store child on app state so it is not dropped
+      app.manage(child);
 
       tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {

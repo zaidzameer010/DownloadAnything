@@ -73,20 +73,20 @@
     if (parent.shadowRoot?.contains(mediaEl)) {
       return parent.shadowRoot;
     }
-    
+
     let current = mediaEl.parentElement;
     let player = mediaEl.parentElement || document.body;
-    
+
     while (current && current !== document.body) {
       const className = current.className ? String(current.className).toLowerCase() : "";
       const idName = current.id ? String(current.id).toLowerCase() : "";
-      
+
       if (
-        className.includes("player") || 
-        className.includes("video-container") || 
+        className.includes("player") ||
+        className.includes("video-container") ||
         className.includes("video-wrap") ||
         className.includes("video-player") ||
-        idName.includes("player") || 
+        idName.includes("player") ||
         idName.includes("video-container") ||
         idName.includes("video-wrap")
       ) {
@@ -98,11 +98,41 @@
   }
 
   // ── Overlay button injected onto each media element ──────────────────────
+  function getMediaTitle() {
+    // 1. Open Graph title — most reliable for YouTube, Vimeo, Twitch, etc.
+    const og = document.querySelector("meta[property='og:title']");
+    if (og?.content?.trim()) return og.content.trim();
+
+    // 2. Twitter card title
+    const tw = document.querySelector("meta[name='twitter:title']");
+    if (tw?.content?.trim()) return tw.content.trim();
+
+    // 3. Main page <h1> that isn't inside the player / sidebar
+    const h1 = document.querySelector("h1");
+    if (h1?.textContent?.trim()) return h1.textContent.trim();
+
+    // 4. document.title, stripped of common " - SiteName" / "| SiteName" suffixes
+    const raw = document.title || "";
+    const stripped = raw
+      .replace(/\s*[-|·•–—]\s*(YouTube|Vimeo|Twitch|Dailymotion|Twitter|X|Facebook|Instagram|TikTok|Reddit|Bilibili|Rumble|Odysee|PeerTube|Niconico|SoundCloud|Spotify|Netflix|Prime Video|Disney\+|Apple TV)\s*$/i, "")
+      .trim();
+    if (stripped) return stripped;
+
+    return raw || "Unknown media";
+  }
+
   function createOverlay(mediaEl) {
     if (injectedSet.has(mediaEl)) return;
     injectedSet.add(mediaEl);
 
     const container = findPlayerContainer(mediaEl);
+    const mediaTitle = getMediaTitle();
+
+    // Ensure the container is positioned so our absolute host anchors to it
+    const containerStyle = window.getComputedStyle(container);
+    if (containerStyle.position === "static") {
+      container.style.position = "relative";
+    }
 
     const host = document.createElement("div");
     host.id = "ss-overlay-host-" + Math.random().toString(36).slice(2, 8);
@@ -117,9 +147,11 @@
     shadow.innerHTML = `
       <style>
         :host { all: initial; display: block; width: max-content; height: max-content; }
+        .wrapper { position: relative; display: inline-block; }
         .btn {
-          display:flex; align-items:center; gap:6px;
-          padding:8px 14px; cursor:pointer;
+          display:flex; align-items:center; justify-content:center; gap:6px;
+          width: 100px; height: 32px; cursor:pointer;
+          box-sizing: border-box;
           background:rgba(0, 0, 0, 0.8);
           color:#ffffff; font-size:12px; font-weight:600;
           border:1px solid rgba(255, 255, 255, 0.15);
@@ -133,14 +165,63 @@
           box-shadow:0 6px 20px rgba(0,0,0,0.8); 
           border-color:rgba(255, 255, 255, 0.35);
         }
-        .btn svg { transition: transform 0.25s ease; }
+        .btn svg { transition: transform 0.25s ease; flex-shrink:0; }
         .btn:hover svg { transform: translateY(0.5px); }
+
+        .tooltip {
+          position: absolute;
+          top: calc(100% + 8px);
+          left: 0;
+          transform: translateY(4px);
+          background: rgba(5, 5, 5, 0.92);
+          color: #f0f0f0;
+          font-size: 11px;
+          font-weight: 500;
+          line-height: 1.5;
+          padding: 7px 11px;
+          border-radius: 7px;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          box-shadow: 0 8px 24px rgba(0,0,0,0.7);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+          white-space: normal;
+          word-break: break-word;
+          max-width: 320px;
+          min-width: 120px;
+          pointer-events: none;
+          opacity: 0;
+          transition: opacity 0.18s ease, transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+          z-index: 1;
+        }
+        .tooltip::before {
+          content: "";
+          position: absolute;
+          bottom: 100%;
+          left: 14px;
+          border: 5px solid transparent;
+          border-bottom-color: rgba(255, 255, 255, 0.1);
+        }
+        .tooltip::after {
+          content: "";
+          position: absolute;
+          bottom: calc(100% - 1px);
+          left: 14px;
+          border: 5px solid transparent;
+          border-bottom-color: rgba(5, 5, 5, 0.92);
+        }
+        .wrapper:hover .tooltip {
+          opacity: 1;
+          transform: translateY(0);
+        }
       </style>
-      <div class="btn">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
-        </svg>
-        Download
+      <div class="wrapper">
+        <div class="btn">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+          </svg>
+          Download
+        </div>
+        <div class="tooltip">${mediaTitle.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")}</div>
       </div>
     `;
     shadow.querySelector(".btn").addEventListener("click", (e) => {
@@ -149,17 +230,43 @@
       openExtractorModal(mediaEl);
     });
 
+    // Dynamically update tooltip to show current media title on hover (handles page navigation like on YouTube)
+    const wrapper = shadow.querySelector(".wrapper");
+    const tooltip = shadow.querySelector(".tooltip");
+    wrapper.addEventListener("mouseenter", () => {
+      tooltip.textContent = getMediaTitle();
+    });
+
     const mount = () => {
       const rect = mediaEl.getBoundingClientRect();
       const cr = container.getBoundingClientRect();
       host.style.left = rect.left - cr.left + 10 + "px";
       host.style.top = rect.top - cr.top + 10 + "px";
     };
-    
+
     container.appendChild(host);
     mount();
     window.addEventListener("scroll", mount, { passive: true });
     window.addEventListener("resize", mount, { passive: true });
+
+    // Use ResizeObserver to automatically reposition overlay when media element size changes (common during load/buffering)
+    const ro = new ResizeObserver(() => {
+      mount();
+    });
+    ro.observe(mediaEl);
+
+    // Clean up listeners when the media element or overlay host leaves the DOM
+    const cleanup = new MutationObserver(() => {
+      if (!mediaEl.isConnected || !host.isConnected) {
+        window.removeEventListener("scroll", mount);
+        window.removeEventListener("resize", mount);
+        ro.disconnect();
+        host.remove();
+        injectedSet.delete(mediaEl);
+        cleanup.disconnect();
+      }
+    });
+    cleanup.observe(document.documentElement, { childList: true, subtree: true });
   }
 
   // ── Two-tier probe orchestration ─────────────────────────────────────────
@@ -241,14 +348,12 @@
   }
 
   async function openExtractorModal(mediaEl) {
-    // Verify we have at least one real candidate before opening the modal
-    const bgRes = await sendToBackground({ type: "GET_TAB_STREAMS" });
-    const sniffed = (bgRes?.urls || []).filter(
-      (u) => u && !u.startsWith("blob:")
-    );
     const elementSrc = (mediaEl.currentSrc || mediaEl.src || "").trim();
 
-    if (!elementSrc && sniffed.length === 0 && window.location.href === "about:blank") {
+    // Only gate on about:blank (genuine edge case). For all real pages, the
+    // tiered probe inside showModal does the full check. Avoid pre-fetching
+    // tab streams here since runTieredProbe fetches them immediately after.
+    if (!elementSrc && window.location.href === "about:blank") {
       showToast("✗ No media URL detected on this element");
       return;
     }
@@ -540,13 +645,16 @@
     backdrop.querySelector("#ss-cancel").addEventListener("click", closeModal);
 
     // Start the tiered probe
-    runTieredProbe(mediaEl).then((result) => {
+    (async () => {
+      const result = await runTieredProbe(mediaEl);
+      // Modal may have been closed by the user while the probe ran
+      if (!_statusEl) return;
       if (!result) {
         setStatus("✗ No downloadable content found on this page or its streams.");
         return;
       }
       renderProbeResult(backdrop, result, closeModal);
-    });
+    })();
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -556,9 +664,9 @@
     // Tier badge
     const badge = backdrop.querySelector("#ss-tier-badge");
     const TIER_STYLES = {
-      native: { bg: "rgba(255, 255, 255, 0.08)", color: "#ffffff",  label: "⚡ yt-dlp Native" },
-      stream: { bg: "rgba(48, 209, 88, 0.15)", color: "#30d158",  label: "📡 Stream (HLS/DASH)" },
-      direct: { bg: "rgba(255, 159, 10, 0.15)",  color: "#ff9f0a",  label: "⬇ Direct Download" },
+      native: { bg: "rgba(255, 255, 255, 0.08)", color: "#ffffff", label: "⚡ yt-dlp Native" },
+      stream: { bg: "rgba(48, 209, 88, 0.15)", color: "#30d158", label: "📡 Stream (HLS/DASH)" },
+      direct: { bg: "rgba(255, 159, 10, 0.15)", color: "#ff9f0a", label: "⬇ Direct Download" },
     };
     const style = TIER_STYLES[tier] || TIER_STYLES.direct;
     badge.style.background = style.bg;
@@ -723,8 +831,8 @@
         <label>Save to</label>
         <select id="ss-cat">
           ${Object.keys(settings.categories || {})
-            .map((c) => `<option value="${c}">${c}</option>`)
-            .join("")}
+          .map((c) => `<option value="${c}">${c}</option>`)
+          .join("")}
           <option value="__custom">Custom path…</option>
         </select>
         <input id="ss-custom" type="text" placeholder="/absolute/path/optional" style="display:none;margin-top:6px;" />
@@ -775,7 +883,6 @@
   // ─────────────────────────────────────────────────────────────────────────
   function showToast(msg) {
     const t = document.createElement("div");
-    t.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>${msg}`;
     t.style.cssText = [
       "position:fixed", "bottom:32px", "right:32px", "z-index:2147483647",
       "background:#0d0d0d", "color:#ffffff",
@@ -787,6 +894,24 @@
       "display:flex", "align-items:center", "font-weight:500",
       "transition:all 0.3s ease",
     ].join(";");
+
+    // Build SVG icon element safely (no innerHTML to avoid XSS from error strings)
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("width", "14"); svg.setAttribute("height", "14");
+    svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor"); svg.setAttribute("stroke-width", "2.5");
+    svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("stroke-linejoin", "round");
+    svg.style.marginRight = "8px"; svg.style.flexShrink = "0";
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", "12"); circle.setAttribute("cy", "12"); circle.setAttribute("r", "10");
+    const line1 = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line1.setAttribute("x1", "12"); line1.setAttribute("y1", "16"); line1.setAttribute("x2", "12"); line1.setAttribute("y2", "12");
+    const line2 = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line2.setAttribute("x1", "12"); line2.setAttribute("y1", "8"); line2.setAttribute("x2", "12.01"); line2.setAttribute("y2", "8");
+    svg.append(circle, line1, line2);
+
+    const text = document.createTextNode(msg);
+    t.append(svg, text);
     document.documentElement.appendChild(t);
     setTimeout(() => t.remove(), 2800);
   }
@@ -809,7 +934,13 @@
   }
   scan();
 
-  const mo = new MutationObserver(() => scan());
+  // Debounce the observer — pages emit many rapid mutations during playback.
+  // We only need to re-scan when new elements are actually added.
+  let _scanTimer = null;
+  const mo = new MutationObserver(() => {
+    if (_scanTimer) return;
+    _scanTimer = setTimeout(() => { _scanTimer = null; scan(); }, 250);
+  });
   mo.observe(document.documentElement, { childList: true, subtree: true });
   setTimeout(scan, 2000); // catch lazy iframes
 })();
