@@ -1,4 +1,7 @@
 {
+  "name": "download-anything",
+  "version": "0.2.0",
+  "private": true,
   "scripts": {
     "tauri:dev": "node build-backend.js && tauri dev",
     "tauri:build": "node build-backend.js && tauri build"
