@@ -1,4 +1,4 @@
-use tauri::Manager;
+use tauri::{Manager, Emitter};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_updater::UpdaterExt;
@@ -66,19 +66,24 @@ pub fn run() {
       // Store child on app state so it is not dropped
       app.manage(child);
 
+      let app_handle = app.handle().clone();
       tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
           match event {
             CommandEvent::Stdout(line_bytes) => {
-              let line = String::from_utf8_lossy(&line_bytes);
+              let line = String::from_utf8_lossy(&line_bytes).to_string();
               log::info!("Sidecar stdout: {}", line);
+              let _ = app_handle.emit("backend-log", line);
             }
             CommandEvent::Stderr(line_bytes) => {
-              let line = String::from_utf8_lossy(&line_bytes);
+              let line = String::from_utf8_lossy(&line_bytes).to_string();
               log::error!("Sidecar stderr: {}", line);
+              let _ = app_handle.emit("backend-log", line);
             }
             CommandEvent::Terminated(payload) => {
-              log::warn!("Sidecar terminated with code: {:?}", payload.code);
+              let msg = format!("Sidecar terminated with code: {:?}", payload.code);
+              log::warn!("{}", msg);
+              let _ = app_handle.emit("backend-log", msg);
             }
             _ => {}
           }

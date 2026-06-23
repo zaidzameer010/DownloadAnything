@@ -127,7 +127,66 @@ export function renderOnboarding(state) {
   }
 }
 
+let startupToastTimer = null;
+let showedStartupToast = false;
+
+export function renderStartup(state) {
+  const toast = document.getElementById("startup-toast");
+  if (!toast) return;
+
+  const logEl = document.getElementById("startup-toast-log");
+  const spinnerEl = toast.querySelector(".startup-toast-spinner");
+  const titleEl = toast.querySelector(".startup-toast-title");
+
+  // If ready, transition or keep hidden
+  if (state.backend && state.backend.ready) {
+    if (showedStartupToast) {
+      toast.classList.add("success");
+      if (titleEl) titleEl.textContent = "Engine Ready";
+      if (logEl) logEl.textContent = "Connected to core services.";
+      if (spinnerEl) {
+        spinnerEl.className = "startup-toast-success-icon";
+        spinnerEl.innerHTML = '<i data-lucide="check" style="width:14px;height:14px;color:var(--success);"></i>';
+        if (window.lucide) window.lucide.createIcons();
+      }
+
+      if (!startupToastTimer) {
+        startupToastTimer = setTimeout(() => {
+          toast.classList.remove("visible");
+          showedStartupToast = false;
+          startupToastTimer = null;
+        }, 2500);
+      }
+    } else {
+      toast.classList.remove("visible");
+    }
+    return;
+  }
+
+  // Show startup toast
+  showedStartupToast = true;
+  toast.classList.add("visible");
+  toast.classList.remove("success");
+
+  if (titleEl) titleEl.textContent = "Engine Launching...";
+  if (spinnerEl && spinnerEl.className !== "startup-toast-spinner") {
+    spinnerEl.className = "startup-toast-spinner";
+    spinnerEl.innerHTML = "";
+  }
+
+  if (logEl) {
+    const logs = state.backend.logs;
+    const lastLine = logs.length > 0 ? logs[logs.length - 1] : "Initializing sidecar process...";
+    let displayLine = lastLine.replace(/^Sidecar stdout: /, '').replace(/^Sidecar stderr: /, '');
+    if (displayLine.length > 60) {
+      displayLine = displayLine.substring(0, 57) + "...";
+    }
+    logEl.textContent = displayLine;
+  }
+}
+
 export function renderDashboard(state) {
+  renderStartup(state);
   renderOfflineBanner(state);
   renderMeta(state);
   renderNavigation(state);
@@ -178,7 +237,9 @@ function renderActiveView(state) {
 function renderOfflineBanner(state) {
   const banner = document.getElementById("offline-banner");
   if (!banner) return;
-  if (!state.online) {
+  
+  const suppressWarning = state.backend && !state.backend.ready;
+  if (!state.online && !suppressWarning) {
     banner.classList.add("visible");
   } else {
     banner.classList.remove("visible");
@@ -902,4 +963,5 @@ export function setupUIEventListeners() {
       triggerBinaryInstall();
     };
   }
+
 }

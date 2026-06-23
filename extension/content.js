@@ -98,25 +98,120 @@
   }
 
   // ── Overlay button injected onto each media element ──────────────────────
-  function getMediaTitle() {
-    // 1. Open Graph title — most reliable for YouTube, Vimeo, Twitch, etc.
+  function getMediaTitle(mediaEl) {
+    const host = window.location.hostname.toLowerCase();
+    
+    // 1. YouTube specific (handles dynamic watch transitions)
+    if (host.includes("youtube.com") || host.includes("youtu.be")) {
+      const ytTitleEl = document.querySelector(
+        "ytd-watch-metadata h1, ytd-video-primary-info-renderer h1, #container h1.ytd-video-primary-info-renderer"
+      );
+      if (ytTitleEl?.textContent?.trim()) {
+        return ytTitleEl.textContent.trim();
+      }
+    }
+    
+    // 2. Twitch specific
+    if (host.includes("twitch.tv")) {
+      const twitchTitleEl = document.querySelector(
+        '[data-a-target="stream-title"], [data-a-target="video-title"]'
+      );
+      if (twitchTitleEl?.textContent?.trim()) {
+        return twitchTitleEl.textContent.trim();
+      }
+    }
+
+    // 3. Element-specific context (very useful for custom platforms & pages with multiple videos)
+    if (mediaEl) {
+      // Direct attributes
+      const direct = mediaEl.getAttribute("title") || mediaEl.getAttribute("aria-label");
+      if (direct?.trim()) return direct.trim();
+
+      // Parent container attributes / titles
+      const container = findPlayerContainer(mediaEl);
+      if (container && container !== document.body) {
+        const containerTitle = container.getAttribute?.("title") || container.getAttribute?.("aria-label");
+        if (containerTitle?.trim()) return containerTitle.trim();
+
+        // Check for common title classes inside the player
+        const titleClasses = [
+          ".video-title", ".title", ".media-title", 
+          "[class*='title']", "[id*='title']", ".caption", "figcaption"
+        ];
+        for (const cls of titleClasses) {
+          try {
+            const el = container.querySelector(cls);
+            if (el?.textContent?.trim()) return el.textContent.trim();
+          } catch (e) {
+            // ignore selector parsing errors
+          }
+        }
+      }
+
+      // Check preceding siblings / headings in the document tree
+      try {
+        let current = mediaEl;
+        let depth = 0;
+        while (current && current !== document.body && depth < 5) {
+          let prev = current.previousElementSibling;
+          while (prev) {
+            const heading = prev.querySelector("h1, h2, h3, h4") || 
+                            (prev.matches("h1, h2, h3, h4") ? prev : null);
+            if (heading?.textContent?.trim()) {
+              return heading.textContent.trim();
+            }
+            prev = prev.previousElementSibling;
+          }
+          current = current.parentElement;
+          depth++;
+        }
+      } catch (err) {
+        // ignore navigation errors
+      }
+    }
+
+    // 4. Cleaned document.title (dynamic on most modern SPAs)
+    const raw = document.title || "";
+    let cleanTitle = raw;
+    
+    const suffixes = [
+      " - YouTube", " | YouTube",
+      " - Twitch", " | Twitch",
+      " - Vimeo", " | Vimeo",
+      " - Netflix", " | Netflix",
+      " - Disney+", " | Disney+",
+      " - TikTok", " | TikTok",
+      " - Twitter", " | Twitter", " - X", " | X",
+      " - Facebook", " | Facebook",
+      " - Instagram", " | Instagram",
+      " - Reddit", " | Reddit",
+      " - Dailymotion", " | Dailymotion",
+      " - Rumble", " | Rumble",
+      " - Bilibili", " | Bilibili",
+    ];
+    
+    for (const suffix of suffixes) {
+      if (cleanTitle.toLowerCase().endsWith(suffix.toLowerCase())) {
+        cleanTitle = cleanTitle.slice(0, -suffix.length).trim();
+        break;
+      }
+    }
+    
+    cleanTitle = cleanTitle
+      .replace(/\s*[-|·•–—]\s*(YouTube|Vimeo|Twitch|Dailymotion|Twitter|X|Facebook|Instagram|TikTok|Reddit|Bilibili|Rumble|Odysee|PeerTube|Niconico|SoundCloud|Spotify|Netflix|Prime Video|Disney\+|Apple TV)\s*$/i, "")
+      .trim();
+      
+    if (cleanTitle) return cleanTitle;
+
+    // 5. Open Graph / Metadata fallbacks
     const og = document.querySelector("meta[property='og:title']");
     if (og?.content?.trim()) return og.content.trim();
 
-    // 2. Twitter card title
     const tw = document.querySelector("meta[name='twitter:title']");
     if (tw?.content?.trim()) return tw.content.trim();
 
-    // 3. Main page <h1> that isn't inside the player / sidebar
     const h1 = document.querySelector("h1");
     if (h1?.textContent?.trim()) return h1.textContent.trim();
-
-    // 4. document.title, stripped of common " - SiteName" / "| SiteName" suffixes
-    const raw = document.title || "";
-    const stripped = raw
-      .replace(/\s*[-|·•–—]\s*(YouTube|Vimeo|Twitch|Dailymotion|Twitter|X|Facebook|Instagram|TikTok|Reddit|Bilibili|Rumble|Odysee|PeerTube|Niconico|SoundCloud|Spotify|Netflix|Prime Video|Disney\+|Apple TV)\s*$/i, "")
-      .trim();
-    if (stripped) return stripped;
 
     return raw || "Unknown media";
   }
@@ -126,7 +221,7 @@
     injectedSet.add(mediaEl);
 
     const container = findPlayerContainer(mediaEl);
-    const mediaTitle = getMediaTitle();
+    const mediaTitle = getMediaTitle(mediaEl);
 
     // Ensure the container is positioned so our absolute host anchors to it
     const containerStyle = window.getComputedStyle(container);
@@ -141,6 +236,7 @@
       "width:max-content", "height:max-content", "display:block",
       "z-index:2147483647", "pointer-events:auto",
       "font-family:Inter,Segoe UI,-apple-system,sans-serif",
+      "opacity:0", "transition:opacity 0.25s ease-in-out"
     ].join(";");
 
     const shadow = host.attachShadow({ mode: "closed" });
@@ -152,7 +248,7 @@
           display:flex; align-items:center; justify-content:center; gap:6px;
           width: 100px; height: 32px; cursor:pointer;
           box-sizing: border-box;
-          background:rgba(0, 0, 0, 0.8);
+          background:rgba(0, 0, 0, 0.85);
           color:#ffffff; font-size:12px; font-weight:600;
           border:1px solid rgba(255, 255, 255, 0.15);
           border-radius:8px; backdrop-filter:blur(12px);
@@ -167,20 +263,20 @@
         }
         .btn svg { transition: transform 0.25s ease; flex-shrink:0; }
         .btn:hover svg { transform: translateY(0.5px); }
-
+ 
         .tooltip {
           position: absolute;
           top: calc(100% + 8px);
-          left: 0;
+          right: 0;
           transform: translateY(4px);
-          background: rgba(5, 5, 5, 0.92);
+          background: rgba(5, 5, 5, 0.95);
           color: #f0f0f0;
           font-size: 11px;
           font-weight: 500;
           line-height: 1.5;
           padding: 7px 11px;
           border-radius: 7px;
-          border: 1px solid rgba(255, 255, 255, 0.1);
+          border: 1px solid rgba(255, 255, 255, 0.15);
           box-shadow: 0 8px 24px rgba(0,0,0,0.7);
           backdrop-filter: blur(12px);
           -webkit-backdrop-filter: blur(12px);
@@ -197,17 +293,17 @@
           content: "";
           position: absolute;
           bottom: 100%;
-          left: 14px;
+          right: 14px;
           border: 5px solid transparent;
-          border-bottom-color: rgba(255, 255, 255, 0.1);
+          border-bottom-color: rgba(255, 255, 255, 0.15);
         }
         .tooltip::after {
           content: "";
           position: absolute;
           bottom: calc(100% - 1px);
-          left: 14px;
+          right: 14px;
           border: 5px solid transparent;
-          border-bottom-color: rgba(5, 5, 5, 0.92);
+          border-bottom-color: rgba(5, 5, 5, 0.95);
         }
         .wrapper:hover .tooltip {
           opacity: 1;
@@ -229,22 +325,31 @@
       e.stopPropagation();
       openExtractorModal(mediaEl);
     });
-
+ 
     // Dynamically update tooltip to show current media title on hover (handles page navigation like on YouTube)
     const wrapper = shadow.querySelector(".wrapper");
     const tooltip = shadow.querySelector(".tooltip");
     wrapper.addEventListener("mouseenter", () => {
-      tooltip.textContent = getMediaTitle();
+      tooltip.textContent = getMediaTitle(mediaEl);
     });
-
+ 
     const mount = () => {
       const rect = mediaEl.getBoundingClientRect();
       const cr = container.getBoundingClientRect();
-      host.style.left = rect.left - cr.left + 10 + "px";
+      // Anchor top-right (width of button is 100px, 10px padding from the right edge = 110px)
+      host.style.left = rect.right - cr.left - 110 + "px";
       host.style.top = rect.top - cr.top + 10 + "px";
     };
-
+ 
     container.appendChild(host);
+ 
+    // IDM Hover Grabbing Style: fade-in the button when mouse enters the video container
+    container.addEventListener("mouseenter", () => {
+      host.style.opacity = "1";
+    });
+    container.addEventListener("mouseleave", () => {
+      host.style.opacity = "0";
+    });
     mount();
     window.addEventListener("scroll", mount, { passive: true });
     window.addEventListener("resize", mount, { passive: true });
@@ -285,7 +390,7 @@
 
     // ── Tier 1: Try yt-dlp on the PAGE URL ────────────────────────────────
     setStatus("🔍 Probing with yt-dlp…");
-    const t1 = await sendToBackground({ type: "EXTRACT", url: pageUrl, page_title: document.title });
+    const t1 = await sendToBackground({ type: "EXTRACT", url: pageUrl, page_title: getMediaTitle() });
     if (t1?.ok) {
       const method = t1.data.extraction_method;
       // Accept any real formats from the page URL — the page URL is always a
@@ -322,7 +427,7 @@
 
     for (const streamUrl of orderedStreams) {
       setStatus(`🔗 Probing stream: ${truncate(streamUrl, 50)}…`);
-      const t2 = await sendToBackground({ type: "EXTRACT", url: streamUrl, page_title: document.title });
+      const t2 = await sendToBackground({ type: "EXTRACT", url: streamUrl, page_title: getMediaTitle() });
       if (t2?.ok) {
         const hasFormats = t2.data.formats?.length > 0;
         if (hasFormats) {
@@ -860,7 +965,7 @@
           category,
           custom_path: customPath,
           is_video: isVideo,
-          page_title: document.title,
+          page_title: getMediaTitle(),
           is_stream: (tier === "stream"),
         };
         confirmBtn.disabled = true;
@@ -928,6 +1033,319 @@
     return str.length > max ? str.slice(0, max - 1) + "…" : str;
   }
 
+  // ── openDownloadAddPopup (Premium confirmation modal for standard downloads) ─────
+  function openDownloadAddPopup(url, filename) {
+    if (document.getElementById("ss-download-backdrop")) return;
+
+    const backdrop = document.createElement("div");
+    backdrop.id = "ss-download-backdrop";
+    backdrop.innerHTML = `
+      <style>
+        #ss-download-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 2147483647;
+          background: rgba(0, 0, 0, 0.85);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          box-sizing: border-box;
+        }
+        
+        #ss-download-modal {
+          width: 480px;
+          max-width: 92vw;
+          background: rgba(10, 10, 10, 0.95);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 16px;
+          box-shadow: 0 24px 64px rgba(0, 0, 0, 0.9);
+          color: #f5f5f7;
+          padding: 24px;
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+          backdrop-filter: blur(20px);
+          -webkit-backdrop-filter: blur(20px);
+          box-sizing: border-box;
+        }
+        
+        #ss-download-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          box-sizing: border-box;
+        }
+        
+        #ss-download-title {
+          font-size: 16px;
+          font-weight: 700;
+          color: #ffffff;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
+        #ss-download-close {
+          cursor: pointer;
+          color: #8e8e9c;
+          font-size: 12px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 28px;
+          height: 28px;
+          border-radius: 50%;
+          background: rgba(255, 255, 255, 0.04);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          transition: all 0.2s;
+        }
+        
+        #ss-download-close:hover {
+          background: rgba(255, 69, 58, 0.15);
+          color: #ff453a;
+          border-color: rgba(255, 69, 58, 0.3);
+          transform: rotate(90deg);
+        }
+
+        .ss-field-group {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          box-sizing: border-box;
+        }
+
+        .ss-field-group label {
+          font-size: 10px;
+          color: #8e8e9c;
+          text-transform: uppercase;
+          letter-spacing: 0.8px;
+          font-weight: 600;
+        }
+
+        #ss-download-url {
+          font-size: 10.5px;
+          color: #a3a3a3;
+          word-break: break-all;
+          background: rgba(255, 255, 255, 0.03);
+          padding: 8px 12px;
+          border-radius: 8px;
+          border: 1px solid rgba(255, 255, 255, 0.06);
+          font-family: monospace;
+          max-height: 50px;
+          overflow-y: auto;
+          box-sizing: border-box;
+        }
+
+        #ss-download-filename, #ss-download-cat, #ss-download-custom {
+          background: rgba(255, 255, 255, 0.04);
+          color: #ffffff;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          padding: 10px 14px;
+          border-radius: 8px;
+          font-size: 13px;
+          outline: none;
+          font-family: inherit;
+          transition: all 0.2s;
+          box-sizing: border-box;
+          width: 100%;
+        }
+
+        #ss-download-filename:focus, #ss-download-cat:focus, #ss-download-custom:focus {
+          border-color: rgba(255, 255, 255, 0.3);
+          background: rgba(255, 255, 255, 0.08);
+        }
+
+        #ss-download-actions {
+          display: flex;
+          justify-content: flex-end;
+          gap: 8px;
+          margin-top: 10px;
+          box-sizing: border-box;
+        }
+
+        .ss-btn {
+          font-family: inherit;
+          font-size: 12px;
+          font-weight: 600;
+          padding: 10px 14px;
+          border-radius: 8px;
+          cursor: pointer;
+          border: none;
+          outline: none;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+          box-sizing: border-box;
+        }
+
+        .ss-btn-cancel {
+          background: transparent;
+          color: #a0a0b0;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .ss-btn-cancel:hover {
+          border-color: rgba(255, 255, 255, 0.2);
+          background: rgba(255, 255, 255, 0.04);
+          color: #ffffff;
+        }
+
+        .ss-btn-chrome {
+          background: rgba(255, 255, 255, 0.08);
+          color: #f5f5f7;
+          border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+
+        .ss-btn-chrome:hover {
+          background: rgba(255, 255, 255, 0.15);
+          color: #ffffff;
+          border-color: rgba(255, 255, 255, 0.25);
+        }
+
+        .ss-btn-confirm {
+          background: #ffffff;
+          color: #000000;
+          border: 1px solid #ffffff;
+          box-shadow: 0 4px 12px rgba(255, 255, 255, 0.05);
+        }
+
+        .ss-btn-confirm:hover {
+          background: #e5e5e7;
+          border-color: #e5e5e7;
+          box-shadow: 0 6px 18px rgba(255, 255, 255, 0.15);
+          transform: translateY(-0.5px);
+        }
+      </style>
+
+      <div id="ss-download-modal">
+        <!-- Header -->
+        <div id="ss-download-header">
+          <div id="ss-download-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+            </svg>
+            Route Download
+          </div>
+          <span id="ss-download-close">✕</span>
+        </div>
+
+        <!-- URL field -->
+        <div class="ss-field-group">
+          <label>Source URL</label>
+          <div id="ss-download-url"></div>
+        </div>
+
+        <!-- Filename field -->
+        <div class="ss-field-group">
+          <label>Save Filename</label>
+          <input type="text" id="ss-download-filename" />
+        </div>
+
+        <!-- Category field -->
+        <div class="ss-field-group">
+          <label>Category</label>
+          <select id="ss-download-cat"></select>
+          <input type="text" id="ss-download-custom" placeholder="/absolute/path/optional" style="display:none;margin-top:6px;" />
+        </div>
+
+        <!-- Action buttons -->
+        <div id="ss-download-actions">
+          <button id="ss-download-cancel" class="ss-btn ss-btn-cancel">Cancel</button>
+          <button id="ss-download-chrome" class="ss-btn ss-btn-chrome">Download via Chrome</button>
+          <button id="ss-download-confirm" class="ss-btn ss-btn-confirm">Download with App</button>
+        </div>
+      </div>
+    `;
+
+    document.documentElement.appendChild(backdrop);
+
+    const closeBtn = backdrop.querySelector("#ss-download-close");
+    const cancelBtn = backdrop.querySelector("#ss-download-cancel");
+    const chromeBtn = backdrop.querySelector("#ss-download-chrome");
+    const confirmBtn = backdrop.querySelector("#ss-download-confirm");
+
+    const urlEl = backdrop.querySelector("#ss-download-url");
+    const filenameEl = backdrop.querySelector("#ss-download-filename");
+    const catSel = backdrop.querySelector("#ss-download-cat");
+    const customPathEl = backdrop.querySelector("#ss-download-custom");
+
+    urlEl.textContent = url;
+    filenameEl.value = filename || "";
+
+    function closeModal() {
+      backdrop.remove();
+    }
+
+    closeBtn.addEventListener("click", closeModal);
+    cancelBtn.addEventListener("click", closeModal);
+
+    // Load categories
+    (async () => {
+      const settings = await fetchSettings();
+      const categories = settings?.categories || {};
+      let optionsHtml = Object.keys(categories)
+        .map((c) => `<option value="${c}">${c}</option>`)
+        .join("");
+      optionsHtml += `<option value="__custom">Custom path…</option>`;
+      catSel.innerHTML = optionsHtml;
+
+      catSel.addEventListener("change", () => {
+        customPathEl.style.display = catSel.value === "__custom" ? "block" : "none";
+      });
+    })();
+
+    // Download via Chrome (Bypass)
+    chromeBtn.addEventListener("click", async () => {
+      chromeBtn.disabled = true;
+      const customFilename = filenameEl.value.trim();
+      const r = await sendToBackground({
+        type: "BYPASS_DOWNLOAD",
+        url: url,
+        filename: customFilename || filename
+      });
+      if (r?.ok) {
+        closeModal();
+      } else {
+        chromeBtn.disabled = false;
+        showToast("✗ Failed to route to Chrome");
+      }
+    });
+
+    // Download via App (DownloadAnything FastAPI)
+    confirmBtn.addEventListener("click", async () => {
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = "Queuing…";
+      const category = catSel.value === "__custom" ? null : catSel.value;
+      const customPath = catSel.value === "__custom" ? customPathEl.value.trim() : null;
+      const customFilename = filenameEl.value.trim();
+
+      const payload = {
+        url: url,
+        format_id: "direct_stream",
+        category,
+        custom_path: customPath,
+        is_video: false, // flag standard downloads as non-video files
+        page_title: getMediaTitle(null),
+        filename: customFilename || filename || "download",
+        is_stream: false
+      };
+
+      const r = await sendToBackground({ type: "DOWNLOAD", payload });
+      if (r?.ok) {
+        closeModal();
+        showToast("✓ Routed to DownloadAnything");
+      } else {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = "Download with App";
+        showToast("✗ Failed: " + (r?.error || "unknown"));
+      }
+    });
+  }
+
   // ── Scan & observe ────────────────────────────────────────────────────────
   function scan() {
     for (const el of findAllMedia(document)) createOverlay(el);
@@ -943,4 +1361,22 @@
   });
   mo.observe(document.documentElement, { childList: true, subtree: true });
   setTimeout(scan, 2000); // catch lazy iframes
+
+  // ── Alt-Key Bypass Listener (IDM-style) ──────────────────────────────────
+  document.addEventListener("click", (e) => {
+    if (e.altKey) {
+      const target = e.target.closest("a");
+      if (target && target.href) {
+        sendToBackground({ type: "ADD_ALT_BYPASS", url: target.href });
+      }
+    }
+  }, { capture: true, passive: true });
+
+  // ── Message listener ──────────────────────────────────────────────────────
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.type === "SHOW_ADD_DOWNLOAD_POPUP") {
+      openDownloadAddPopup(msg.url, msg.filename);
+      sendResponse({ ok: true });
+    }
+  });
 })();

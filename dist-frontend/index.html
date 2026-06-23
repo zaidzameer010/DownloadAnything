@@ -241,8 +241,19 @@
       <button class="ghost" id="bulk-resume" title="Resume/Retry selected"><i data-lucide="play" style="width:14px;height:14px;"></i> Resume</button>
       <button class="ghost" id="bulk-remove" title="Remove selected from list"><i data-lucide="trash-2" style="width:14px;height:14px;"></i> Remove</button>
       <button class="ghost danger" id="bulk-delete" title="Delete selected files from disk"><i data-lucide="file-x" style="width:14px;height:14px;"></i> Delete Files</button>
-      <button class="ghost" id="bulk-clear" style="padding: 8px 12px; font-size: 11px;">Clear</button>
     </div>
+  </div>
+
+  <!-- Backend Startup Toast -->
+  <div id="startup-toast" class="startup-toast">
+    <div class="startup-toast-header">
+      <div class="startup-toast-spinner"></div>
+      <span class="startup-toast-title">Engine Launching...</span>
+    </div>
+    <div class="startup-toast-body" id="startup-toast-log">
+      Starting Backend
+    </div>
+  </div>
   <!-- Onboarding Setup Overlay -->
   <div id="onboarding-overlay" class="onboarding-overlay" style="display: none;">
     <div class="onboarding-card">

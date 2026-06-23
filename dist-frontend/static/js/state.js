@@ -1,7 +1,7 @@
 /**
  * state.js — Reactive Global State Container
  */
-import { connectWebSocket, fetchSettings, fetchHealth, checkBinaries, installBinaries } from "./api.js";
+import { connectWebSocket, checkBinaries, installBinaries } from "./api.js";
 
 const state = {
   tasks: [],
@@ -16,6 +16,11 @@ const state = {
     ytdlp: { status: "checking", progress: 0 },
     installing: false,
     error: null
+  },
+  // Backend startup state
+  backend: {
+    ready: typeof window !== "undefined" && !window.__TAURI__,
+    logs: []
   }
 };
 
@@ -52,6 +57,7 @@ export function connectStateWebSocket() {
 
   const onOpen = async () => {
     state.online = true;
+    state.backend.ready = true;
     notify();
     try {
       const res = await checkBinaries();
@@ -140,13 +146,21 @@ export async function triggerBinaryInstall() {
   }
 }
 
-// ── Health & Initialisation loaders (Dead — handled via WebSocket push) ───
-// Kept as empty exports so any stale import references don't crash.
-export async function pollHealthState() {}
-export async function loadInitialSettings() {}
 
 export function switchTab(tabName) {
   if (state.activeTab === tabName) return;
   state.activeTab = tabName;
   notify();
+}
+
+// ── Tauri Backend Log Listener ──────────────────────────────────────────────
+if (typeof window !== "undefined" && window.__TAURI__ && window.__TAURI__.event) {
+  window.__TAURI__.event.listen('backend-log', (event) => {
+    state.backend.logs.push(event.payload);
+    // Keep only last 100 console log lines to avoid ballooning memory
+    if (state.backend.logs.length > 100) {
+      state.backend.logs.shift();
+    }
+    notify();
+  });
 }

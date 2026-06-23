@@ -1009,3 +1009,88 @@ input[type="checkbox"] {
   width: 100%;
   height: 46px;
 }
+
+/* Startup Toast Styling */
+.startup-toast {
+  position: fixed;
+  bottom: 32px;
+  right: 32px;
+  width: 320px;
+  background: rgba(10, 10, 10, 0.85);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  z-index: 100000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(20px);
+  transition: opacity 0.3s, transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.3s;
+}
+
+.startup-toast.visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.startup-toast.success {
+  border-color: rgba(48, 209, 88, 0.3);
+}
+
+.startup-toast-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.startup-toast-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  flex-shrink: 0;
+}
+
+.startup-toast-success-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.startup-toast-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.startup-toast-body {
+  font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
+  font-size: 0.72rem;
+  color: var(--muted);
+  word-break: break-all;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-left: 24px;
+}
+
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

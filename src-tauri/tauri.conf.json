@@ -9,6 +9,7 @@
     "beforeBuildCommand": "node build-backend.js"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "DownloadAnything",

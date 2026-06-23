@@ -16,14 +16,46 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, AsyncGenerator
+from typing import Any, Dict, List, Optional
 
 import yt_dlp
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+# ──────────────────────────────────────────────
+#  System PATH Adjustment for GUI Bundles
+# ──────────────────────────────────────────────
+def ensure_system_path() -> None:
+    """Prepend common package manager paths (Homebrew, MacPorts, etc.) to the system PATH.
+    This is critical for macOS desktop/GUI applications launched via Finder/LaunchServices,
+    which otherwise run with a minimal PATH that excludes custom binaries like deno, node, or ffmpeg.
+    """
+    path_env = os.environ.get("PATH", "")
+    paths = path_env.split(os.pathsep)
+    
+    additional_paths = []
+    if platform.system() == "Darwin":
+        additional_paths = [
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+            "/opt/local/bin",
+        ]
+        
+    updated = False
+    for p in additional_paths:
+        if p not in paths and os.path.exists(p):
+            paths.insert(0, p)
+            updated = True
+            
+    if updated:
+        os.environ["PATH"] = os.pathsep.join(paths)
+
+ensure_system_path()
 
 # ──────────────────────────────────────────────
 #  Configuration & Persistence
@@ -118,6 +150,7 @@ class DownloadTask:
     is_video: bool = True
     page_title: Optional[str] = None
     is_stream: bool = False
+    headers: Optional[Dict[str, str]] = None
     _cancel: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _paused: bool = field(default=False, repr=False)
 
@@ -131,6 +164,7 @@ class DownloadTask:
             "is_video": self.is_video,
             "page_title": self.page_title,
             "is_stream": self.is_stream,
+            "headers": self.headers,
             "title": self.title,
             "status": self.status,
             "speed": self.speed,
@@ -155,6 +189,7 @@ WEBSOCKET_SUBSCRIBERS: List[WebSocket] = []
 class ExtractRequest(BaseModel):
     url: str
     page_title: Optional[str] = None
+    headers: Optional[Dict[str, str]] = None
 
 class DownloadRequest(BaseModel):
     url: str
@@ -164,6 +199,8 @@ class DownloadRequest(BaseModel):
     is_video: Optional[bool] = True
     page_title: Optional[str] = None
     is_stream: Optional[bool] = False
+    headers: Optional[Dict[str, str]] = None
+    filename: Optional[str] = None
 
 class SettingsUpdate(BaseModel):
     max_concurrent_downloads: Optional[int] = None
@@ -292,10 +329,15 @@ def build_ydl_options(task: DownloadTask, extract_only: bool = False) -> Dict[st
     if proxy_val:
         opts["proxy"] = proxy_val
 
-    # Apply cookies from browser if configured
+    # Apply cookies from browser if configured (only if task doesn't supply headers)
+    # This avoids database lock errors and keychain prompts when capturing from the extension
     cookies_browser = SETTINGS.get("cookies_from_browser", "none")
-    if cookies_browser and cookies_browser != "none":
+    if cookies_browser and cookies_browser != "none" and not task.headers:
         opts["cookiesfrombrowser"] = (cookies_browser,)
+
+    # Apply custom request headers (cookies, referer, user-agent)
+    if task.headers:
+        opts["http_headers"] = task.headers
 
     return opts
 
@@ -353,6 +395,30 @@ def _sanitise_stream_title(title: str, url: str, page_title: Optional[str] = Non
         return hostname or stripped or "Stream"
     except Exception:
         return stripped or "Stream"
+
+def _fix_unsafe_extensions(info: Dict[str, Any], task: DownloadTask) -> None:
+    """Detect and override unsafe/unusual file extensions (like .php, .html) returned by 
+    script-based CDN redirection points with safe, expected extensions to bypass yt-dlp blocks."""
+    unsafe_exts = {"php", "html", "htm", "asp", "aspx", "jsp", "cgi", "pl", "py", "sh", "exe", "bat", "cmd", "dll", "vid"}
+    
+    fallback_ext = "mp4" if task.is_video else "zip"
+    
+    # Attempt to parse a valid file extension from titles, page titles, or original filename (such as customized filenames)
+    for title_str in (task.title, task.page_title, task.filename):
+        if title_str:
+            parts = title_str.split(".")
+            if len(parts) > 1:
+                ext = parts[-1].lower()
+                if ext not in unsafe_exts and ext.isalnum() and 2 <= len(ext) <= 5:
+                    fallback_ext = ext
+                    break
+
+    if info.get("ext") and info["ext"].lower() in unsafe_exts:
+        info["ext"] = fallback_ext
+        
+    for f in info.get("formats", []):
+        if f.get("ext") and f["ext"].lower() in unsafe_exts:
+            f["ext"] = fallback_ext
 
 def _hook_sink(task: DownloadTask, d: Dict[str, Any], loop: asyncio.AbstractEventLoop) -> None:
     if task._cancel.is_set():
@@ -462,6 +528,7 @@ def load_tasks() -> None:
                     is_video=task_dict.get("is_video", True),
                     page_title=task_dict.get("page_title"),
                     is_stream=task_dict.get("is_stream", False),
+                    headers=task_dict.get("headers"),
                 )
                 if task.status in ("downloading", "queued"):
                     task.status = "paused"
@@ -548,10 +615,31 @@ async def download_worker(worker_id: int) -> None:
                 continue
 
             def _run():
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(task.url, download=True)
+                current_opts = opts
+                try:
+                    with yt_dlp.YoutubeDL(current_opts) as ydl:
+                        info = ydl.extract_info(task.url, download=False)
+                except Exception as exc:
+                    if "primarily used for piracy" in str(exc).lower():
+                        current_opts = {**opts, "allowed_extractors": ["generic"]}
+                        with yt_dlp.YoutubeDL(current_opts) as ydl:
+                            info = ydl.extract_info(task.url, download=False)
+                    else:
+                        raise
+
+                with yt_dlp.YoutubeDL(current_opts) as ydl:
+                    if not info:
+                        raise yt_dlp.utils.DownloadError("Failed to extract info")
+                        
                     raw_title = info.get("title", task.title) or ""
-                    task.title = _sanitise_stream_title(raw_title, task.url, task.page_title, prefer_page_title=task.is_stream)
+                    sanitised = _sanitise_stream_title(raw_title, task.url, task.page_title, prefer_page_title=task.is_stream or not task.is_video)
+                    task.title = sanitised
+                    info["title"] = sanitised
+                    
+                    _fix_unsafe_extensions(info, task)
+                    
+                    ydl.process_ie_result(info, download=True)
+                    
                     if "requested_downloads" in info and info["requested_downloads"]:
                         task.final_path = info["requested_downloads"][0].get("filepath", "")
                     else:
@@ -676,7 +764,20 @@ async def index():
     idx = BASE_DIR / "dist-frontend" / "index.html"
     if idx.exists():
         return FileResponse(str(idx))
-    return JSONResponse({"status": "ok", "service": "Media Acquisition Engine"})
+    
+    import sys
+    is_frozen = getattr(sys, "frozen", False)
+    return JSONResponse({
+        "status": "ok",
+        "service": "Media Acquisition Engine",
+        "mode": "sidecar" if is_frozen else "api-only",
+        "message": (
+            "Frontend UI files (index.html) were not found. "
+            "If the Tauri desktop application is running, please use the desktop app window. "
+            "If you want to run the browser dashboard, close the desktop application and run 'fastapi run' "
+            "from the project root directory."
+        )
+    })
 
 def check_binaries_status() -> Dict[str, bool]:
     app_bin_dir = get_app_data_dir() / "bin"
@@ -686,6 +787,13 @@ def check_binaries_status() -> Dict[str, bool]:
     ffmpeg_ok = bool(shutil.which("ffmpeg")) or (app_bin_dir / ffmpeg_name).exists()
     ytdlp_ok = bool(shutil.which("yt-dlp")) or (app_bin_dir / ytdlp_name).exists()
     
+    if platform.system() == "Darwin":
+        common_paths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+        if not ffmpeg_ok:
+            ffmpeg_ok = any((Path(p) / "ffmpeg").exists() for p in common_paths)
+        if not ytdlp_ok:
+            ytdlp_ok = any((Path(p) / "yt-dlp").exists() for p in common_paths)
+            
     return {
         "ffmpeg": ffmpeg_ok,
         "ytdlp": ytdlp_ok
@@ -893,6 +1001,7 @@ async def handle_client_action(websocket: WebSocket, action: str, request_id: st
         elif action == "extract":
             url = payload.get("url")
             page_title = payload.get("page_title")
+            headers = payload.get("headers")
             if not url:
                 raise ValueError("URL is required for extraction")
             if url.startswith("blob:"):
@@ -906,14 +1015,32 @@ async def handle_client_action(websocket: WebSocket, action: str, request_id: st
                 "quiet": True, "no_warnings": True, "noplaylist": True,
                 "skip_download": True,
             }
+            if headers:
+                probe_opts["http_headers"] = headers
+            else:
+                # Apply cookies from browser configuration when no custom headers are provided
+                cookies_browser = SETTINGS.get("cookies_from_browser", "none")
+                if cookies_browser and cookies_browser != "none":
+                    probe_opts["cookiesfrombrowser"] = (cookies_browser,)
 
             def _probe():
                 with yt_dlp.YoutubeDL(probe_opts) as ydl:
                     return ydl.extract_info(url, download=False)
 
+            def _probe_generic():
+                generic_opts = {**probe_opts, "allowed_extractors": ["generic"]}
+                with yt_dlp.YoutubeDL(generic_opts) as ydl:
+                    return ydl.extract_info(url, download=False)
+
             extraction_method = "yt-dlp"
             try:
-                info = await loop.run_in_executor(None, _probe)
+                try:
+                    info = await loop.run_in_executor(None, _probe)
+                except Exception as exc:
+                    if "primarily used for piracy" in str(exc).lower():
+                        info = await loop.run_in_executor(None, _probe_generic)
+                    else:
+                        raise
                 extractor = (info.get("extractor") or "").lower()
                 if extractor in ("generic", "") or url.lower().endswith(tuple(STREAM_EXTS)):
                     if any(h in url.lower() for h in STREAM_MIME_HINTS) or \
@@ -997,6 +1124,17 @@ async def handle_client_action(websocket: WebSocket, action: str, request_id: st
             if url.startswith("blob:"):
                 raise ValueError("blob: URLs cannot be downloaded server-side.")
             
+            # If a custom/suggested filename is provided, strip extension for task title
+            req_filename = payload.get("filename")
+            if req_filename:
+                filename_stem, _ = os.path.splitext(req_filename)
+                task_title = filename_stem
+            else:
+                task_title = _sanitise_stream_title(
+                    "", url, payload.get("page_title"),
+                    prefer_page_title=bool(payload.get("is_stream")) or not payload.get("is_video", True)
+                )
+            
             task = DownloadTask(
                 task_id=uuid.uuid4().hex,
                 url=url,
@@ -1006,7 +1144,9 @@ async def handle_client_action(websocket: WebSocket, action: str, request_id: st
                 is_video=payload.get("is_video", True),
                 page_title=payload.get("page_title"),
                 is_stream=bool(payload.get("is_stream", False)),
-                title=_sanitise_stream_title("", url, payload.get("page_title"), prefer_page_title=bool(payload.get("is_stream"))),
+                headers=payload.get("headers"),
+                filename=req_filename or "",
+                title=task_title,
             )
             TASKS[task.task_id] = task
             await TASK_QUEUE.put(task)

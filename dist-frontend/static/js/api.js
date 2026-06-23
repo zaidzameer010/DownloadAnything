@@ -84,16 +84,8 @@ function sendWSRequest(action, payload = {}) {
   });
 }
 
-export async function fetchSettings() {
-  return sendWSRequest("get_settings");
-}
-
 export async function saveSettings(payload) {
   return sendWSRequest("save_settings", payload);
-}
-
-export async function fetchHealth() {
-  return sendWSRequest("get_health");
 }
 
 export async function cancelTask(id) {

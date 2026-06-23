@@ -11,8 +11,30 @@
  * backs the only state that must survive a restart (tab stream lists).
  */
 
-const STREAM_REGEX = /\.(m3u8|mpd|mp4|webm|mov|ogg|m4a|ts|mp3|aac|flac|wav|opus|zip|pdf|rar|7z|tar|gz|dmg|exe)(\?|#|$)/i;
+const STREAM_REGEX = /\.(m3u8|mpd|mp4|webm|mkv|avi|mov|wmv|flv|mpg|mpeg|3gp|ts|mp3|aac|m4a|flac|wav|ogg|opus|wma|vid|zip|rar|7z|tar|gz|bz2|xz|dmg|iso|bin|img|pdf|epub|doc|docx|xls|xlsx|ppt|pptx|exe|msi|apk|pkg)(\?|#|$)/i;
 const BACKEND_BASE = "http://127.0.0.1:8000";
+
+// Rolling caches to prevent memory leaks
+const requestHeadersCache = new Map(); // url -> headers object
+const urlTabMap = new Map();           // url -> tabId
+const MAX_CACHE_ENTRIES = 200;
+
+function cacheRequestHeaders(url, headers) {
+  if (requestHeadersCache.size >= MAX_CACHE_ENTRIES) {
+    const oldestKey = requestHeadersCache.keys().next().value;
+    requestHeadersCache.delete(oldestKey);
+  }
+  requestHeadersCache.set(url, headers);
+}
+
+function cacheUrlTab(url, tabId) {
+  if (tabId < 0) return;
+  if (urlTabMap.size >= MAX_CACHE_ENTRIES) {
+    const oldestKey = urlTabMap.keys().next().value;
+    urlTabMap.delete(oldestKey);
+  }
+  urlTabMap.set(url, tabId);
+}
 
 // In-memory per-tab stream registry.
 // chrome.storage.session is the persistent backing store so streams survive SW restarts.
@@ -36,11 +58,24 @@ async function restoreFromSession() {
 restoreFromSession();
 
 // ── Record a stream URL for a tab ─────────────────────────────────────────
-async function recordStream(tabId, url) {
-  if (!STREAM_REGEX.test(url)) return;
+async function recordStream(tabId, url, forceRecord = false) {
+  if (!forceRecord) {
+    if (!STREAM_REGEX.test(url)) return;
+  }
+
+  // Filter out sequential chunk segments (like chunk_5.ts or segment-12.m4s)
+  // to avoid flooding tab stream lists when the main stream is already captured
+  const isSegment = /[-_]chunk|[-_]seg|fragment|[-_]\d+\.(ts|m4s)/i.test(url);
+  if (isSegment) return;
   if (!tabStreams.has(tabId)) tabStreams.set(tabId, new Set());
   const set = tabStreams.get(tabId);
   if (set.has(url)) return;
+
+  // Enforce a maximum cap of 50 streams per tab to prevent memory/storage bloat
+  if (set.size >= 50) {
+    const first = set.values().next().value;
+    set.delete(first);
+  }
 
   set.add(url);
   try {
@@ -54,36 +89,68 @@ async function recordStream(tabId, url) {
 }
 
 // ── MV3 webRequest — non-blocking, read-only ──────────────────────────────
-// Observes URL patterns to detect HLS/DASH/media requests.
+// Observes URL patterns to detect HLS/DASH/media requests and capture metadata.
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return;
-    recordStream(details.tabId, details.url);
+    // Map URL to the tab initiating the request
+    cacheUrlTab(details.url, details.tabId);
+    
+    if (STREAM_REGEX.test(details.url)) {
+      recordStream(details.tabId, details.url, false);
+    }
   },
   { urls: ["http://*/*", "https://*/*"] },
   []
 );
 
+// Capture cookies, referer, user-agent, and origin for all tab requests
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  (details) => {
+    if (details.tabId < 0) return;
+    
+    cacheUrlTab(details.url, details.tabId);
+
+    const headers = {};
+    if (details.requestHeaders) {
+      for (const h of details.requestHeaders) {
+        const nameLower = h.name.toLowerCase();
+        if (
+          nameLower === "cookie" ||
+          nameLower === "referer" ||
+          nameLower === "user-agent" ||
+          nameLower === "origin"
+        ) {
+          headers[h.name] = h.value;
+        }
+      }
+    }
+    // Cache headers to use them for stream extraction or route verification
+    cacheRequestHeaders(details.url, headers);
+  },
+  { urls: ["http://*/*", "https://*/*"] },
+  ["requestHeaders", "extraHeaders"]
+);
+
 // Also catch MediaSource/XHR-loaded manifests via Content-Type header.
-// "responseHeaders" alone is sufficient for Content-Type sniffing;
-// "extraHeaders" is not needed here and adds unnecessary overhead.
 chrome.webRequest.onResponseStarted.addListener(
   (details) => {
     if (details.tabId < 0) return;
     const ct = details.responseHeaders?.find(
       (h) => h.name.toLowerCase() === "content-type"
     );
-    if (
-      ct &&
-      /(mpegurl|dash\+xml|video\/|audio\/|application\/pdf|application\/zip|application\/x-7z-compressed|application\/x-rar-compressed|application\/octet-stream)/i.test(
-        ct.value || ""
-      )
-    ) {
-      recordStream(details.tabId, details.url);
+    if (ct) {
+      const val = ct.value || "";
+      // If it's explicitly a media stream MIME type, force record it even without file extension
+      if (/video\/|audio\/|mpegurl|dash\+xml/i.test(val)) {
+        recordStream(details.tabId, details.url, true);
+      } else if (/(application\/pdf|application\/zip|application\/x-7z-compressed|application\/x-rar-compressed)/i.test(val)) {
+        recordStream(details.tabId, details.url, true);
+      }
     }
   },
   { urls: ["http://*/*", "https://*/*"] },
-  ["responseHeaders"] // removed "extraHeaders" — not needed for Content-Type
+  ["responseHeaders"]
 );
 
 // ── WebSocket helper ──────────────────────────────────────────────────────
@@ -201,7 +268,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "EXTRACT") {
     (async () => {
       try {
-        const data = await sendWSRequest("extract", { url: msg.url, page_title: msg.page_title });
+        const headers = requestHeadersCache.get(msg.url) || null;
+        const data = await sendWSRequest("extract", {
+          url: msg.url,
+          page_title: msg.page_title,
+          headers
+        });
         sendResponse({ ok: true, data });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });
@@ -213,7 +285,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "DOWNLOAD") {
     (async () => {
       try {
-        const data = await sendWSRequest("download", msg.payload);
+        const headers = requestHeadersCache.get(msg.payload.url) || null;
+        const payload = { ...msg.payload, headers };
+        const data = await sendWSRequest("download", payload);
         sendResponse({ ok: true, data });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });
@@ -233,6 +307,117 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
+
+  if (msg.type === "ADD_ALT_BYPASS") {
+    bypassedDownloads.add(msg.url);
+    sendResponse({ ok: true });
+    return;
+  }
+
+  if (msg.type === "BYPASS_DOWNLOAD") {
+    bypassedDownloads.add(msg.url);
+    const downloadOpts = { url: msg.url };
+    if (msg.filename) {
+      // Chrome downloads API expects filename relative to user's download directory
+      // Strip any absolute path separators just in case
+      const cleanName = msg.filename.split(/[/\\]/).pop();
+      if (cleanName) downloadOpts.filename = cleanName;
+    }
+    chrome.downloads.download(downloadOpts);
+    sendResponse({ ok: true });
+    return; // synchronous response
+  }
+});
+
+// ── Chrome Downloads Interception ────────────────────────────────────────
+const bypassedDownloads = new Set();
+
+function extractFilename(item) {
+  // 1. Try Chrome's suggested filename
+  if (item.filename) {
+    const name = item.filename.split(/[/\\]/).pop();
+    // Exclude generic browser temporary filename stubs if possible
+    if (name && name !== "download" && !name.endsWith(".crdownload")) {
+      return name;
+    }
+  }
+
+  // 2. Try to parse from the URL
+  if (item.url) {
+    try {
+      const urlObj = new URL(item.url);
+      
+      // Look in query parameters for any value containing a file extension
+      for (const [, value] of urlObj.searchParams.entries()) {
+        if (value && /\.[a-zA-Z0-9]{2,5}$/.test(value)) {
+          const name = value.split(/[/\\]/).pop();
+          if (name) return decodeURIComponent(name);
+        }
+      }
+
+      // Fallback to URL pathname segment
+      const segment = urlObj.pathname.split("/").pop();
+      if (segment) {
+        return decodeURIComponent(segment);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 3. Absolute fallback
+  return "download";
+}
+
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  // Ignore downloads explicitly requested to bypass (i.e. user wants to download via Chrome)
+  if (bypassedDownloads.has(item.url)) {
+    bypassedDownloads.delete(item.url);
+    suggest();
+    return;
+  }
+
+  // Cancel the standard Chrome download immediately
+  try {
+    chrome.downloads.cancel(item.id);
+    chrome.downloads.erase({ id: item.id });
+  } catch (err) {
+    console.error("[StreamSnatcher] Failed to cancel/erase download:", err);
+  }
+
+  // Find the exact tab that triggered the download, or fallback to the active tab
+  (async () => {
+    try {
+      let targetTabId = urlTabMap.get(item.url) || null;
+      
+      // Check if any redirects or referrer url mapped to it
+      if (!targetTabId && item.referrer) {
+        targetTabId = urlTabMap.get(item.referrer) || null;
+      }
+
+      if (!targetTabId) {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab) targetTabId = tab.id;
+      }
+
+      if (targetTabId) {
+        // item.filename now contains the correct name resolved from Content-Disposition
+        const cleanFilename = item.filename ? item.filename.split(/[/\\]/).pop() : extractFilename(item);
+        await chrome.tabs.sendMessage(targetTabId, {
+          type: "SHOW_ADD_DOWNLOAD_POPUP",
+          url: item.url,
+          filename: cleanFilename
+        });
+      } else {
+        console.warn("[StreamSnatcher] No tab context to show the download popup");
+      }
+    } catch (err) {
+      console.warn("[StreamSnatcher] Could not display popup on tab (injecting context script might be disabled on this tab/page):", err);
+    }
+  })();
+
+  // Tell Chrome to stop processing (ignored since we cancelled, but resolves pending state)
+  suggest();
 });
 
 // ── Clean up when a tab is closed ────────────────────────────────────────
@@ -246,4 +431,54 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 // ── Service worker lifecycle ──────────────────────────────────────────────
 chrome.runtime.onStartup.addListener(() => {
   console.info("[StreamSnatcher] Service worker initialised");
+});
+
+// ── Context Menus Creation & Handling (IDM-style) ────────────────────────
+function createContextMenus() {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: "download-link",
+      title: "Download Link with DownloadAnything",
+      contexts: ["link"]
+    });
+    chrome.contextMenus.create({
+      id: "download-media",
+      title: "Download Media with DownloadAnything",
+      contexts: ["video", "audio"]
+    });
+  });
+}
+
+chrome.runtime.onInstalled.addListener(createContextMenus);
+chrome.runtime.onStartup.addListener(createContextMenus);
+
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  const url = info.linkUrl || info.srcUrl;
+  if (!url) return;
+
+  // Extract filename
+  let suggestedFilename = "";
+  if (info.srcUrl) {
+    suggestedFilename = info.srcUrl.split("/").pop().split("?")[0];
+  } else if (info.linkUrl) {
+    suggestedFilename = info.linkUrl.split("/").pop().split("?")[0];
+  }
+
+  if (suggestedFilename && suggestedFilename.includes(".")) {
+    suggestedFilename = decodeURIComponent(suggestedFilename);
+  } else {
+    suggestedFilename = "download";
+  }
+
+  if (tab && tab.id) {
+    try {
+      await chrome.tabs.sendMessage(tab.id, {
+        type: "SHOW_ADD_DOWNLOAD_POPUP",
+        url: url,
+        filename: suggestedFilename
+      });
+    } catch (err) {
+      console.warn("[StreamSnatcher] Failed to display popup on context menu click:", err);
+    }
+  }
 });
