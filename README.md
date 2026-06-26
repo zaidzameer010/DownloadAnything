@@ -26,14 +26,7 @@ A high-performance media downloading ecosystem powered by **FastAPI**, **yt-dlp*
 
 ## 🚀 Getting Started
 
-### 1. Prerequisites
-- **Python 3.10 or higher** installed.
-- **FFmpeg**: Required for merging video and audio formats.
-  - **macOS**: `brew install ffmpeg`
-  - **Linux**: `sudo apt install ffmpeg`
-  - **Windows**: Download binaries and add to System PATH.
-
-### 2. Backend Installation & Startup
+### 1. Backend Installation & Startup
 Clone the repository and install the Python dependencies:
 
 ```bash
@@ -47,7 +40,7 @@ fastapi run
 ```
 The dashboard will be accessible at [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
-### 3. Load the Chrome Extension ("Stream Snatcher")
+### 2. Load the Chrome Extension ("Stream Snatcher")
 1. Open Google Chrome and navigate to `chrome://extensions/`.
 2. Enable **Developer mode** using the toggle in the top-right corner.
 3. Click **Load unpacked** in the top-left corner.

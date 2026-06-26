@@ -1,20 +1,24 @@
 """
-main.py — Enterprise Media Acquisition Engine
-============================================
-FastAPI + yt-dlp + asyncio.Queue + SSE progress + AV1 codec priority.
-Author: Systems Automation Team
+main.py — Media Acquisition Engine
+===================================
+FastAPI + yt-dlp + asyncio + WebSocket progress + AV1 codec priority.
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import platform
 import shutil
+import subprocess
+import sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -25,33 +29,29 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+logger = logging.getLogger("dma-engine")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 # ──────────────────────────────────────────────
-#  System PATH Adjustment for GUI Bundles
+#  System PATH
 # ──────────────────────────────────────────────
 def ensure_system_path() -> None:
-    """Prepend common package manager paths (Homebrew, MacPorts, etc.) to the system PATH.
-    This is critical for macOS desktop/GUI applications launched via Finder/LaunchServices,
-    which otherwise run with a minimal PATH that excludes custom binaries like deno, node, or ffmpeg.
-    """
     path_env = os.environ.get("PATH", "")
     paths = path_env.split(os.pathsep)
-    
-    additional_paths = []
+    additions: list[str] = []
     if platform.system() == "Darwin":
-        additional_paths = [
+        additions = [
             "/opt/homebrew/bin",
             "/opt/homebrew/sbin",
             "/usr/local/bin",
             "/usr/local/sbin",
             "/opt/local/bin",
         ]
-        
     updated = False
-    for p in additional_paths:
+    for p in additions:
         if p not in paths and os.path.exists(p):
             paths.insert(0, p)
             updated = True
-            
     if updated:
         os.environ["PATH"] = os.pathsep.join(paths)
 
@@ -66,10 +66,7 @@ def get_app_data_dir() -> Path:
         p = home / "Library" / "Application Support" / "DownloadAnything"
     elif platform.system() == "Windows":
         appdata = os.environ.get("APPDATA")
-        if appdata:
-            p = Path(appdata) / "DownloadAnything"
-        else:
-            p = home / "AppData" / "Roaming" / "DownloadAnything"
+        p = Path(appdata) / "DownloadAnything" if appdata else home / "AppData" / "Roaming" / "DownloadAnything"
     else:
         p = home / ".config" / "DownloadAnything"
     p.mkdir(parents=True, exist_ok=True)
@@ -84,7 +81,7 @@ def get_default_download_path() -> Path:
 APP_DATA_DIR = get_app_data_dir()
 SETTINGS_FILE = APP_DATA_DIR / "settings.json"
 BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "dist-frontend" / "static"
+STATIC_DIR = BASE_DIR / "frontend" / "static"
 TMP_DIR = APP_DATA_DIR / "tmp"
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -98,7 +95,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "Music":    str(get_default_download_path() / "music"),
         "Cinematic": str(get_default_download_path() / "cinematic"),
     },
-    "rate_limit_bytes_per_sec": 0,   # 0 = unlimited
+    "rate_limit_bytes_per_sec": 0,
     "merge_output_format": "mp4",
     "concurrent_fragments": 16,
     "embed_thumbnail": False,
@@ -112,8 +109,7 @@ def load_settings() -> Dict[str, Any]:
     if SETTINGS_FILE.exists():
         try:
             with SETTINGS_FILE.open("r", encoding="utf-8") as fh:
-                merged = {**DEFAULT_SETTINGS, **json.load(fh)}
-                return merged
+                return {**DEFAULT_SETTINGS, **json.load(fh)}
         except (json.JSONDecodeError, OSError):
             return DEFAULT_SETTINGS.copy()
     save_settings(DEFAULT_SETTINGS)
@@ -126,7 +122,21 @@ def save_settings(data: Dict[str, Any]) -> None:
 SETTINGS: Dict[str, Any] = load_settings()
 
 # ──────────────────────────────────────────────
-#  Task Model & In-Memory State
+#  Task Status Enum
+# ──────────────────────────────────────────────
+class TaskStatus(str, Enum):
+    QUEUED = "queued"
+    DOWNLOADING = "downloading"
+    STITCHING = "stitching"
+    EMBEDDING = "embedding"
+    FINALIZING = "finalizing"
+    COMPLETED = "completed"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+    PAUSED = "paused"
+
+# ──────────────────────────────────────────────
+#  Download Task
 # ──────────────────────────────────────────────
 @dataclass
 class DownloadTask:
@@ -136,10 +146,10 @@ class DownloadTask:
     category: Optional[str]
     custom_path: Optional[str]
     title: str = "Pending…"
-    status: str = "queued"        # queued | downloading | completed | error | cancelled
-    speed: float = 0.0            # bytes/sec
-    progress: float = 0.0         # 0..100
-    eta: float = 0.0              # seconds
+    status: str = TaskStatus.QUEUED
+    speed: float = 0.0
+    progress: float = 0.0
+    eta: float = 0.0
     total_bytes: int = 0
     downloaded_bytes: int = 0
     filename: str = ""
@@ -151,8 +161,21 @@ class DownloadTask:
     page_title: Optional[str] = None
     is_stream: bool = False
     headers: Optional[Dict[str, str]] = None
+    has_custom_title: bool = False
+    fragment_index: Optional[int] = None
+    fragment_count: Optional[int] = None
     _cancel: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
-    _paused: bool = field(default=False, repr=False)
+    # Cleared = paused/waiting. Set = allowed to run. New tasks must call .set() before queuing.
+    _pause_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    # Whether the executor thread for this task is currently active
+    _is_running: bool = field(default=False, repr=False)
+    # Timestamp of last WebSocket broadcast — written/read from download thread (float is GIL-safe)
+    _last_broadcast: float = field(default=0.0, repr=False)
+
+    def update(self, **kwargs: Any) -> None:
+        for k, v in kwargs.items():
+            if hasattr(self, k):
+                setattr(self, k, v)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -177,10 +200,13 @@ class DownloadTask:
             "error": self.error,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "has_custom_title": self.has_custom_title,
+            "fragment_index": self.fragment_index,
+            "fragment_count": self.fragment_count,
         }
 
 TASKS: Dict[str, DownloadTask] = {}
-TASK_QUEUE: "asyncio.Queue[DownloadTask]" = asyncio.Queue()
+TASK_QUEUE: asyncio.Queue[DownloadTask] = asyncio.Queue()
 WEBSOCKET_SUBSCRIBERS: List[WebSocket] = []
 
 # ──────────────────────────────────────────────
@@ -217,55 +243,123 @@ class SettingsUpdate(BaseModel):
     cookies_from_browser: Optional[str] = None
 
 # ──────────────────────────────────────────────
+#  Path Safety
+# ──────────────────────────────────────────────
+def is_safe_path(target_path: str | Path, base_paths: List[Path]) -> bool:
+    try:
+        target = Path(target_path).resolve()
+        for base in base_paths:
+            resolved_base = base.resolve()
+            if resolved_base in target.parents or target == resolved_base:
+                return True
+        return False
+    except Exception:
+        return False
+
+def get_allowed_roots() -> List[Path]:
+    roots = [Path.home()]
+    default_root = SETTINGS.get("default_download_path")
+    if default_root:
+        roots.append(Path(default_root))
+    for cat_path in SETTINGS.get("categories", {}).values():
+        if cat_path:
+            roots.append(Path(cat_path))
+    return roots
+
+def ensure_target_dir(target_dir: str) -> Path:
+    p = Path(target_dir)
+    p.mkdir(parents=True, exist_ok=True)
+    if not os.access(p, os.W_OK):
+        raise PermissionError(f"Target directory '{target_dir}' is not writable")
+    return p
+
+# ──────────────────────────────────────────────
+#  Title Helpers
+# ──────────────────────────────────────────────
+_GENERIC_STREAM_NAMES = frozenset({
+    "master", "index", "playlist", "stream", "video", "audio",
+    "media", "manifest", "chunklist", "output", "main", "live",
+})
+
+def sanitise_title(raw_title: str, url: str, page_title: Optional[str] = None, prefer_page: bool = False) -> str:
+    stripped = raw_title.strip()
+    if prefer_page and page_title:
+        cleaned = page_title.strip()
+        if cleaned:
+            return cleaned
+    if stripped and stripped.lower() not in _GENERIC_STREAM_NAMES:
+        return stripped
+    if page_title:
+        cleaned = page_title.strip()
+        if cleaned:
+            return cleaned
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        hostname = parsed.hostname or ""
+        stem = os.path.basename(parsed.path.rstrip("/"))
+        stem = os.path.splitext(stem)[0]
+        if stem and stem.lower() not in _GENERIC_STREAM_NAMES:
+            return f"{hostname} – {stem}" if hostname else stem
+        return hostname or stripped or "Stream"
+    except Exception:
+        return stripped or "Stream"
+
+# ──────────────────────────────────────────────
+#  FFmpeg Detection
+# ──────────────────────────────────────────────
+def find_ffmpeg_location() -> Optional[str]:
+    local_bin = get_app_data_dir() / "bin"
+    ffmpeg_exe = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
+    if (local_bin / ffmpeg_exe).exists():
+        return str(local_bin)
+    found = shutil.which("ffmpeg")
+    if found:
+        return str(Path(found).parent)
+    search = []
+    if platform.system() == "Darwin":
+        search = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+    elif platform.system() == "Windows":
+        search = ["C:\\ffmpeg\\bin", "C:\\Program Files\\ffmpeg\\bin"]
+    for p in search:
+        if (Path(p) / ffmpeg_exe).exists():
+            return p
+    return None
+
+# ──────────────────────────────────────────────
 #  yt-dlp Options Builder
 # ──────────────────────────────────────────────
-def build_ydl_options(task: DownloadTask, extract_only: bool = False) -> Dict[str, Any]:
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
+def build_ydl_opts(task: DownloadTask, loop: Optional[asyncio.AbstractEventLoop]) -> Dict[str, Any]:
     target_dir = task.custom_path or (
         SETTINGS["categories"].get(task.category) if task.category else SETTINGS["default_download_path"]
     )
-    try:
-        Path(target_dir).mkdir(parents=True, exist_ok=True)
-        # Test write access
-        test_file = Path(target_dir) / f".write_test_{uuid.uuid4().hex[:6]}"
-        test_file.write_bytes(b"x")
-        test_file.unlink(missing_ok=True)
-    except (PermissionError, OSError) as exc:
-        raise PermissionError(f"Target directory '{target_dir}' is not writable: {exc}") from exc
+
+    if not is_safe_path(target_dir, get_allowed_roots()):
+        raise PermissionError(f"Target directory '{target_dir}' is not within allowed locations.")
+
+    ensure_target_dir(target_dir)
 
     codec_pref = SETTINGS.get("fallback_codecs", ["av01", "vp09", "avc01"])
-    format_sort = [f"vcodec:{c}" for c in codec_pref] + ["res", "ext:mp4:m4a"]
-    
-    # Determine format spec
+    format_sort = [f"vcodec:{c}" for c in codec_pref] + ["res", "abr", "ext:mp4:m4a"]
+
     if task.format_id and task.format_id != "direct_stream":
         format_spec = f"{task.format_id}+ba/b" if task.is_video else task.format_id
     else:
         format_spec = "bv*+ba/b"
 
-    # Locate ffmpeg/ffprobe to ensure yt-dlp can merge/embed streams
-    ffmpeg_location = None
-    local_bin = get_app_data_dir() / "bin"
-    ffmpeg_exe = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
-    if (local_bin / ffmpeg_exe).exists():
-        ffmpeg_location = str(local_bin)
+    ffmpeg_location = find_ffmpeg_location()
+
+    if task.filename:
+        # Always use %(ext)s so yt-dlp writes the correct merged extension.
+        # Preserving the user's literal extension causes double-extension bugs
+        # (e.g. video.mp4.mp4) when yt-dlp re-muxes to the same container.
+        stem = Path(task.filename).stem
+        outtmpl_val = f"{stem}.%(ext)s"
     else:
-        ffmpeg_bin = shutil.which("ffmpeg")
-        if ffmpeg_bin:
-            ffmpeg_location = str(Path(ffmpeg_bin).parent)
-        else:
-            if platform.system() == "Darwin":
-                for p in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
-                    if (Path(p) / "ffmpeg").exists():
-                        ffmpeg_location = p
-                        break
-            elif platform.system() == "Windows":
-                for p in ["C:\\ffmpeg\\bin", "C:\\Program Files\\ffmpeg\\bin"]:
-                    if (Path(p) / "ffmpeg.exe").exists():
-                        ffmpeg_location = p
-                        break
+        outtmpl_val = "%(title).200B.%(ext)s"
+
+    task_fragment_dir = TMP_DIR / "fragments" / task.task_id
+    task_fragment_dir.mkdir(parents=True, exist_ok=True)
 
     opts: Dict[str, Any] = {
         "quiet": True,
@@ -277,299 +371,322 @@ def build_ydl_options(task: DownloadTask, extract_only: bool = False) -> Dict[st
         "concurrent_fragment_downloads": SETTINGS.get("concurrent_fragments", 16),
         "retries": 10,
         "fragment_retries": 10,
-        "outtmpl": "%(title).200B.%(ext)s",
+        "outtmpl": outtmpl_val,
         "writethumbnail": False,
         "ignoreerrors": False,
         "noplaylist": True,
-        "progress_hooks": [] if extract_only else [lambda d: _hook_sink(task, d, loop)],
+        "progress_hooks": [lambda d: _progress_hook(task, d, loop)],
+        "postprocessor_hooks": [lambda d: _postprocessor_hook(task, d, loop)],
         "postprocessors": [
             {"key": "FFmpegMetadata", "add_chapters": True},
         ],
+        "postprocessor_args": {"default": ["-nostdin"]},
+        "buffersize": 1024 * 256,
+        "paths": {
+            "home": str(target_dir),
+            "temp": str(task_fragment_dir),
+        },
+        "continuedl": True,
     }
 
-    # Embed thumbnail if enabled
     if SETTINGS.get("embed_thumbnail", False):
         opts["writethumbnail"] = True
         opts["postprocessors"].append({
             "key": "EmbedThumbnail",
-            "already_have_thumbnail": False
+            "already_have_thumbnail": False,
         })
 
-    # Embed subtitles if enabled
     if SETTINGS.get("embed_subtitles", False):
         opts["writesubtitles"] = True
         opts["writeautomaticsub"] = True
-        lang = SETTINGS.get("subtitle_language", "en")
-        opts["subtitleslangs"] = [lang]
+        opts["subtitleslangs"] = [SETTINGS.get("subtitle_language", "en")]
         opts["postprocessors"].append({
             "key": "FFmpegEmbedSubtitle",
-            "already_have_subtitle": False
+            "already_have_subtitle": False,
         })
-
-    # Route fragment temp files to the workspace temp folder so they don't
-    # accumulate inside the user's actual download folder.
-    fragment_cache = TMP_DIR / "fragments"
-    fragment_cache.mkdir(parents=True, exist_ok=True)
-    opts["paths"] = {
-        "home": str(target_dir),
-        "temp": str(fragment_cache),
-    }
-    opts["continuedl"] = True
 
     if ffmpeg_location:
         opts["ffmpeg_location"] = ffmpeg_location
 
-    # Apply rate limit if configured (0 = unlimited)
     rate_limit = SETTINGS.get("rate_limit_bytes_per_sec", 0)
     if rate_limit and rate_limit > 0:
         opts["ratelimit"] = rate_limit
 
-    # Apply proxy if configured
     proxy_val = SETTINGS.get("proxy", "").strip()
     if proxy_val:
         opts["proxy"] = proxy_val
 
-    # Apply cookies from browser if configured (only if task doesn't supply headers)
-    # This avoids database lock errors and keychain prompts when capturing from the extension
     cookies_browser = SETTINGS.get("cookies_from_browser", "none")
     if cookies_browser and cookies_browser != "none" and not task.headers:
         opts["cookiesfrombrowser"] = (cookies_browser,)
 
-    # Apply custom request headers (cookies, referer, user-agent)
     if task.headers:
         opts["http_headers"] = task.headers
 
     return opts
 
+def build_probe_opts(headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    opts: Dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+    }
+    if headers:
+        opts["http_headers"] = headers
+    else:
+        cookies_browser = SETTINGS.get("cookies_from_browser", "none")
+        if cookies_browser and cookies_browser != "none":
+            opts["cookiesfrombrowser"] = (cookies_browser,)
+    return opts
+
 # ──────────────────────────────────────────────
-#  Stream Title Sanitisation
+#  yt-dlp Extraction Helper
 # ──────────────────────────────────────────────
-# HLS/DASH manifests typically have their top-level playlist named "master",
-# "index", "playlist", or similarly uninformative strings.  When yt-dlp
-# returns one of these as the title, we derive a friendlier name from the
-# URL's hostname + path stem instead.
-_GENERIC_STREAM_NAMES = frozenset({
-    "master", "index", "playlist", "stream", "video", "audio",
-    "media", "manifest", "chunklist", "output", "main", "live",
-})
+def _extract_info(url: str, opts: Dict[str, Any]) -> Dict[str, Any]:
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(url, download=False)
 
-def _clean_page_title(pt: str) -> str:
-    """Strip common site-name suffixes and watch/download prefixes from a page title."""
-    for sep in (" | ", " - ", " \u2013 ", " \u2014 "):
-        if sep in pt:
-            parts = [p.strip() for p in pt.split(sep)]
-            if len(parts[0]) > 3:
-                pt = parts[0]
-                break
-    for prefix in ("Watch ", "Download "):
-        if pt.lower().startswith(prefix.lower()) and len(pt) > len(prefix):
-            pt = pt[len(prefix):]
-    return pt
-
-def _sanitise_stream_title(title: str, url: str, page_title: Optional[str] = None, prefer_page_title: bool = False) -> str:
-    """Return a human-readable title, falling back to page_title or a URL-derived name
-    when the raw title is a generic manifest placeholder."""
-    stripped = title.strip()
-
-    if prefer_page_title and page_title:
-        pt = _clean_page_title(page_title.strip())
-        if pt:
-            return pt
-
-    if stripped and stripped.lower() not in _GENERIC_STREAM_NAMES:
-        return stripped
-
-    if page_title:
-        pt = _clean_page_title(page_title.strip())
-        if pt:
-            return pt
-
+def _extract_with_fallback(url: str, base_opts: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        from urllib.parse import urlparse
-        p = urlparse(url)
-        hostname = p.hostname or ""
-        stem = os.path.basename(p.path.rstrip("/"))
-        stem = os.path.splitext(stem)[0]
-        if stem and stem.lower() not in _GENERIC_STREAM_NAMES:
-            return f"{hostname} \u2013 {stem}" if hostname else stem
-        return hostname or stripped or "Stream"
-    except Exception:
-        return stripped or "Stream"
+        return _extract_info(url, base_opts)
+    except Exception as exc:
+        exc_str = str(exc).lower()
+        if "cookies" in exc_str and ("database" in exc_str or "could not find" in exc_str):
+            clean_opts = {k: v for k, v in base_opts.items() if k != "cookiesfrombrowser"}
+            return _extract_info(url, clean_opts)
+        if "primarily used for piracy" in exc_str:
+            generic_opts = {**base_opts, "allowed_extractors": ["generic"]}
+            try:
+                return _extract_info(url, generic_opts)
+            except Exception:
+                clean_opts = {k: v for k, v in generic_opts.items() if k != "cookiesfrombrowser"}
+                return _extract_info(url, clean_opts)
+        raise
 
-def _fix_unsafe_extensions(info: Dict[str, Any], task: DownloadTask) -> None:
-    """Detect and override unsafe/unusual file extensions (like .php, .html) returned by 
-    script-based CDN redirection points with safe, expected extensions to bypass yt-dlp blocks."""
-    unsafe_exts = {"php", "html", "htm", "asp", "aspx", "jsp", "cgi", "pl", "py", "sh", "exe", "bat", "cmd", "dll", "vid"}
-    
-    fallback_ext = "mp4" if task.is_video else "zip"
-    
-    # Attempt to parse a valid file extension from titles, page titles, or original filename (such as customized filenames)
-    for title_str in (task.title, task.page_title, task.filename):
-        if title_str:
-            parts = title_str.split(".")
-            if len(parts) > 1:
-                ext = parts[-1].lower()
-                if ext not in unsafe_exts and ext.isalnum() and 2 <= len(ext) <= 5:
-                    fallback_ext = ext
-                    break
-
-    if info.get("ext") and info["ext"].lower() in unsafe_exts:
-        info["ext"] = fallback_ext
-        
-    for f in info.get("formats", []):
-        if f.get("ext") and f["ext"].lower() in unsafe_exts:
-            f["ext"] = fallback_ext
-
-def _hook_sink(task: DownloadTask, d: Dict[str, Any], loop: asyncio.AbstractEventLoop) -> None:
+# ──────────────────────────────────────────────
+#  Progress & Postprocessor Hooks
+# ──────────────────────────────────────────────
+def _progress_hook(task: DownloadTask, d: Dict[str, Any], loop: Optional[asyncio.AbstractEventLoop]) -> None:
     if task._cancel.is_set():
-        raise RuntimeError("Download cancelled by user")
-
-    if getattr(task, "_paused", False) or task.status == "paused":
-        task.status = "paused"
-        task.speed = 0.0
-        asyncio.run_coroutine_threadsafe(broadcast_progress(), loop)
-        while getattr(task, "_paused", False) or task.status == "paused":
-            if task._cancel.is_set():
-                raise RuntimeError("Download cancelled by user")
-            time.sleep(0.5)
-        if task.status == "paused":
-            task.status = "downloading"
-        asyncio.run_coroutine_threadsafe(broadcast_progress(), loop)
+        raise yt_dlp.utils.DownloadError("Download cancelled by user")
 
     status = d.get("status")
-    info_dict = d.get("info_dict") or {}
-    title = info_dict.get("title")
-    if title:
-        task.title = _sanitise_stream_title(title, task.url, task.page_title, prefer_page_title=task.is_stream)
+    updates: Dict[str, Any] = {}
 
     if status == "downloading":
-        task.status = "downloading"
-        task.speed = float(d.get("speed") or 0.0)
-        
-        combined_total = 0
-        completed_size = 0
-        requested_formats = info_dict.get("requested_formats") or []
-        current_format_id = info_dict.get("format_id")
-        
-        if requested_formats:
-            combined_total = sum(f.get("filesize") or f.get("filesize_estimate") or 0 for f in requested_formats)
-            
-            current_format_index = -1
-            if current_format_id:
-                for idx, fmt in enumerate(requested_formats):
-                    if fmt.get("format_id") == current_format_id:
-                        current_format_index = idx
-                        break
-            
-            if current_format_index > 0:
-                completed_size = sum(f.get("filesize") or f.get("filesize_estimate") or 0 for f in requested_formats[:current_format_index])
-                
-        current_total = d.get("total_bytes") or d.get("total_bytes_estimate") or info_dict.get("filesize") or info_dict.get("filesize_estimate") or 0
-        
-        task.total_bytes = int(combined_total if combined_total > 0 else current_total)
-        task.downloaded_bytes = completed_size + int(d.get("downloaded_bytes") or 0)
-        
-        # Keep total_bytes and downloaded_bytes monotonically non-decreasing
-        task.total_bytes = max(task.total_bytes, task.downloaded_bytes)
-        
-        if task.total_bytes > 0:
-            task.progress = (task.downloaded_bytes / task.total_bytes) * 100.0
-            
-        if task.speed > 0:
-            task.eta = max(0.0, (task.total_bytes - task.downloaded_bytes) / task.speed)
-            
-        task.filename = d.get("filename", task.filename)
+        updates["status"] = TaskStatus.DOWNLOADING
+        info = d.get("info_dict") or {}
+
+        title = info.get("title")
+        if title and not task.has_custom_title:
+            updates["title"] = sanitise_title(title, task.url, task.page_title, prefer_page=task.is_stream)
+
+        speed = float(d.get("speed") or 0.0)
+        updates["speed"] = speed
+
+        total = int(d.get("total_bytes") or d.get("total_bytes_estimate") or 0)
+        downloaded = int(d.get("downloaded_bytes") or 0)
+
+        frag_idx = d.get("fragment_index")
+        frag_cnt = d.get("fragment_count")
+
+        if frag_idx is not None:
+            updates["fragment_index"] = frag_idx + 1
+        if frag_cnt is not None:
+            updates["fragment_count"] = frag_cnt
+
+        if frag_idx is not None and frag_cnt is not None and frag_cnt > 0:
+            # Primary: fragment-based progress (reliable for segmented streams)
+            frag_pct = ((frag_idx + 1) / frag_cnt) * 100.0
+            usable_total = total if total > 0 else task.total_bytes
+            if usable_total > 0 and downloaded > 0:
+                # Blend: take the higher of frag-based vs byte-based progress
+                # so the bar never goes backward when fragment sizes are uneven.
+                byte_pct = (downloaded / usable_total) * 100.0
+                updates["progress"] = min(max(frag_pct, byte_pct), 99.9)
+                updates["total_bytes"] = usable_total
+            else:
+                updates["progress"] = min(frag_pct, 99.9)
+        elif total > 0:
+            updates["total_bytes"] = total
+            updates["progress"] = min((downloaded / total) * 100.0, 99.9)
+        elif task.total_bytes > 0:
+            updates["total_bytes"] = task.total_bytes
+            if downloaded > 0:
+                updates["progress"] = min((downloaded / task.total_bytes) * 100.0, 99.9)
+
+        updates["downloaded_bytes"] = downloaded
+
+        if speed > 0:
+            ref_total = updates.get("total_bytes", task.total_bytes)
+            if ref_total > 0:
+                remaining = ref_total - downloaded
+                updates["eta"] = max(0.0, remaining / speed)
+
+        filename = d.get("filename")
+        if filename:
+            updates["filename"] = filename
+
     elif status == "finished":
-        task.progress = 100.0
-        task.filename = d.get("filename", task.filename)
+        # A stream/fragment finished downloading — don't jump to 100% yet;
+        # postprocessing (merge/mux) is still pending.
+        filename = d.get("filename")
+        if filename:
+            updates["filename"] = filename
+
     elif status == "error":
-        task.status = "error"
+        updates["status"] = TaskStatus.ERROR
+
+    if updates:
+        _apply_updates(task, updates, loop)
 
     now = time.time()
-    last = getattr(task, "_last_broadcast", 0.0)
-    if now - last >= 0.5 or status in ("finished", "error"):
-        setattr(task, "_last_broadcast", now)
-        asyncio.run_coroutine_threadsafe(broadcast_progress(), loop)
+    if now - task._last_broadcast >= 0.5 or status in ("finished", "error"):
+        task._last_broadcast = now
+        if loop:
+            asyncio.run_coroutine_threadsafe(broadcast_progress(), loop)
+
+
+_PP_STATUS_MAP: Dict[str, TaskStatus] = {
+    "Merger": TaskStatus.STITCHING,
+    "FFmpegMerger": TaskStatus.STITCHING,
+    "EmbedThumbnail": TaskStatus.EMBEDDING,
+    "FFmpegEmbedSubtitle": TaskStatus.EMBEDDING,
+    "MoveFiles": TaskStatus.FINALIZING,
+}
+
+
+def _postprocessor_hook(task: DownloadTask, d: Dict[str, Any], loop: Optional[asyncio.AbstractEventLoop]) -> None:
+    if task._cancel.is_set():
+        raise yt_dlp.utils.DownloadError("Download cancelled by user")
+
+    status = d.get("status")
+    # Per yt-dlp docs: status is "started" | "processing" | "finished".
+    # Ignore unknown values per spec.
+    if status not in ("started", "finished"):
+        return
+
+    pp = d.get("postprocessor") or ""
+
+    if status == "started":
+        new_status = _PP_STATUS_MAP.get(pp, TaskStatus.FINALIZING)
+        _apply_updates(task, {"status": new_status, "progress": 99.0}, loop)
+        if loop:
+            asyncio.run_coroutine_threadsafe(broadcast_progress(), loop)
+    elif status == "finished" and pp in ("Merger", "FFmpegMerger"):
+        # Merge complete — yt-dlp sets info_dict["filepath"] to the merged output path.
+        # Per FFmpegMergerPP.run(): info["filepath"] is the final merged file before return.
+        info_dict = d.get("info_dict") or {}
+        filepath = info_dict.get("filepath") or info_dict.get("_filename")
+        updates: Dict[str, Any] = {"progress": 99.9}
+        if filepath:
+            updates["final_path"] = filepath
+            updates["filename"] = filepath
+        _apply_updates(task, updates, loop)
+        if loop:
+            asyncio.run_coroutine_threadsafe(broadcast_progress(), loop)
+
+
+def _apply_updates(task: DownloadTask, updates: Dict[str, Any], loop: Optional[asyncio.AbstractEventLoop]) -> None:
+    if loop:
+        loop.call_soon_threadsafe(lambda u=dict(updates), t=task: t.update(**u))
+    else:
+        task.update(**updates)
 
 # ──────────────────────────────────────────────
-#  Tasks Disk Persistence
+#  Task Disk Persistence
 # ──────────────────────────────────────────────
-TASKS_DIR = TMP_DIR  # same as APP_DATA_DIR / "tmp" — use the single constant
-TASKS_FILE = TASKS_DIR / "tasks.json"
-_save_tasks_scheduled = False
+TASKS_FILE = TMP_DIR / "tasks.json"
 
 def load_tasks() -> None:
     global TASKS
     if not TASKS_FILE.exists():
         return
     try:
-        TASKS_DIR.mkdir(parents=True, exist_ok=True)
         with TASKS_FILE.open("r", encoding="utf-8") as fh:
             data = json.load(fh)
-            for task_id, task_dict in data.items():
-                task = DownloadTask(
-                    task_id=task_dict["task_id"],
-                    url=task_dict["url"],
-                    format_id=task_dict.get("format_id"),
-                    category=task_dict.get("category"),
-                    custom_path=task_dict.get("custom_path"),
-                    title=task_dict.get("title", "Pending…"),
-                    status=task_dict.get("status", "queued"),
-                    speed=0.0,
-                    progress=task_dict.get("progress", 0.0),
-                    eta=0.0,
-                    total_bytes=task_dict.get("total_bytes", 0),
-                    downloaded_bytes=task_dict.get("downloaded_bytes", 0),
-                    filename=task_dict.get("filename", ""),
-                    final_path=task_dict.get("final_path", ""),
-                    error=task_dict.get("error", ""),
-                    started_at=task_dict.get("started_at", 0.0),
-                    finished_at=task_dict.get("finished_at", 0.0),
-                    is_video=task_dict.get("is_video", True),
-                    page_title=task_dict.get("page_title"),
-                    is_stream=task_dict.get("is_stream", False),
-                    headers=task_dict.get("headers"),
-                )
-                if task.status in ("downloading", "queued"):
-                    task.status = "paused"
-                    task._paused = True
-                TASKS[task_id] = task
+        for task_id, td in data.items():
+            task = DownloadTask(
+                task_id=td["task_id"],
+                url=td["url"],
+                format_id=td.get("format_id"),
+                category=td.get("category"),
+                custom_path=td.get("custom_path"),
+                title=td.get("title", "Pending…"),
+                status=td.get("status", TaskStatus.QUEUED),
+                speed=0.0,
+                progress=td.get("progress", 0.0),
+                eta=0.0,
+                total_bytes=td.get("total_bytes", 0),
+                downloaded_bytes=td.get("downloaded_bytes", 0),
+                filename=td.get("filename", ""),
+                final_path=td.get("final_path", ""),
+                error=td.get("error", ""),
+                started_at=td.get("started_at", 0.0),
+                finished_at=td.get("finished_at", 0.0),
+                is_video=td.get("is_video", True),
+                page_title=td.get("page_title"),
+                is_stream=td.get("is_stream", False),
+                headers=td.get("headers"),
+                has_custom_title=td.get("has_custom_title", False),
+                fragment_index=td.get("fragment_index"),
+                fragment_count=td.get("fragment_count"),
+            )
+            # On restart, any task that was actively downloading or queued cannot
+            # be resumed automatically — mark as PAUSED so the user can resume.
+            # Also cover mid-postprocessing states (stitching/embedding/finalizing)
+            # since those processes are killed on shutdown.
+            if task.status in (
+                TaskStatus.DOWNLOADING, TaskStatus.QUEUED,
+                TaskStatus.STITCHING, TaskStatus.EMBEDDING, TaskStatus.FINALIZING,
+            ):
+                task.status = TaskStatus.PAUSED
+                # _pause_event is already cleared (default=asyncio.Event() is unset)
+            TASKS[task_id] = task
     except Exception as e:
-        print(f"Error loading tasks: {e}")
+        logger.error("Error loading tasks: %s", e)
 
-def _write_tasks_to_disk() -> None:
-    """Atomic task persistence: write to .tmp then rename."""
-    TASKS_DIR.mkdir(parents=True, exist_ok=True)
-    data = {task_id: task.to_dict() for task_id, task in TASKS.items()}
-    temp_file = TASKS_FILE.with_suffix(".tmp")
-    with temp_file.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
-    temp_file.replace(TASKS_FILE)
+_write_tasks_lock = threading.Lock()
 
-async def save_tasks_async() -> None:
-    global _save_tasks_scheduled
-    _save_tasks_scheduled = False
+def _write_tasks() -> None:
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    data = {tid: t.to_dict() for tid, t in TASKS.items()}
+    tmp = TASKS_FILE.with_suffix(f".tmp.{uuid.uuid4().hex[:6]}")
     try:
-        _write_tasks_to_disk()
-    except Exception as e:
-        print(f"Error saving tasks: {e}")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except Exception:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
+    try:
+        with _write_tasks_lock:
+            os.replace(str(tmp), str(TASKS_FILE))
+    except Exception:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
 
 def save_tasks_now() -> None:
     try:
-        _write_tasks_to_disk()
+        _write_tasks()
     except Exception as e:
-        print(f"Error saving tasks immediately: {e}")
+        logger.error("Error saving tasks: %s", e)
+
+async def save_tasks_async() -> None:
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, _write_tasks)
+    except Exception as e:
+        logger.error("Error saving tasks async: %s", e)
 
 def schedule_save_tasks() -> None:
-    global _save_tasks_scheduled
-    if _save_tasks_scheduled:
-        return
-    _save_tasks_scheduled = True
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(_delayed_save())
     except RuntimeError:
-        # No running loop (e.g. called from a sync context); save synchronously
         save_tasks_now()
 
 async def _delayed_save() -> None:
@@ -577,7 +694,46 @@ async def _delayed_save() -> None:
     await save_tasks_async()
 
 # ──────────────────────────────────────────────
-#  Worker Pool — Concurrent Download Execution
+#  Temp File Cleanup
+# ──────────────────────────────────────────────
+def cleanup_task_files(task: DownloadTask) -> None:
+    if task.status not in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
+        return
+
+    frag_dir = TMP_DIR / "fragments" / task.task_id
+    if frag_dir.is_dir():
+        try:
+            shutil.rmtree(frag_dir)
+            logger.info("Cleaned fragment dir: %s", frag_dir)
+        except Exception as e:
+            logger.warning("Failed to clean fragment dir %s: %s", frag_dir, e)
+
+    if task.status == TaskStatus.CANCELLED and task.filename:
+        target_dir = Path(task.custom_path or (
+            SETTINGS["categories"].get(task.category) if task.category else SETTINGS["default_download_path"]
+        ))
+        if target_dir.exists():
+            stem = Path(task.filename).stem
+            for item in target_dir.iterdir():
+                if not item.is_file():
+                    continue
+                name_lower = item.name.lower()
+                is_temp = (
+                    item.suffix.lower() in (".part", ".ytdl")
+                    or "part-fragment" in name_lower
+                    or "-frag" in name_lower
+                )
+                if not is_temp:
+                    continue
+                if stem.lower() in item.stem.lower():
+                    try:
+                        item.unlink(missing_ok=True)
+                        logger.info("Cleaned temp file: %s", item)
+                    except Exception as e:
+                        logger.warning("Failed to clean %s: %s", item, e)
+
+# ──────────────────────────────────────────────
+#  Worker Pool
 # ──────────────────────────────────────────────
 async def download_worker(worker_id: int) -> None:
     loop = asyncio.get_running_loop()
@@ -585,92 +741,108 @@ async def download_worker(worker_id: int) -> None:
         task: DownloadTask = await TASK_QUEUE.get()
         try:
             if task._cancel.is_set():
-                task.status = "cancelled"
-                await broadcast_progress()
-                continue
-
-            while getattr(task, "_paused", False) or task.status == "paused":
-                if task._cancel.is_set():
-                    task.status = "cancelled"
-                    await broadcast_progress()
-                    break
-                await asyncio.sleep(0.5)
-
-            if task.status == "cancelled":
-                continue
-
-            setattr(task, "_active_thread", True)
-            task.status = "downloading"
-            task.started_at = time.time()
-            save_tasks_now()
-            opts = None
-            try:
-                opts = build_ydl_options(task, extract_only=False)
-            except PermissionError as exc:
-                task.status = "error"
-                task.error = str(exc)
-                task.finished_at = time.time()
+                task.update(status=TaskStatus.CANCELLED)
                 await broadcast_progress()
                 save_tasks_now()
                 continue
 
-            def _run():
-                current_opts = opts
-                try:
-                    with yt_dlp.YoutubeDL(current_opts) as ydl:
-                        info = ydl.extract_info(task.url, download=False)
-                except Exception as exc:
-                    if "primarily used for piracy" in str(exc).lower():
-                        current_opts = {**opts, "allowed_extractors": ["generic"]}
-                        with yt_dlp.YoutubeDL(current_opts) as ydl:
-                            info = ydl.extract_info(task.url, download=False)
-                    else:
-                        raise
+            # Wait while paused — polls until resumed or cancelled
+            while not task._pause_event.is_set():
+                if task._cancel.is_set():
+                    task.update(status=TaskStatus.CANCELLED)
+                    await broadcast_progress()
+                    save_tasks_now()
+                    break
+                await asyncio.sleep(0.3)
 
-                with yt_dlp.YoutubeDL(current_opts) as ydl:
-                    if not info:
-                        raise yt_dlp.utils.DownloadError("Failed to extract info")
-                        
-                    raw_title = info.get("title", task.title) or ""
-                    sanitised = _sanitise_stream_title(raw_title, task.url, task.page_title, prefer_page_title=task.is_stream or not task.is_video)
-                    task.title = sanitised
-                    info["title"] = sanitised
-                    
-                    _fix_unsafe_extensions(info, task)
-                    
-                    ydl.process_ie_result(info, download=True)
-                    
-                    if "requested_downloads" in info and info["requested_downloads"]:
-                        task.final_path = info["requested_downloads"][0].get("filepath", "")
-                    else:
-                        task.final_path = ydl.prepare_filename(info)
+            if task.status == TaskStatus.CANCELLED:
+                continue
+
+            task._is_running = True
+            task.update(status=TaskStatus.DOWNLOADING, started_at=time.time())
+            save_tasks_now()
 
             try:
-                await loop.run_in_executor(None, _run)
+                try:
+                    opts = build_ydl_opts(task, loop)
+                except PermissionError as exc:
+                    task.update(status=TaskStatus.ERROR, error=str(exc))
+                    continue
+
+                def _run_download() -> None:
+                    """
+                    Single-pass yt-dlp download with cookie fallback.
+
+                    We use one YoutubeDL instance and call extract_info(download=True).
+                    This is the canonical yt-dlp usage: format selection, postprocessors,
+                    progress hooks, and final-path reporting all work correctly this way.
+                    """
+                    current_opts = opts
+                    info = None
+                    try:
+                        with yt_dlp.YoutubeDL(current_opts) as ydl:
+                            info = ydl.extract_info(task.url, download=True)
+                            if info:
+                                requested = info.get("requested_downloads") or []
+                                if requested:
+                                    fp = requested[0].get("filepath") or requested[0].get("_filename", "")
+                                    if fp:
+                                        task.final_path = fp
+                                        task.filename = fp
+                                if not task.final_path:
+                                    task.final_path = ydl.prepare_filename(info)
+                    except Exception as exc:
+                        exc_str = str(exc).lower()
+                        if "cookies" in exc_str and ("database" in exc_str or "could not find" in exc_str or "keychain" in exc_str):
+                            # Retry without cookiesfrombrowser
+                            current_opts = {k: v for k, v in opts.items() if k != "cookiesfrombrowser"}
+                            with yt_dlp.YoutubeDL(current_opts) as ydl:
+                                info = ydl.extract_info(task.url, download=True)
+                                if info:
+                                    requested = info.get("requested_downloads") or []
+                                    if requested:
+                                        fp = requested[0].get("filepath") or requested[0].get("_filename", "")
+                                        if fp:
+                                            task.final_path = fp
+                                            task.filename = fp
+                                    if not task.final_path:
+                                        task.final_path = ydl.prepare_filename(info)
+                        else:
+                            raise
+
+                    if not info:
+                        raise yt_dlp.utils.DownloadError("No info extracted")
+
+                    # Update title from completed download metadata (don't mutate info dict)
+                    if not task.has_custom_title:
+                        raw_title = info.get("title") or ""
+                        task.title = sanitise_title(raw_title, task.url, task.page_title, prefer_page=task.is_stream)
+
+                await loop.run_in_executor(None, _run_download)
                 if task._cancel.is_set():
-                    task.status = "cancelled"
-                elif task.status != "error":
-                    task.status = "completed"
-                    task.progress = 100.0
+                    task.update(status=TaskStatus.CANCELLED)
+                else:
+                    task.update(status=TaskStatus.COMPLETED, progress=100.0)
             except yt_dlp.utils.DownloadError as exc:
                 if task._cancel.is_set():
-                    task.status = "cancelled"
+                    task.update(status=TaskStatus.CANCELLED)
                 else:
-                    task.status = "error"
-                    task.error = str(exc)
+                    err_msg = str(exc)
+                    task.update(status=TaskStatus.ERROR, error=err_msg)
+                    logger.error("Download error for task %s: %s", task.task_id, err_msg)
             except asyncio.CancelledError:
-                task.status = "cancelled"
-                task.error = "Worker terminated"
+                task.update(status=TaskStatus.CANCELLED, error="Worker terminated")
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
+                logger.error("Unexpected download error for task %s: %s", task.task_id, exc, exc_info=True)
                 if task._cancel.is_set():
-                    task.status = "cancelled"
+                    task.update(status=TaskStatus.CANCELLED)
                 else:
-                    task.status = "error"
-                    task.error = f"Unexpected: {exc}"
+                    task.update(status=TaskStatus.ERROR, error=f"Unexpected: {exc}")
             finally:
-                setattr(task, "_active_thread", False)
+                task._is_running = False
                 task.finished_at = time.time()
+                await asyncio.get_running_loop().run_in_executor(None, cleanup_task_files, task)
                 await broadcast_progress()
                 save_tasks_now()
         finally:
@@ -678,9 +850,7 @@ async def download_worker(worker_id: int) -> None:
 
 async def spawn_workers(app: FastAPI) -> None:
     n = SETTINGS.get("max_concurrent_downloads", 3)
-    app.state.workers = [
-        asyncio.create_task(download_worker(i)) for i in range(n)
-    ]
+    app.state.workers = [asyncio.create_task(download_worker(i)) for i in range(n)]
 
 async def stop_workers(app: FastAPI) -> None:
     for w in getattr(app.state, "workers", []):
@@ -690,8 +860,8 @@ async def stop_workers(app: FastAPI) -> None:
 # ──────────────────────────────────────────────
 #  WebSocket Broadcast
 # ──────────────────────────────────────────────
-async def broadcast_progress() -> None:
-    payload = json.dumps({
+def get_broadcast_payload() -> str:
+    return json.dumps({
         "type": "tasks",
         "data": [t.to_dict() for t in TASKS.values()],
         "health": {
@@ -699,8 +869,16 @@ async def broadcast_progress() -> None:
             "yt_dlp_version": yt_dlp.version.__version__,
             "active_workers": len(getattr(app.state, "workers", [])),
         },
-        "settings": SETTINGS
+        "settings": SETTINGS,
     })
+
+async def broadcast_progress() -> None:
+    """Push current task state to all connected WebSocket clients.
+
+    Does NOT trigger a disk save — callers that mutate task state are
+    responsible for calling save_tasks_now() when appropriate.
+    """
+    payload = get_broadcast_payload()
     dead: List[WebSocket] = []
     for ws in WEBSOCKET_SUBSCRIBERS:
         try:
@@ -710,7 +888,6 @@ async def broadcast_progress() -> None:
     for ws in dead:
         if ws in WEBSOCKET_SUBSCRIBERS:
             WEBSOCKET_SUBSCRIBERS.remove(ws)
-    schedule_save_tasks()
 
 # ──────────────────────────────────────────────
 #  FastAPI Application
@@ -720,7 +897,6 @@ async def lifespan(app: FastAPI):
     load_tasks()
     await spawn_workers(app)
     yield
-    # Shutdown: save tasks atomically before stopping workers
     save_tasks_now()
     await stop_workers(app)
 
@@ -728,9 +904,6 @@ app = FastAPI(title="Media Acquisition Engine", version="2.0.0", lifespan=lifesp
 
 app.add_middleware(
     CORSMiddleware,
-    # Restrict to localhost origins only — the app is a local FastAPI server.
-    # Using allow_origins=["*"] with allow_credentials=True is forbidden by
-    # the CORS spec and silently broken in modern browsers.
     allow_origins=[
         "http://localhost",
         "http://localhost:8000",
@@ -757,297 +930,168 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # ──────────────────────────────────────────────
-#  Endpoints
+#  HTTP Endpoints
 # ──────────────────────────────────────────────
 @app.get("/")
 async def index():
-    idx = BASE_DIR / "dist-frontend" / "index.html"
+    idx = BASE_DIR / "frontend" / "index.html"
     if idx.exists():
         return FileResponse(str(idx))
-    
-    import sys
     is_frozen = getattr(sys, "frozen", False)
     return JSONResponse({
         "status": "ok",
         "service": "Media Acquisition Engine",
         "mode": "sidecar" if is_frozen else "api-only",
         "message": (
-            "Frontend UI files (index.html) were not found. "
-            "If the Tauri desktop application is running, please use the desktop app window. "
-            "If you want to run the browser dashboard, close the desktop application and run 'fastapi run' "
-            "from the project root directory."
-        )
+            "Frontend UI files (index.html) not found. "
+            "Use the desktop app or run 'fastapi run' from the project root."
+        ),
     })
 
-def check_binaries_status() -> Dict[str, bool]:
-    app_bin_dir = get_app_data_dir() / "bin"
-    ffmpeg_name = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
-    ytdlp_name = "yt-dlp.exe" if platform.system() == "Windows" else "yt-dlp"
-    
-    ffmpeg_ok = bool(shutil.which("ffmpeg")) or (app_bin_dir / ffmpeg_name).exists()
-    ytdlp_ok = bool(shutil.which("yt-dlp")) or (app_bin_dir / ytdlp_name).exists()
-    
-    if platform.system() == "Darwin":
-        common_paths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
-        if not ffmpeg_ok:
-            ffmpeg_ok = any((Path(p) / "ffmpeg").exists() for p in common_paths)
-        if not ytdlp_ok:
-            ytdlp_ok = any((Path(p) / "yt-dlp").exists() for p in common_paths)
-            
-    return {
-        "ffmpeg": ffmpeg_ok,
-        "ytdlp": ytdlp_ok
-    }
+# ──────────────────────────────────────────────
+#  WebSocket Action Handler
+# ──────────────────────────────────────────────
+# Protocols that indicate a segmented/streaming source.
+# Using yt-dlp's format protocol field is more reliable than inspecting URLs
+# or extractor names ("generic" extractor is used by many non-stream platforms).
+_STREAM_PROTOCOLS = frozenset({
+    "m3u8", "m3u8_native", "dash", "rtmp", "rtmpe", "rtmps", "rtmpt", "rtmpte",
+})
 
-def download_file_with_progress(url: str, dest_path: Path, progress_callback):
-    import urllib.request
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    with urllib.request.urlopen(req) as response:
-        total_size = int(response.headers.get('content-length', 0))
-        downloaded = 0
-        block_size = 1024 * 64
-        with open(dest_path, 'wb') as f:
-            while True:
-                buffer = response.read(block_size)
-                if not buffer:
-                    break
-                downloaded += len(buffer)
-                f.write(buffer)
-                if total_size > 0:
-                    percent = int((downloaded / total_size) * 100)
-                    progress_callback(percent)
 
-def install_binaries_in_thread(websocket: WebSocket, request_id: str, loop: asyncio.AbstractEventLoop):
-    import urllib.request
-    import zipfile
-    import tempfile
-    
+def _formats_are_stream(formats: List[Dict[str, Any]]) -> bool:
+    """Return True if the dominant format protocol indicates a live/segmented stream."""
+    protocols = {f.get("protocol", "") for f in formats if f.get("protocol")}
+    return bool(protocols & _STREAM_PROTOCOLS)
+
+
+async def estimate_stream_size(url: str, headers: Optional[Dict[str, str]] = None) -> Optional[int]:
+    """Estimate total bytes for an HLS/m3u8 stream by sampling segment sizes.
+
+    Returns None if the optional aiohttp/m3u8 packages are not installed,
+    or if estimation fails for any reason — callers must handle None gracefully.
+    """
     try:
-        app_bin_dir = get_app_data_dir() / "bin"
-        app_bin_dir.mkdir(parents=True, exist_ok=True)
-        system = platform.system()
-        
-        status = check_binaries_status()
-        
-        # 1. Download & install FFmpeg if missing
-        if not status["ffmpeg"]:
-            def ffmpeg_progress(pct):
-                asyncio.run_coroutine_threadsafe(
-                    websocket.send_json({
-                        "type": "onboarding",
-                        "binary": "ffmpeg",
-                        "status": "downloading",
-                        "progress": pct
-                    }),
-                    loop
+        import aiohttp  # optional dependency
+        import m3u8     # optional dependency
+    except ImportError:
+        logger.debug("estimate_stream_size: aiohttp or m3u8 not installed; skipping size estimation")
+        return None
+
+    req_headers = dict(headers or {})
+    if "User-Agent" not in req_headers:
+        req_headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=req_headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    return None
+                manifest = await resp.text()
+
+            playlist = m3u8.loads(manifest, uri=url)
+            if playlist.is_variant:
+                best = max(
+                    playlist.playlists,
+                    key=lambda p: p.stream_info.bandwidth if p.stream_info else 0,
+                    default=None,
                 )
-                
-            ffmpeg_progress(0)
-            
-            if system == "Darwin":
-                url = "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
-                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                    tmp_name = tmp.name
-                try:
-                    download_file_with_progress(url, Path(tmp_name), ffmpeg_progress)
-                    ffmpeg_progress(100)
-                    asyncio.run_coroutine_threadsafe(
-                        websocket.send_json({
-                            "type": "onboarding",
-                            "binary": "ffmpeg",
-                            "status": "extracting",
-                            "progress": 100
-                        }),
-                        loop
-                    )
-                    with zipfile.ZipFile(tmp_name) as z:
-                        for member in z.namelist():
-                            if member.endswith("ffmpeg") and not member.startswith("__MACOSX"):
-                                dest = app_bin_dir / "ffmpeg"
-                                with z.open(member) as source, open(dest, "wb") as target:
-                                    shutil.copyfileobj(source, target)
-                                dest.chmod(0o755)
-                                break
-                finally:
-                    if os.path.exists(tmp_name):
-                        os.unlink(tmp_name)
-                        
-            elif system == "Windows":
-                url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                    tmp_name = tmp.name
-                try:
-                    download_file_with_progress(url, Path(tmp_name), ffmpeg_progress)
-                    ffmpeg_progress(100)
-                    asyncio.run_coroutine_threadsafe(
-                        websocket.send_json({
-                            "type": "onboarding",
-                            "binary": "ffmpeg",
-                            "status": "extracting",
-                            "progress": 100
-                        }),
-                        loop
-                    )
-                    with zipfile.ZipFile(tmp_name) as z:
-                        for member in z.namelist():
-                            if member.endswith("ffmpeg.exe"):
-                                dest = app_bin_dir / "ffmpeg.exe"
-                                with z.open(member) as source, open(dest, "wb") as target:
-                                    shutil.copyfileobj(source, target)
-                                break
-                finally:
-                    if os.path.exists(tmp_name):
-                        os.unlink(tmp_name)
-                        
+                if best and best.absolute_uri:
+                    async with session.get(best.absolute_uri, headers=req_headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status != 200:
+                            return None
+                        playlist = m3u8.loads(await resp.text(), uri=best.absolute_uri)
+
+            segments = [s for s in playlist.segments if s.uri]
+            if not segments:
+                return None
+
+            total = len(segments)
+            if total <= 5:
+                sample_urls = [s.absolute_uri for s in segments]
             else:
-                raise NotImplementedError(f"Unsupported OS for FFmpeg installation: {system}")
-                
-        # 2. Download & install yt-dlp if missing
-        if not status["ytdlp"]:
-            def ytdlp_progress(pct):
-                asyncio.run_coroutine_threadsafe(
-                    websocket.send_json({
-                        "type": "onboarding",
-                        "binary": "ytdlp",
-                        "status": "downloading",
-                        "progress": pct
-                    }),
-                    loop
-                )
-                
-            ytdlp_progress(0)
-            
-            if system == "Windows":
-                url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-                dest = app_bin_dir / "yt-dlp.exe"
-            elif system == "Darwin":
-                url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
-                dest = app_bin_dir / "yt-dlp"
-            else:
-                raise NotImplementedError(f"Unsupported OS for yt-dlp installation: {system}")
-                
-            download_file_with_progress(url, dest, ytdlp_progress)
-            if system != "Windows":
-                dest.chmod(0o755)
-            ytdlp_progress(100)
-            
-        asyncio.run_coroutine_threadsafe(
-            websocket.send_json({
-                "type": "response",
-                "action": "install_binaries",
-                "request_id": request_id,
-                "ok": True,
-                "data": {"status": "completed", "ffmpeg": True, "ytdlp": True}
-            }),
-            loop
-        )
-    except Exception as exc:
-        asyncio.run_coroutine_threadsafe(
-            websocket.send_json({
-                "type": "response",
-                "action": "install_binaries",
-                "request_id": request_id,
-                "ok": False,
-                "error": str(exc)
-            }),
-            loop
-        )
+                indices = [0, total // 4, total // 2, 3 * total // 4, total - 1]
+                sample_urls = [segments[i].absolute_uri for i in indices]
+
+            async def _head_size(seg_url: str) -> int:
+                try:
+                    async with session.head(seg_url, headers=req_headers, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                        if r.status == 200:
+                            return int(r.headers.get("Content-Length", 0))
+                except Exception:
+                    pass
+                return 0
+
+            sizes = await asyncio.gather(*[_head_size(u) for u in sample_urls])
+            valid = [s for s in sizes if s > 0]
+            if not valid:
+                return None
+
+            avg = sum(valid) / len(valid)
+            return int(avg * total)
+    except Exception as e:
+        logger.debug("Stream size estimation failed for %s: %s", url, e)
+        return None
 
 async def handle_client_action(websocket: WebSocket, action: str, request_id: str, payload: Dict[str, Any]):
     global SETTINGS
     try:
-        # 1. get_settings
         if action == "get_settings":
             await websocket.send_json({
-                "type": "response",
-                "action": action,
-                "request_id": request_id,
-                "ok": True,
-                "data": SETTINGS
+                "type": "response", "action": action, "request_id": request_id,
+                "ok": True, "data": SETTINGS,
             })
-            
-        # 2. save_settings
+
         elif action == "save_settings":
+            try:
+                validated = SettingsUpdate(**payload)
+                updates = {k: v for k, v in validated.model_dump().items() if v is not None}
+            except Exception as e:
+                await websocket.send_json({
+                    "type": "response", "action": action, "request_id": request_id,
+                    "ok": False, "error": f"Invalid settings: {e}",
+                })
+                return
             old_concurrency = SETTINGS.get("max_concurrent_downloads", 3)
-            SETTINGS.update({k: v for k, v in payload.items() if v is not None})
+            SETTINGS.update(updates)
             save_settings(SETTINGS)
             if "max_concurrent_downloads" in payload and payload["max_concurrent_downloads"] != old_concurrency:
                 await stop_workers(app)
                 await spawn_workers(app)
             await websocket.send_json({
-                "type": "response",
-                "action": action,
-                "request_id": request_id,
-                "ok": True,
-                "data": SETTINGS
+                "type": "response", "action": action, "request_id": request_id,
+                "ok": True, "data": SETTINGS,
             })
             await broadcast_progress()
 
-        # 3. get_health
         elif action == "get_health":
             await websocket.send_json({
-                "type": "response",
-                "action": action,
-                "request_id": request_id,
-                "ok": True,
-                "data": {
+                "type": "response", "action": action, "request_id": request_id,
+                "ok": True, "data": {
                     "status": "healthy",
                     "yt_dlp_version": yt_dlp.version.__version__,
                     "active_workers": len(getattr(app.state, "workers", [])),
-                }
+                },
             })
 
-        # 4. extract
         elif action == "extract":
             url = payload.get("url")
-            page_title = payload.get("page_title")
-            headers = payload.get("headers")
             if not url:
                 raise ValueError("URL is required for extraction")
             if url.startswith("blob:"):
-                raise ValueError("blob: URLs exist only in the browser and cannot be downloaded server-side.")
-            
+                raise ValueError("blob: URLs cannot be downloaded server-side.")
+
+            page_title = payload.get("page_title")
+            headers = payload.get("headers")
             loop = asyncio.get_running_loop()
-            STREAM_EXTS = {".m3u8", ".mpd", ".ts", ".m4s"}
-            STREAM_MIME_HINTS = ("m3u8", "mpd", "dash", "hls", "stream")
 
-            probe_opts = {
-                "quiet": True, "no_warnings": True, "noplaylist": True,
-                "skip_download": True,
-            }
-            if headers:
-                probe_opts["http_headers"] = headers
-            else:
-                # Apply cookies from browser configuration when no custom headers are provided
-                cookies_browser = SETTINGS.get("cookies_from_browser", "none")
-                if cookies_browser and cookies_browser != "none":
-                    probe_opts["cookiesfrombrowser"] = (cookies_browser,)
+            probe_opts = build_probe_opts(headers)
 
-            def _probe():
-                with yt_dlp.YoutubeDL(probe_opts) as ydl:
-                    return ydl.extract_info(url, download=False)
-
-            def _probe_generic():
-                generic_opts = {**probe_opts, "allowed_extractors": ["generic"]}
-                with yt_dlp.YoutubeDL(generic_opts) as ydl:
-                    return ydl.extract_info(url, download=False)
-
-            extraction_method = "yt-dlp"
             try:
-                try:
-                    info = await loop.run_in_executor(None, _probe)
-                except Exception as exc:
-                    if "primarily used for piracy" in str(exc).lower():
-                        info = await loop.run_in_executor(None, _probe_generic)
-                    else:
-                        raise
-                extractor = (info.get("extractor") or "").lower()
-                if extractor in ("generic", "") or url.lower().endswith(tuple(STREAM_EXTS)):
-                    if any(h in url.lower() for h in STREAM_MIME_HINTS) or \
-                       url.lower().endswith(tuple(STREAM_EXTS)):
-                        extraction_method = "stream"
+                info = await loop.run_in_executor(None, _extract_with_fallback, url, probe_opts)
+                extraction_method = "yt-dlp"
             except Exception as exc:
-                extraction_method = "direct"
+                # Extraction failed — treat as a direct/stream URL if it's HTTP
                 if url.startswith(("http://", "https://")):
                     from urllib.parse import urlparse
                     path = urlparse(url).path
@@ -1055,29 +1099,43 @@ async def handle_client_action(websocket: WebSocket, action: str, request_id: st
                     ext = os.path.splitext(filename)[1].lstrip(".") or "mp4"
                     if not (ext.isalnum() and 2 <= len(ext) <= 5):
                         ext = "mp4"
-                    if ext.lower() in ["m3u8", "mpd", "ts"]:
-                        extraction_method = "stream"
+                    extraction_method = "stream" if ext.lower() in ("m3u8", "mpd", "ts") else "direct"
                     info = {
                         "title": filename,
                         "duration": None,
                         "uploader": "Direct Link",
                         "thumbnail": None,
-                        "formats": [
-                            {
-                                "format_id": "direct_stream",
-                                "ext": ext,
-                                "resolution": "unknown",
-                                "vcodec": "direct",
-                                "acodec": "direct",
-                                "filesize": None,
-                            }
-                        ],
+                        "formats": [{
+                            "format_id": "direct_stream",
+                            "ext": ext,
+                            "protocol": "m3u8" if ext.lower() == "m3u8" else "https",
+                            "resolution": "unknown",
+                            "vcodec": "direct",
+                            "acodec": "direct",
+                            "filesize": None,
+                        }],
                     }
                 else:
-                    raise ValueError(f"Extraction failed: {exc}")
+                    raise
+
+            # Determine stream vs. non-stream.
+            # If the extractor is "generic", we check if the formats indicate a stream.
+            # For native extractors (like "youtube"), it should be "yt-dlp" unless it is a live stream.
+            fmt_list = info.get("formats", [])
+            extractor = (info.get("extractor") or "").lower()
+            is_live = bool(info.get("is_live"))
+
+            if extraction_method == "yt-dlp":
+                if extractor == "generic":
+                    is_stream = _formats_are_stream(fmt_list)
+                else:
+                    is_stream = is_live
+                extraction_method = "stream" if is_stream else "yt-dlp"
+            else:
+                is_stream = extraction_method == "stream"
 
             formats = []
-            for f in info.get("formats", []):
+            for f in fmt_list:
                 vcodec = f.get("vcodec", "none")
                 acodec = f.get("acodec", "none")
                 if vcodec == "none" and acodec == "none":
@@ -1091,50 +1149,78 @@ async def handle_client_action(websocket: WebSocket, action: str, request_id: st
                     "vcodec": vcodec,
                     "acodec": acodec,
                     "fps": f.get("fps"),
-                    "filesize": f.get("filesize") or f.get("filesize_estimate"),
+                    "filesize": f.get("filesize") or f.get("filesize_estimate") or f.get("filesize_approx"),
                     "tbr": f.get("tbr"),
                     "vbr": f.get("vbr"),
                     "abr": f.get("abr"),
                     "format_note": f.get("format_note", ""),
+                    "protocol": f.get("protocol", ""),
                 })
 
-            is_stream = (extraction_method == "stream")
+            estimated_total_bytes: Optional[int] = None
+
+            if is_stream:
+                # For HLS streams: sample segment sizes to estimate total.
+                # Only attempt for streams that expose an m3u8 manifest URL.
+                stream_m3u8_urls = [
+                    f.get("url", "") for f in fmt_list
+                    if f.get("protocol", "") in ("m3u8", "m3u8_native")
+                    and f.get("url")
+                ]
+                # Also try the original URL if it looks like a manifest
+                if not stream_m3u8_urls and url.lower().endswith((".m3u8", ".mpd")):
+                    stream_m3u8_urls.append(url)
+
+                if stream_m3u8_urls:
+                    sizes = await asyncio.gather(
+                        *[estimate_stream_size(u, headers) for u in stream_m3u8_urls[:3]]
+                    )
+                    valid_sizes = [s for s in sizes if s and s > 0]
+                    if valid_sizes:
+                        estimated_total_bytes = max(valid_sizes)
+            else:
+                # For non-stream: use yt-dlp's reported filesize
+                for f in fmt_list:
+                    fs = f.get("filesize") or f.get("filesize_estimate") or f.get("filesize_approx")
+                    if fs and fs > 0:
+                        estimated_total_bytes = int(fs)
+                        break
+
             res_data = {
-                "title": _sanitise_stream_title(info.get("title") or "", url, page_title, prefer_page_title=is_stream),
+                "title": sanitise_title(info.get("title") or "", url, page_title, prefer_page=is_stream),
                 "duration": info.get("duration"),
                 "uploader": info.get("uploader"),
                 "thumbnail": info.get("thumbnail"),
                 "url": url,
                 "extraction_method": extraction_method,
                 "formats": formats,
+                "estimated_total_bytes": estimated_total_bytes,
             }
             await websocket.send_json({
-                "type": "response",
-                "action": action,
-                "request_id": request_id,
-                "ok": True,
-                "data": res_data
+                "type": "response", "action": action, "request_id": request_id,
+                "ok": True, "data": res_data,
             })
 
-        # 5. download
         elif action == "download":
             url = payload.get("url")
             if not url:
                 raise ValueError("URL is required")
             if url.startswith("blob:"):
                 raise ValueError("blob: URLs cannot be downloaded server-side.")
-            
-            # If a custom/suggested filename is provided, strip extension for task title
+
             req_filename = payload.get("filename")
+            has_custom_title = False
             if req_filename:
                 filename_stem, _ = os.path.splitext(req_filename)
                 task_title = filename_stem
+                has_custom_title = True
             else:
-                task_title = _sanitise_stream_title(
+                task_title = sanitise_title(
                     "", url, payload.get("page_title"),
-                    prefer_page_title=bool(payload.get("is_stream")) or not payload.get("is_video", True)
+                    prefer_page=bool(payload.get("is_stream")) or not payload.get("is_video", True),
                 )
-            
+
+            est_bytes = payload.get("estimated_total_bytes")
             task = DownloadTask(
                 task_id=uuid.uuid4().hex,
                 url=url,
@@ -1147,114 +1233,92 @@ async def handle_client_action(websocket: WebSocket, action: str, request_id: st
                 headers=payload.get("headers"),
                 filename=req_filename or "",
                 title=task_title,
+                has_custom_title=has_custom_title,
+                total_bytes=int(est_bytes) if est_bytes is not None else 0,
             )
+            task._pause_event.set()
             TASKS[task.task_id] = task
             await TASK_QUEUE.put(task)
             await broadcast_progress()
             save_tasks_now()
-            
+
             await websocket.send_json({
-                "type": "response",
-                "action": action,
-                "request_id": request_id,
-                "ok": True,
-                "data": {"task_id": task.task_id, "status": "queued"}
+                "type": "response", "action": action, "request_id": request_id,
+                "ok": True, "data": {"task_id": task.task_id, "status": task.status},
             })
 
-        # 6. cancel
         elif action == "cancel":
             task_id = payload.get("task_id")
             task = TASKS.get(task_id)
             if not task:
                 raise ValueError("Task not found")
             task._cancel.set()
-            task.status = "cancelled"
+            task.update(status=TaskStatus.CANCELLED)
             await broadcast_progress()
             await websocket.send_json({
-                "type": "response",
-                "action": action,
-                "request_id": request_id,
-                "ok": True,
-                "data": {"task_id": task_id, "status": "cancelled"}
+                "type": "response", "action": action, "request_id": request_id,
+                "ok": True, "data": {"task_id": task_id, "status": TaskStatus.CANCELLED},
             })
 
-        # 7. pause
         elif action == "pause":
             task_id = payload.get("task_id")
             task = TASKS.get(task_id)
             if not task:
                 raise ValueError("Task not found")
-            if task.status in ("downloading", "queued"):
-                task._paused = True
-                task.status = "paused"
-                task.speed = 0.0
+            if task.status in (TaskStatus.DOWNLOADING, TaskStatus.QUEUED):
+                task.update(status=TaskStatus.PAUSED, speed=0.0)
+                task._pause_event.clear()
                 await broadcast_progress()
                 save_tasks_now()
             await websocket.send_json({
-                "type": "response",
-                "action": action,
-                "request_id": request_id,
-                "ok": True,
-                "data": {"task_id": task_id, "status": task.status}
+                "type": "response", "action": action, "request_id": request_id,
+                "ok": True, "data": {"task_id": task_id, "status": task.status},
             })
 
-        # 8. resume
         elif action == "resume":
             task_id = payload.get("task_id")
             task = TASKS.get(task_id)
             if not task:
                 raise ValueError("Task not found")
-            
-            has_active_thread = getattr(task, "_active_thread", False)
-            
-            if task.status == "paused":
-                task._paused = False
-                if has_active_thread:
-                    task.status = "downloading"
+
+            if task.status == TaskStatus.PAUSED:
+                task._pause_event.set()
+                if task._is_running:
+                    # Download thread is still alive — simply unblock the pause gate
+                    task.update(status=TaskStatus.DOWNLOADING)
                     await broadcast_progress()
                     save_tasks_now()
                 else:
-                    task.status = "queued"
-                    task.speed = 0.0
-                    task.eta = 0.0
-                    task.error = ""
+                    # Thread exited or never started — re-queue for a fresh download
+                    task.update(status=TaskStatus.QUEUED, speed=0.0, eta=0.0, error="")
                     task._cancel.clear()
-                    task._paused = False
+                    task._pause_event.set()
                     await TASK_QUEUE.put(task)
                     await broadcast_progress()
                     save_tasks_now()
-            elif task.status in ("cancelled", "error", "completed"):
-                task.status = "queued"
-                task.progress = 0.0
-                task.speed = 0.0
-                task.eta = 0.0
-                task.error = ""
-                task.total_bytes = 0
-                task.downloaded_bytes = 0
+            elif task.status in (TaskStatus.CANCELLED, TaskStatus.ERROR, TaskStatus.COMPLETED):
+                is_completed = task.status == TaskStatus.COMPLETED
+                task.update(status=TaskStatus.QUEUED, speed=0.0, eta=0.0, error="")
                 task._cancel.clear()
-                task._paused = False
+                task._pause_event.set()
+                if is_completed:
+                    task.update(progress=0.0, total_bytes=0, downloaded_bytes=0,
+                                fragment_index=None, fragment_count=None)
                 await TASK_QUEUE.put(task)
                 await broadcast_progress()
                 save_tasks_now()
-                
+
             await websocket.send_json({
-                "type": "response",
-                "action": action,
-                "request_id": request_id,
-                "ok": True,
-                "data": {"task_id": task_id, "status": task.status}
+                "type": "response", "action": action, "request_id": request_id,
+                "ok": True, "data": {"task_id": task_id, "status": task.status},
             })
 
-        # 9. reveal
         elif action == "reveal":
-            import subprocess
-            import platform
             task_id = payload.get("task_id")
             task = TASKS.get(task_id)
             if not task:
                 raise ValueError("Task not found")
             path_to_open = task.final_path or task.filename
-            
             system = platform.system()
             if path_to_open and os.path.exists(path_to_open):
                 if system == "Darwin":
@@ -1262,8 +1326,7 @@ async def handle_client_action(websocket: WebSocket, action: str, request_id: st
                 elif system == "Windows":
                     subprocess.run(["explorer", "/select,", os.path.normpath(path_to_open)], check=False)
                 else:
-                    parent_dir = os.path.dirname(os.path.abspath(path_to_open))
-                    subprocess.run(["xdg-open", parent_dir], check=False)
+                    subprocess.run(["xdg-open", os.path.dirname(os.path.abspath(path_to_open))], check=False)
             else:
                 target_dir = task.custom_path or (
                     SETTINGS["categories"].get(task.category) if task.category else SETTINGS["default_download_path"]
@@ -1277,67 +1340,42 @@ async def handle_client_action(websocket: WebSocket, action: str, request_id: st
                         subprocess.run(["xdg-open", target_dir], check=False)
                 else:
                     raise ValueError("Path does not exist on disk")
-            
+
             await websocket.send_json({
-                "type": "response",
-                "action": action,
-                "request_id": request_id,
-                "ok": True,
-                "data": {"status": "ok"}
+                "type": "response", "action": action, "request_id": request_id,
+                "ok": True, "data": {"status": "ok"},
             })
 
-        # 10. delete
         elif action == "delete":
             task_id = payload.get("task_id")
             delete_file = bool(payload.get("delete_file", False))
             if task_id in TASKS:
                 task = TASKS[task_id]
                 task._cancel.set()
-                task.status = "cancelled"
-                
+                task.update(status=TaskStatus.CANCELLED)
+
+                await asyncio.get_running_loop().run_in_executor(None, cleanup_task_files, task)
+
                 if delete_file:
-                    file_paths = []
-                    if task.final_path:
-                        file_paths.append(task.final_path)
-                    if task.filename:
-                        file_paths.append(task.filename)
-                    
-                    for fp in file_paths:
-                        try:
-                            p = Path(fp)
-                            if p.exists():
+                    for fp in (task.final_path, task.filename):
+                        if fp:
+                            try:
+                                p = Path(fp)
                                 if p.is_dir():
                                     shutil.rmtree(p)
-                                else:
+                                elif p.exists():
                                     p.unlink(missing_ok=True)
-                        except Exception as e:
-                            print(f"Error deleting file {fp}: {e}")
-                            
+                            except Exception as e:
+                                logger.warning("Error deleting file %s: %s", fp, e)
+
                 del TASKS[task_id]
                 await broadcast_progress()
                 save_tasks_now()
-                
-            await websocket.send_json({
-                "type": "response",
-                "action": action,
-                "request_id": request_id,
-                "ok": True,
-                "data": {"deleted": task_id}
-            })
 
-        elif action == "check_binaries":
-            status = check_binaries_status()
             await websocket.send_json({
-                "type": "response",
-                "action": action,
-                "request_id": request_id,
-                "ok": True,
-                "data": status
+                "type": "response", "action": action, "request_id": request_id,
+                "ok": True, "data": {"deleted": task_id},
             })
-
-        elif action == "install_binaries":
-            loop = asyncio.get_running_loop()
-            loop.run_in_executor(None, install_binaries_in_thread, websocket, request_id, loop)
 
         else:
             raise ValueError(f"Unknown action: {action}")
@@ -1345,11 +1383,8 @@ async def handle_client_action(websocket: WebSocket, action: str, request_id: st
     except Exception as e:
         try:
             await websocket.send_json({
-                "type": "response",
-                "action": action,
-                "request_id": request_id,
-                "ok": False,
-                "error": str(e)
+                "type": "response", "action": action, "request_id": request_id,
+                "ok": False, "error": str(e),
             })
         except Exception:
             pass
@@ -1359,30 +1394,26 @@ async def websocket_progress(websocket: WebSocket):
     await websocket.accept()
     WEBSOCKET_SUBSCRIBERS.append(websocket)
     try:
-        # Send initial snapshot immediately
-        payload = json.dumps({
-            "type": "tasks",
-            "data": [t.to_dict() for t in TASKS.values()],
-            "health": {
-                "status": "healthy",
-                "yt_dlp_version": yt_dlp.version.__version__,
-                "active_workers": len(getattr(app.state, "workers", [])),
-            },
-            "settings": SETTINGS
-        })
-        await websocket.send_text(payload)
-        
+        await websocket.send_text(get_broadcast_payload())
+
         while True:
             data = await websocket.receive_text()
             try:
                 msg = json.loads(data)
-            except Exception:
+            except json.JSONDecodeError as e:
+                try:
+                    await websocket.send_json({
+                        "type": "response", "action": None, "request_id": None,
+                        "ok": False, "error": f"Invalid JSON payload: {e}",
+                    })
+                except Exception:
+                    pass
                 continue
-            
+
             action = msg.get("action")
             request_id = msg.get("request_id")
             payload_data = msg.get("payload", {})
-            
+
             if action:
                 asyncio.create_task(handle_client_action(websocket, action, request_id, payload_data))
     except WebSocketDisconnect:

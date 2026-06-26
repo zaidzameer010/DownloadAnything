@@ -253,13 +253,16 @@
           border:1px solid rgba(255, 255, 255, 0.15);
           border-radius:8px; backdrop-filter:blur(12px);
           -webkit-backdrop-filter:blur(12px);
-          box-shadow:0 4px 16px rgba(0,0,0,0.6);
-          transition:all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+          box-shadow:0 4px 16px rgba(0,0,0,0.6), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+          transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
         }
         .btn:hover { 
           transform:translateY(-1px); 
-          box-shadow:0 6px 20px rgba(0,0,0,0.8); 
+          box-shadow:0 6px 20px rgba(0,0,0,0.8), 0 0 0 1px rgba(255, 255, 255, 0.05) inset; 
           border-color:rgba(255, 255, 255, 0.35);
+        }
+        .btn:active {
+          transform: scale(0.96) !important;
         }
         .btn svg { transition: transform 0.25s ease; flex-shrink:0; }
         .btn:hover svg { transform: translateY(0.5px); }
@@ -277,7 +280,7 @@
           padding: 7px 11px;
           border-radius: 7px;
           border: 1px solid rgba(255, 255, 255, 0.15);
-          box-shadow: 0 8px 24px rgba(0,0,0,0.7);
+          box-shadow: 0 8px 24px rgba(0,0,0,0.7), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
           backdrop-filter: blur(12px);
           -webkit-backdrop-filter: blur(12px);
           white-space: normal;
@@ -333,38 +336,79 @@
       tooltip.textContent = getMediaTitle(mediaEl);
     });
  
-    const mount = () => {
-      const rect = mediaEl.getBoundingClientRect();
-      const cr = container.getBoundingClientRect();
-      // Anchor top-right (width of button is 100px, 10px padding from the right edge = 110px)
-      host.style.left = rect.right - cr.left - 110 + "px";
-      host.style.top = rect.top - cr.top + 10 + "px";
+    let isOverContainer = false;
+    let isOverHost = false;
+
+    const updateVisibility = () => {
+      const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement);
+      if (isFs) {
+        host.style.opacity = "0";
+        host.style.pointerEvents = "none";
+        return;
+      }
+
+      if (isOverContainer || isOverHost) {
+        host.style.opacity = "1";
+        host.style.pointerEvents = "auto";
+      } else {
+        host.style.opacity = "0";
+        host.style.pointerEvents = "none";
+      }
     };
- 
-    container.appendChild(host);
- 
-    // IDM Hover Grabbing Style: fade-in the button when mouse enters the video container
+
+    const mount = () => {
+      if (!mediaEl.isConnected || !container.isConnected) return;
+      const cr = container.getBoundingClientRect();
+      const left = cr.left + window.scrollX;
+      const top = cr.top + window.scrollY;
+      host.style.left = left + 10 + "px";
+      host.style.top = top + 10 + "px";
+    };
+
+    document.body.appendChild(host);
+
     container.addEventListener("mouseenter", () => {
-      host.style.opacity = "1";
+      isOverContainer = true;
+      updateVisibility();
     });
     container.addEventListener("mouseleave", () => {
-      host.style.opacity = "0";
+      isOverContainer = false;
+      setTimeout(updateVisibility, 100);
     });
+    host.addEventListener("mouseenter", () => {
+      isOverHost = true;
+      updateVisibility();
+    });
+    host.addEventListener("mouseleave", () => {
+      isOverHost = false;
+      setTimeout(updateVisibility, 100);
+    });
+
+    const checkFullscreen = () => {
+      updateVisibility();
+    };
+    document.addEventListener("fullscreenchange", checkFullscreen);
+    document.addEventListener("webkitfullscreenchange", checkFullscreen);
+    document.addEventListener("mozfullscreenchange", checkFullscreen);
+    document.addEventListener("msfullscreenchange", checkFullscreen);
+
     mount();
     window.addEventListener("scroll", mount, { passive: true });
     window.addEventListener("resize", mount, { passive: true });
 
-    // Use ResizeObserver to automatically reposition overlay when media element size changes (common during load/buffering)
     const ro = new ResizeObserver(() => {
       mount();
     });
     ro.observe(mediaEl);
 
-    // Clean up listeners when the media element or overlay host leaves the DOM
     const cleanup = new MutationObserver(() => {
       if (!mediaEl.isConnected || !host.isConnected) {
         window.removeEventListener("scroll", mount);
         window.removeEventListener("resize", mount);
+        document.removeEventListener("fullscreenchange", checkFullscreen);
+        document.removeEventListener("webkitfullscreenchange", checkFullscreen);
+        document.removeEventListener("mozfullscreenchange", checkFullscreen);
+        document.removeEventListener("msfullscreenchange", checkFullscreen);
         ro.disconnect();
         host.remove();
         injectedSet.delete(mediaEl);
@@ -379,18 +423,19 @@
   // Returns: { data, url, tier }
   //   tier: "native" | "stream" | "direct" | null (complete failure)
   //
-  async function runTieredProbe(mediaEl) {
+  async function runTieredProbe(mediaEl, overrideUrl = null, overrideTitle = null) {
     // Collect the sniffed stream URLs from the background SW
     const bgRes = await sendToBackground({ type: "GET_TAB_STREAMS" });
     const sniffedUrls = (bgRes?.urls || []).filter(
       (u) => u && !u.startsWith("blob:")
     );
-    const elementSrc = (mediaEl.currentSrc || mediaEl.src || "").trim();
-    const pageUrl = window.location.href;
+    const elementSrc = overrideUrl || (mediaEl ? (mediaEl.currentSrc || mediaEl.src || "").trim() : "");
+    const pageUrl = overrideUrl || window.location.href;
+    const mediaTitle = overrideTitle || getMediaTitle(mediaEl);
 
     // ── Tier 1: Try yt-dlp on the PAGE URL ────────────────────────────────
     setStatus("🔍 Probing with yt-dlp…");
-    const t1 = await sendToBackground({ type: "EXTRACT", url: pageUrl, page_title: getMediaTitle() });
+    const t1 = await sendToBackground({ type: "EXTRACT", url: pageUrl, page_title: mediaTitle });
     if (t1?.ok) {
       const method = t1.data.extraction_method;
       // Accept any real formats from the page URL — the page URL is always a
@@ -399,7 +444,8 @@
       // an HLS/DASH manifest linked from the page) but not "direct" (which
       // just means yt-dlp gave up and echoed the URL back with no real info).
       const hasRealFormats = t1.data.formats?.some(
-        (f) => f.vcodec !== "none" && f.vcodec !== "direct"
+        (f) => (f.vcodec && f.vcodec !== "none" && f.vcodec !== "direct") ||
+               (f.acodec && f.acodec !== "none" && f.acodec !== "direct")
       );
       if (hasRealFormats && method !== "direct") {
         return { data: t1.data, url: pageUrl, tier: method === "stream" ? "stream" : "native" };
@@ -427,13 +473,12 @@
 
     for (const streamUrl of orderedStreams) {
       setStatus(`🔗 Probing stream: ${truncate(streamUrl, 50)}…`);
-      const t2 = await sendToBackground({ type: "EXTRACT", url: streamUrl, page_title: getMediaTitle() });
+      const t2 = await sendToBackground({ type: "EXTRACT", url: streamUrl, page_title: mediaTitle });
       if (t2?.ok) {
         const hasFormats = t2.data.formats?.length > 0;
         if (hasFormats) {
-          // Distinguish HLS/DASH native from a direct HTTP fallback
-          const tier =
-            t2.data.extraction_method === "direct" ? "direct" : "stream";
+          const method = t2.data.extraction_method;
+          const tier = method === "direct" ? "direct" : (method === "stream" ? "stream" : "native");
           return { data: t2.data, url: streamUrl, tier };
         }
       }
@@ -463,10 +508,20 @@
       return;
     }
 
+    if (window !== window.top) {
+      sendToBackground({
+        type: "SHOW_EXTRACTOR_MODAL_ON_TOP",
+        url: window.location.href,
+        mediaSrc: elementSrc,
+        mediaTitle: getMediaTitle(mediaEl)
+      });
+      return;
+    }
+
     showModal(mediaEl);
   }
 
-  function showModal(mediaEl) {
+  function showModal(mediaEl, overrideUrl = null, overrideTitle = null) {
     const backdrop = document.createElement("div");
     backdrop.id = "ss-modal-backdrop";
     backdrop.innerHTML = `
@@ -491,7 +546,7 @@
           background: rgba(10, 10, 10, 0.95);
           border: 1px solid rgba(255, 255, 255, 0.1);
           border-radius: 16px;
-          box-shadow: 0 24px 64px rgba(0, 0, 0, 0.9);
+          box-shadow: 0 24px 64px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
           color: #f5f5f7;
           padding: 24px;
           display: flex;
@@ -500,6 +555,12 @@
           backdrop-filter: blur(20px);
           -webkit-backdrop-filter: blur(20px);
           box-sizing: border-box;
+          animation: modalScaleUp 0.3s cubic-bezier(0.32, 0.72, 0, 1) forwards;
+        }
+        
+        @keyframes modalScaleUp {
+          from { opacity: 0; transform: scale(0.96) translateY(8px); }
+          to { opacity: 1; transform: scale(1) translateY(0); }
         }
         
         #ss-modal-header {
@@ -530,7 +591,7 @@
           border-radius: 50%;
           background: rgba(255, 255, 255, 0.04);
           border: 1px solid rgba(255, 255, 255, 0.08);
-          transition: all 0.2s;
+          transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), color 0.2s cubic-bezier(0.16, 1, 0.3, 1);
         }
         
         #ss-close:hover {
@@ -538,6 +599,10 @@
           color: #ff453a;
           border-color: rgba(255, 69, 58, 0.3);
           transform: rotate(90deg);
+        }
+        
+        #ss-close:active {
+          transform: scale(0.92) !important;
         }
         
         #ss-tier-badge {
@@ -604,15 +669,20 @@
           display: flex;
           align-items: center;
           justify-content: space-between;
-          transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+          transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), color 0.2s cubic-bezier(0.16, 1, 0.3, 1);
           box-sizing: border-box;
           color: #e2e2ec;
+          font-variant-numeric: tabular-nums;
         }
         
         .ss-row:hover {
           background: rgba(255, 255, 255, 0.05);
           border-color: rgba(255, 255, 255, 0.2);
           color: #ffffff;
+        }
+        
+        .ss-row:active {
+          transform: scale(0.98);
         }
         
         .ss-row.selected {
@@ -644,7 +714,7 @@
           font-size: 13px;
           outline: none;
           font-family: inherit;
-          transition: all 0.2s;
+          transition: border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
           box-sizing: border-box;
           width: 100%;
         }
@@ -652,6 +722,7 @@
         #ss-cat:focus, #ss-custom:focus {
           border-color: rgba(255, 255, 255, 0.3);
           background: rgba(255, 255, 255, 0.08);
+          box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.12);
         }
         
         #ss-actions {
@@ -674,8 +745,12 @@
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+          transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
           box-sizing: border-box;
+        }
+        
+        .ss-btn:active:not(:disabled) {
+          transform: scale(0.96) !important;
         }
         
         .ss-btn-cancel {
@@ -701,7 +776,6 @@
           background: #e5e5e7;
           border-color: #e5e5e7;
           box-shadow: 0 6px 18px rgba(255, 255, 255, 0.15);
-          transform: translateY(-0.5px);
         }
       </style>
 
@@ -738,7 +812,8 @@
       </div>
     `;
 
-    document.documentElement.appendChild(backdrop);
+    const parent = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement || document.body || document.documentElement;
+    parent.appendChild(backdrop);
 
     _statusEl = backdrop.querySelector("#ss-status");
 
@@ -751,7 +826,7 @@
 
     // Start the tiered probe
     (async () => {
-      const result = await runTieredProbe(mediaEl);
+      const result = await runTieredProbe(mediaEl, overrideUrl, overrideTitle);
       // Modal may have been closed by the user while the probe ran
       if (!_statusEl) return;
       if (!result) {
@@ -803,6 +878,8 @@
     // For direct tier: single "Direct download" row
     let selectedFormat = null;
     let selectedUrl = url; // the URL that will be submitted to /api/download
+    let bestAudio = null;
+    let bestVideo = null;
 
     const setSelected = (row) => {
       [...list.children].forEach((c) => c.classList.remove("selected"));
@@ -862,12 +939,37 @@
         (a, b) => (b.height || b.tbr || 0) - (a.height || a.tbr || 0)
       );
 
+      // Find all audio-only formats first to estimate combined size
+      const audioFormats = data.formats.filter(
+        (f) => (f.vcodec === "none" || !f.vcodec) && f.acodec && f.acodec !== "none"
+      );
+      bestAudio = null;
+      if (audioFormats.length > 0) {
+        bestAudio = audioFormats.reduce((best, f) => {
+          if (!best) return f;
+          const bestAbr = best.abr || 0;
+          const fAbr = f.abr || 0;
+          if (fAbr !== bestAbr) {
+            return fAbr > bestAbr ? f : best;
+          }
+          const bestSize = best.filesize || 0;
+          const fSize = f.filesize || 0;
+          return fSize > bestSize ? f : best;
+        }, null);
+      }
+
+      let bestQualitySize = null;
+      bestVideo = sorted[0];
+      if (bestVideo && bestVideo.filesize) {
+        bestQualitySize = bestVideo.filesize + (bestAudio?.filesize || 0);
+      }
+
       // "Best" auto option (yt-dlp picks codec priority from settings)
       const best = document.createElement("div");
       best.className = "ss-row";
       best.style.color = style.color;
       best.innerHTML = `<strong>★ Best quality</strong>
-        <span style="font-size:10.5px;color:#8e8e9c;margin-left:6px;">AV1 → VP9 → H.264</span>`;
+        <span style="font-size:10.5px;color:#8e8e9c;margin-left:6px;">AV1 → VP9 → H.264${bestQualitySize ? ` · ~${formatBytes(bestQualitySize)}` : ""}</span>`;
       best.addEventListener("click", () => {
         selectedFormat = null; // null = let yt-dlp pick
         setSelected(best);
@@ -877,12 +979,20 @@
       for (const f of sorted) {
         const row = document.createElement("div");
         row.className = "ss-row";
+        
+        let totalSize = f.filesize;
+        let isEstimated = false;
+        if (f.vcodec && f.vcodec !== "none" && (!f.acodec || f.acodec === "none") && bestAudio && bestAudio.filesize) {
+          totalSize = (f.filesize || 0) + bestAudio.filesize;
+          isEstimated = true;
+        }
+
         const label = [
           f.resolution || "?",
           f.ext,
           f.fps ? `${f.fps}fps` : null,
           f.vcodec !== "none" ? f.vcodec : null,
-          f.filesize ? formatBytes(f.filesize) : null,
+          totalSize ? (isEstimated ? `~${formatBytes(totalSize)}` : formatBytes(totalSize)) : null,
         ].filter(Boolean).join(" · ");
         row.innerHTML = `<strong>${f.resolution || "unknown"}</strong>
           <span style="color:#8e8e9c;font-size:11px;margin-left:6px;">${label.replace(f.resolution + " · ", "")}</span>`;
@@ -893,10 +1003,6 @@
         list.appendChild(row);
       }
 
-      // Audio-only section (if any audio-only formats exist)
-      const audioFormats = data.formats.filter(
-        (f) => (f.vcodec === "none" || !f.vcodec) && f.acodec && f.acodec !== "none"
-      );
       if (audioFormats.length > 0) {
         const sep = document.createElement("div");
         sep.style.cssText = "font-size:9.5px;color:#8e8e9c;text-transform:uppercase;letter-spacing:1px;padding:12px 0 4px;font-weight:600;";
@@ -959,6 +1065,21 @@
         const category = sel.value === "__custom" ? null : sel.value;
         const customPath = sel.value === "__custom" ? cust.value.trim() : null;
         const isVideo = selectedFormat ? (selectedFormat.vcodec && selectedFormat.vcodec !== "none") : true;
+        
+        let estimatedTotalBytes = null;
+        if (selectedFormat) {
+          if (isVideo && (!selectedFormat.acodec || selectedFormat.acodec === "none") && bestAudio && bestAudio.filesize) {
+            estimatedTotalBytes = (selectedFormat.filesize || 0) + bestAudio.filesize;
+          } else {
+            estimatedTotalBytes = selectedFormat.filesize || null;
+          }
+        } else {
+          // Best quality chosen
+          if (bestVideo && bestVideo.filesize) {
+            estimatedTotalBytes = bestVideo.filesize + (bestAudio?.filesize || 0);
+          }
+        }
+
         const payload = {
           url: selectedUrl,
           format_id: selectedFormat?.format_id || null,
@@ -967,6 +1088,7 @@
           is_video: isVideo,
           page_title: getMediaTitle(),
           is_stream: (tier === "stream"),
+          estimated_total_bytes: estimatedTotalBytes,
         };
         confirmBtn.disabled = true;
         confirmBtn.textContent = "Queuing…";
@@ -1061,7 +1183,7 @@
           background: rgba(10, 10, 10, 0.95);
           border: 1px solid rgba(255, 255, 255, 0.1);
           border-radius: 16px;
-          box-shadow: 0 24px 64px rgba(0, 0, 0, 0.9);
+          box-shadow: 0 24px 64px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
           color: #f5f5f7;
           padding: 24px;
           display: flex;
@@ -1070,8 +1192,14 @@
           backdrop-filter: blur(20px);
           -webkit-backdrop-filter: blur(20px);
           box-sizing: border-box;
+          animation: modalScaleUp 0.35s cubic-bezier(0.32, 0.72, 0, 1) forwards;
         }
         
+        @keyframes modalScaleUp {
+          from { opacity: 0; transform: scale(0.96) translateY(8px); }
+          to { opacity: 1; transform: scale(1) translateY(0); }
+        }
+
         #ss-download-header {
           display: flex;
           justify-content: space-between;
@@ -1100,7 +1228,7 @@
           border-radius: 50%;
           background: rgba(255, 255, 255, 0.04);
           border: 1px solid rgba(255, 255, 255, 0.08);
-          transition: all 0.2s;
+          transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), color 0.2s cubic-bezier(0.16, 1, 0.3, 1);
         }
         
         #ss-download-close:hover {
@@ -1108,6 +1236,10 @@
           color: #ff453a;
           border-color: rgba(255, 69, 58, 0.3);
           transform: rotate(90deg);
+        }
+
+        #ss-download-close:active {
+          transform: scale(0.92) !important;
         }
 
         .ss-field-group {
@@ -1148,7 +1280,7 @@
           font-size: 13px;
           outline: none;
           font-family: inherit;
-          transition: all 0.2s;
+          transition: border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
           box-sizing: border-box;
           width: 100%;
         }
@@ -1156,6 +1288,7 @@
         #ss-download-filename:focus, #ss-download-cat:focus, #ss-download-custom:focus {
           border-color: rgba(255, 255, 255, 0.3);
           background: rgba(255, 255, 255, 0.08);
+          box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.12);
         }
 
         #ss-download-actions {
@@ -1178,8 +1311,12 @@
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+          transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
           box-sizing: border-box;
+        }
+
+        .ss-btn:active:not(:disabled) {
+          transform: scale(0.96) !important;
         }
 
         .ss-btn-cancel {
@@ -1217,7 +1354,6 @@
           background: #e5e5e7;
           border-color: #e5e5e7;
           box-shadow: 0 6px 18px rgba(255, 255, 255, 0.15);
-          transform: translateY(-0.5px);
         }
       </style>
 
@@ -1261,7 +1397,8 @@
       </div>
     `;
 
-    document.documentElement.appendChild(backdrop);
+    const parent = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement || document.body || document.documentElement;
+    parent.appendChild(backdrop);
 
     const closeBtn = backdrop.querySelector("#ss-download-close");
     const cancelBtn = backdrop.querySelector("#ss-download-cancel");
@@ -1287,11 +1424,17 @@
     (async () => {
       const settings = await fetchSettings();
       const categories = settings?.categories || {};
-      let optionsHtml = Object.keys(categories)
-        .map((c) => `<option value="${c}">${c}</option>`)
-        .join("");
-      optionsHtml += `<option value="__custom">Custom path…</option>`;
-      catSel.innerHTML = optionsHtml;
+      catSel.innerHTML = "";
+      Object.keys(categories).forEach((c) => {
+        const opt = document.createElement("option");
+        opt.value = c;
+        opt.textContent = c;
+        catSel.appendChild(opt);
+      });
+      const customOpt = document.createElement("option");
+      customOpt.value = "__custom";
+      customOpt.textContent = "Custom path…";
+      catSel.appendChild(customOpt);
 
       catSel.addEventListener("change", () => {
         customPathEl.style.display = catSel.value === "__custom" ? "block" : "none";
@@ -1372,10 +1515,26 @@
     }
   }, { capture: true, passive: true });
 
+  async function openExtractorModalFromParams(url, mediaSrc, mediaTitle) {
+    const mockMediaEl = {
+      currentSrc: mediaSrc,
+      src: mediaSrc,
+      getAttribute: (attr) => attr === "title" ? mediaTitle : null,
+      parentElement: null,
+      isConnected: true,
+      className: "",
+      tagName: "VIDEO"
+    };
+    showModal(mockMediaEl, url, mediaTitle);
+  }
+
   // ── Message listener ──────────────────────────────────────────────────────
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === "SHOW_ADD_DOWNLOAD_POPUP") {
       openDownloadAddPopup(msg.url, msg.filename);
+      sendResponse({ ok: true });
+    } else if (msg.type === "OPEN_EXTRACTOR_MODAL_IN_TOP") {
+      openExtractorModalFromParams(msg.url, msg.mediaSrc, msg.mediaTitle);
       sendResponse({ ok: true });
     }
   });

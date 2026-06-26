@@ -4,7 +4,7 @@
   "version": "0.2.0",
   "identifier": "com.DownloadAnything.dev",
   "build": {
-    "frontendDist": "../dist-frontend",
+    "frontendDist": "../frontend",
     "beforeDevCommand": "node build-backend.js",
     "beforeBuildCommand": "node build-backend.js"
   },

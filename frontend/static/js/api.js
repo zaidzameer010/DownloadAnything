@@ -24,7 +24,7 @@ export function connectWebSocket(onOpen, onMessage, onClose) {
   ws.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
-      if (msg.type === "tasks" || msg.type === "onboarding") {
+      if (msg.type === "tasks") {
         onMessage(msg);
       } else if (msg.type === "response") {
         const { request_id, ok, data, error } = msg;
@@ -108,10 +108,4 @@ export async function revealTask(id) {
   return sendWSRequest("reveal", { task_id: id });
 }
 
-export async function checkBinaries() {
-  return sendWSRequest("check_binaries");
-}
 
-export async function installBinaries() {
-  return sendWSRequest("install_binaries");
-}

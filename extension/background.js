@@ -14,48 +14,124 @@
 const STREAM_REGEX = /\.(m3u8|mpd|mp4|webm|mkv|avi|mov|wmv|flv|mpg|mpeg|3gp|ts|mp3|aac|m4a|flac|wav|ogg|opus|wma|vid|zip|rar|7z|tar|gz|bz2|xz|dmg|iso|bin|img|pdf|epub|doc|docx|xls|xlsx|ppt|pptx|exe|msi|apk|pkg)(\?|#|$)/i;
 const BACKEND_BASE = "http://127.0.0.1:8000";
 
-// Rolling caches to prevent memory leaks
-const requestHeadersCache = new Map(); // url -> headers object
-const urlTabMap = new Map();           // url -> tabId
+// ── Session-Backed Caches for MV3 resilience ─────────────────────────────
 const MAX_CACHE_ENTRIES = 200;
 
-function cacheRequestHeaders(url, headers) {
-  if (requestHeadersCache.size >= MAX_CACHE_ENTRIES) {
-    const oldestKey = requestHeadersCache.keys().next().value;
-    requestHeadersCache.delete(oldestKey);
-  }
-  requestHeadersCache.set(url, headers);
-}
-
-function cacheUrlTab(url, tabId) {
-  if (tabId < 0) return;
-  if (urlTabMap.size >= MAX_CACHE_ENTRIES) {
-    const oldestKey = urlTabMap.keys().next().value;
-    urlTabMap.delete(oldestKey);
-  }
-  urlTabMap.set(url, tabId);
-}
-
-// In-memory per-tab stream registry.
-// chrome.storage.session is the persistent backing store so streams survive SW restarts.
-const tabStreams = new Map(); // tabId -> Set<url>
-
-// ── Restore state from session storage on SW startup ─────────────────────
-async function restoreFromSession() {
+async function getSessionData(key, defaultValue) {
   try {
-    const all = await chrome.storage.session.get(null);
-    for (const [key, urls] of Object.entries(all)) {
-      if (!key.startsWith("streams_")) continue;
-      const tabId = parseInt(key.slice(8), 10);
-      if (!isNaN(tabId) && Array.isArray(urls)) {
-        tabStreams.set(tabId, new Set(urls));
-      }
-    }
-  } catch {
-    // Storage may not be available in all contexts; ignore
+    const result = await chrome.storage.session.get(key);
+    return result[key] !== undefined ? result[key] : defaultValue;
+  } catch (err) {
+    console.error(`[StreamSnatcher] Error reading session key ${key}:`, err);
+    return defaultValue;
   }
 }
-restoreFromSession();
+
+async function setSessionData(key, value) {
+  try {
+    await chrome.storage.session.set({ [key]: value });
+  } catch (err) {
+    console.error(`[StreamSnatcher] Failed to set ${key} in session storage:`, err);
+  }
+}
+
+// 1. Request Headers Cache (url -> headers object)
+async function getCachedRequestHeaders(url) {
+  try {
+    const cache = await getSessionData("requestHeadersCache", {});
+    if (cache[url]) {
+      const val = cache[url];
+      delete cache[url];
+      cache[url] = val;
+      await setSessionData("requestHeadersCache", cache);
+      return val;
+    }
+  } catch (err) {
+    console.error("[StreamSnatcher] Error reading/updating request headers cache:", err);
+  }
+  return null;
+}
+
+async function cacheRequestHeaders(url, headers) {
+  try {
+    const cache = await getSessionData("requestHeadersCache", {});
+    const keys = Object.keys(cache);
+    if (cache[url] !== undefined) {
+      delete cache[url];
+    } else if (keys.length >= MAX_CACHE_ENTRIES) {
+      delete cache[keys[0]];
+    }
+    cache[url] = headers;
+    await setSessionData("requestHeadersCache", cache);
+  } catch (err) {
+    console.error("[StreamSnatcher] Error caching request headers:", err);
+  }
+}
+
+// 2. URL -> Tab ID Map (url -> tabId)
+async function getCachedUrlTab(url) {
+  try {
+    const cache = await getSessionData("urlTabMap", {});
+    if (cache[url] !== undefined) {
+      const val = cache[url];
+      delete cache[url];
+      cache[url] = val;
+      await setSessionData("urlTabMap", cache);
+      return val;
+    }
+  } catch (err) {
+    console.error("[StreamSnatcher] Error reading/updating URL tab map:", err);
+  }
+  return null;
+}
+
+async function cacheUrlTab(url, tabId) {
+  if (tabId < 0) return;
+  try {
+    const cache = await getSessionData("urlTabMap", {});
+    const keys = Object.keys(cache);
+    if (cache[url] !== undefined) {
+      delete cache[url];
+    } else if (keys.length >= MAX_CACHE_ENTRIES) {
+      delete cache[keys[0]];
+    }
+    cache[url] = tabId;
+    await setSessionData("urlTabMap", cache);
+  } catch (err) {
+    console.error("[StreamSnatcher] Error caching URL tab mapping:", err);
+  }
+}
+
+// 3. Bypassed Downloads Set
+async function isDownloadBypassed(url) {
+  const bypassed = await getSessionData("bypassedDownloads", []);
+  return bypassed.includes(url);
+}
+
+async function addBypassDownload(url) {
+  try {
+    const bypassed = await getSessionData("bypassedDownloads", []);
+    if (!bypassed.includes(url)) {
+      bypassed.push(url);
+      await setSessionData("bypassedDownloads", bypassed);
+    }
+  } catch (err) {
+    console.error("[StreamSnatcher] Error adding bypass URL:", err);
+  }
+}
+
+async function removeBypassDownload(url) {
+  try {
+    const bypassed = await getSessionData("bypassedDownloads", []);
+    const index = bypassed.indexOf(url);
+    if (index !== -1) {
+      bypassed.splice(index, 1);
+      await setSessionData("bypassedDownloads", bypassed);
+    }
+  } catch (err) {
+    console.error("[StreamSnatcher] Error removing bypass URL:", err);
+  }
+}
 
 // ── Record a stream URL for a tab ─────────────────────────────────────────
 async function recordStream(tabId, url, forceRecord = false) {
@@ -67,25 +143,28 @@ async function recordStream(tabId, url, forceRecord = false) {
   // to avoid flooding tab stream lists when the main stream is already captured
   const isSegment = /[-_]chunk|[-_]seg|fragment|[-_]\d+\.(ts|m4s)/i.test(url);
   if (isSegment) return;
-  if (!tabStreams.has(tabId)) tabStreams.set(tabId, new Set());
-  const set = tabStreams.get(tabId);
-  if (set.has(url)) return;
 
-  // Enforce a maximum cap of 50 streams per tab to prevent memory/storage bloat
-  if (set.size >= 50) {
-    const first = set.values().next().value;
-    set.delete(first);
+  try {
+    const streamsList = await getSessionData(`streams_${tabId}`, []);
+    const set = new Set(streamsList);
+    if (set.has(url)) return;
+
+    // Enforce a maximum cap of 50 streams per tab to prevent memory/storage bloat
+    if (set.size >= 50) {
+      const first = set.values().next().value;
+      set.delete(first);
+    }
+
+    set.add(url);
+    await setSessionData(`streams_${tabId}`, Array.from(set));
+
+    // Notify content script if present
+    try {
+      await chrome.tabs.sendMessage(tabId, { type: "STREAM_FOUND", url });
+    } catch { /* content script may not be loaded yet */ }
+  } catch (err) {
+    console.error("[StreamSnatcher] Error recording stream:", err);
   }
-
-  set.add(url);
-  try {
-    await chrome.storage.session.set({ [`streams_${tabId}`]: Array.from(set) });
-  } catch { /* ignore storage errors */ }
-
-  // Notify content script if present
-  try {
-    await chrome.tabs.sendMessage(tabId, { type: "STREAM_FOUND", url });
-  } catch { /* content script may not be loaded yet */ }
 }
 
 // ── MV3 webRequest — non-blocking, read-only ──────────────────────────────
@@ -154,18 +233,7 @@ chrome.webRequest.onResponseStarted.addListener(
 );
 
 // ── WebSocket helper ──────────────────────────────────────────────────────
-//
-// Service workers are ephemeral. We do NOT cache `ws` across event handler
-// invocations — a cached socket will be stale after a SW restart. Instead,
-// each backend call opens a fresh connection (or reuses the current one if
-// it happens to still be open within the same SW activation), sends the
-// request, and awaits the response. The promise always settles (resolve or
-// reject) so there are no leaks.
-//
-// requestCounter is local to each SW activation; because a restarted SW
-// also gets a fresh WS connection, ID collisions across sessions cannot occur.
-
-let _ws = null;
+let activeWebSocket = null;
 let _requestCounter = 0;
 // Map<requestId, { resolve, reject, timeoutId }>
 const _pending = new Map();
@@ -173,14 +241,14 @@ const _pending = new Map();
 const WS_REQUEST_TIMEOUT_MS = 30_000; // 30 s — matches typical backend timeout
 
 function _getOrCreateWS() {
-  if (_ws && (_ws.readyState === WebSocket.OPEN || _ws.readyState === WebSocket.CONNECTING)) {
-    return _ws;
+  if (activeWebSocket && (activeWebSocket.readyState === WebSocket.OPEN || activeWebSocket.readyState === WebSocket.CONNECTING)) {
+    return activeWebSocket;
   }
 
   const wsUrl = BACKEND_BASE.replace(/^http/, "ws") + "/ws/progress";
-  _ws = new WebSocket(wsUrl);
+  activeWebSocket = new WebSocket(wsUrl);
 
-  _ws.onmessage = (event) => {
+  activeWebSocket.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
       if (msg.type === "response") {
@@ -201,25 +269,25 @@ function _getOrCreateWS() {
     }
   };
 
-  _ws.onclose = () => {
+  activeWebSocket.onclose = () => {
     // Reject all in-flight requests so callers never hang
     for (const [id, pending] of _pending) {
       clearTimeout(pending.timeoutId);
       pending.reject(new Error("WebSocket closed before response"));
     }
     _pending.clear();
-    _ws = null;
+    activeWebSocket = null;
   };
 
-  _ws.onerror = () => {
+  activeWebSocket.onerror = () => {
     // onclose fires immediately after onerror; cleanup happens there
-    if (_ws) _ws.close();
+    if (activeWebSocket) activeWebSocket.close();
   };
 
-  return _ws;
+  return activeWebSocket;
 }
 
-function sendWSRequest(action, payload = {}) {
+function sendWebSocketRequest(action, payload = {}) {
   return new Promise((resolve, reject) => {
     const socket = _getOrCreateWS();
 
@@ -236,7 +304,13 @@ function sendWSRequest(action, payload = {}) {
     _pending.set(requestId, { resolve, reject, timeoutId });
 
     const doSend = () => {
-      socket.send(JSON.stringify({ action, request_id: requestId, payload }));
+      try {
+        socket.send(JSON.stringify({ action, request_id: requestId, payload }));
+      } catch (err) {
+        clearTimeout(timeoutId);
+        _pending.delete(requestId);
+        reject(err);
+      }
     };
 
     if (socket.readyState === WebSocket.OPEN) {
@@ -260,16 +334,35 @@ function sendWSRequest(action, payload = {}) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "GET_TAB_STREAMS") {
     const tabId = sender.tab?.id ?? msg.tabId;
-    const set = tabStreams.get(tabId);
-    sendResponse({ urls: set ? Array.from(set) : [] });
-    return; // synchronous — no need to return true
+    getSessionData(`streams_${tabId}`, []).then((urls) => {
+      sendResponse({ urls });
+    }).catch((err) => {
+      console.error("[StreamSnatcher] Error fetching streams from session storage:", err);
+      sendResponse({ urls: [] });
+    });
+    return true; // async response
+  }
+
+  if (msg.type === "SHOW_EXTRACTOR_MODAL_ON_TOP") {
+    if (sender.tab && sender.tab.id) {
+      chrome.tabs.sendMessage(sender.tab.id, {
+        type: "OPEN_EXTRACTOR_MODAL_IN_TOP",
+        url: msg.url,
+        mediaSrc: msg.mediaSrc,
+        mediaTitle: msg.mediaTitle
+      }, { frameId: 0 }).catch(err => {
+        console.warn("[StreamSnatcher] Failed to send OPEN_EXTRACTOR_MODAL_IN_TOP to main frame:", err);
+      });
+    }
+    sendResponse({ ok: true });
+    return;
   }
 
   if (msg.type === "EXTRACT") {
     (async () => {
       try {
-        const headers = requestHeadersCache.get(msg.url) || null;
-        const data = await sendWSRequest("extract", {
+        const headers = await getCachedRequestHeaders(msg.url);
+        const data = await sendWebSocketRequest("extract", {
           url: msg.url,
           page_title: msg.page_title,
           headers
@@ -285,9 +378,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "DOWNLOAD") {
     (async () => {
       try {
-        const headers = requestHeadersCache.get(msg.payload.url) || null;
+        const headers = await getCachedRequestHeaders(msg.payload.url);
         const payload = { ...msg.payload, headers };
-        const data = await sendWSRequest("download", payload);
+        const data = await sendWebSocketRequest("download", payload);
         sendResponse({ ok: true, data });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });
@@ -299,7 +392,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "GET_SETTINGS") {
     (async () => {
       try {
-        const data = await sendWSRequest("get_settings", {});
+        const data = await sendWebSocketRequest("get_settings", {});
         sendResponse({ ok: true, data });
       } catch (err) {
         sendResponse({ ok: false, error: err.message });
@@ -309,55 +402,71 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "ADD_ALT_BYPASS") {
-    bypassedDownloads.add(msg.url);
-    sendResponse({ ok: true });
-    return;
+    addBypassDownload(msg.url).then(() => {
+      sendResponse({ ok: true });
+    }).catch(err => {
+      sendResponse({ ok: false, error: err.message });
+    });
+    return true;
   }
 
   if (msg.type === "BYPASS_DOWNLOAD") {
-    bypassedDownloads.add(msg.url);
-    const downloadOpts = { url: msg.url };
-    if (msg.filename) {
-      // Chrome downloads API expects filename relative to user's download directory
-      // Strip any absolute path separators just in case
-      const cleanName = msg.filename.split(/[/\\]/).pop();
-      if (cleanName) downloadOpts.filename = cleanName;
-    }
-    chrome.downloads.download(downloadOpts);
-    sendResponse({ ok: true });
-    return; // synchronous response
+    (async () => {
+      try {
+        await addBypassDownload(msg.url);
+        const downloadOpts = { url: msg.url };
+        if (msg.filename) {
+          // Chrome downloads API expects filename relative to user's download directory
+          // Strip any absolute path separators just in case
+          const cleanName = msg.filename.split(/[/\\]/).pop();
+          if (cleanName) downloadOpts.filename = cleanName;
+        }
+        await chrome.downloads.download(downloadOpts);
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
+    return true;
   }
 });
 
 // ── Chrome Downloads Interception ────────────────────────────────────────
-const bypassedDownloads = new Set();
+function extractFilename(itemOrUrl, suggestedName = "") {
+  let url = "";
+  let filename = suggestedName;
 
-function extractFilename(item) {
-  // 1. Try Chrome's suggested filename
-  if (item.filename) {
-    const name = item.filename.split(/[/\\]/).pop();
-    // Exclude generic browser temporary filename stubs if possible
-    if (name && name !== "download" && !name.endsWith(".crdownload")) {
-      return name;
+  if (itemOrUrl && typeof itemOrUrl === "object") {
+    url = itemOrUrl.url || "";
+    filename = filename || itemOrUrl.filename || "";
+  } else if (typeof itemOrUrl === "string") {
+    url = itemOrUrl;
+  }
+
+  // 1. Clean suggested filename from path
+  if (filename) {
+    const name = filename.split(/[/\\]/).pop().split("?")[0];
+    if (name && name !== "download" && !name.endsWith(".crdownload") && name.includes(".")) {
+      return decodeURIComponent(name);
     }
   }
 
-  // 2. Try to parse from the URL
-  if (item.url) {
+  // 2. Parse from URL query parameters (e.g. ?file=CCleaner.exe)
+  if (url) {
     try {
-      const urlObj = new URL(item.url);
-      
-      // Look in query parameters for any value containing a file extension
+      const urlObj = new URL(url);
       for (const [, value] of urlObj.searchParams.entries()) {
         if (value && /\.[a-zA-Z0-9]{2,5}$/.test(value)) {
           const name = value.split(/[/\\]/).pop();
-          if (name) return decodeURIComponent(name);
+          if (name && !name.endsWith(".crdownload")) {
+            return decodeURIComponent(name);
+          }
         }
       }
 
-      // Fallback to URL pathname segment
+      // 3. Parse from URL pathname segment
       const segment = urlObj.pathname.split("/").pop();
-      if (segment) {
+      if (segment && segment.includes(".")) {
         return decodeURIComponent(segment);
       }
     } catch (e) {
@@ -365,34 +474,34 @@ function extractFilename(item) {
     }
   }
 
-  // 3. Absolute fallback
   return "download";
 }
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-  // Ignore downloads explicitly requested to bypass (i.e. user wants to download via Chrome)
-  if (bypassedDownloads.has(item.url)) {
-    bypassedDownloads.delete(item.url);
-    suggest();
-    return;
-  }
-
-  // Cancel the standard Chrome download immediately
-  try {
-    chrome.downloads.cancel(item.id);
-    chrome.downloads.erase({ id: item.id });
-  } catch (err) {
-    console.error("[StreamSnatcher] Failed to cancel/erase download:", err);
-  }
-
-  // Find the exact tab that triggered the download, or fallback to the active tab
   (async () => {
+    let cancelled = false;
     try {
-      let targetTabId = urlTabMap.get(item.url) || null;
+      const isBypassed = await isDownloadBypassed(item.url);
+      if (isBypassed) {
+        await removeBypassDownload(item.url);
+        suggest();
+        return;
+      }
+
+      // Cancel the standard Chrome download immediately
+      try {
+        await chrome.downloads.cancel(item.id);
+        await chrome.downloads.erase({ id: item.id });
+        cancelled = true;
+      } catch (err) {
+        console.error("[StreamSnatcher] Failed to cancel/erase download:", err);
+      }
+
+      let targetTabId = await getCachedUrlTab(item.url);
       
       // Check if any redirects or referrer url mapped to it
       if (!targetTabId && item.referrer) {
-        targetTabId = urlTabMap.get(item.referrer) || null;
+        targetTabId = await getCachedUrlTab(item.referrer);
       }
 
       if (!targetTabId) {
@@ -402,7 +511,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 
       if (targetTabId) {
         // item.filename now contains the correct name resolved from Content-Disposition
-        const cleanFilename = item.filename ? item.filename.split(/[/\\]/).pop() : extractFilename(item);
+        const cleanFilename = extractFilename(item);
         await chrome.tabs.sendMessage(targetTabId, {
           type: "SHOW_ADD_DOWNLOAD_POPUP",
           url: item.url,
@@ -414,18 +523,22 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
     } catch (err) {
       console.warn("[StreamSnatcher] Could not display popup on tab (injecting context script might be disabled on this tab/page):", err);
     }
+    
+    if (!cancelled) {
+      suggest();
+    }
   })();
 
-  // Tell Chrome to stop processing (ignored since we cancelled, but resolves pending state)
-  suggest();
+  return true; // Tells Chrome we will call suggest() asynchronously
 });
 
 // ── Clean up when a tab is closed ────────────────────────────────────────
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  tabStreams.delete(tabId);
   try {
     await chrome.storage.session.remove(`streams_${tabId}`);
-  } catch { /* ignore */ }
+  } catch (err) {
+    console.error("[StreamSnatcher] Error removing streams for tab:", err);
+  }
 });
 
 // ── Service worker lifecycle ──────────────────────────────────────────────
@@ -434,8 +547,9 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 // ── Context Menus Creation & Handling (IDM-style) ────────────────────────
-function createContextMenus() {
-  chrome.contextMenus.removeAll(() => {
+async function createContextMenus() {
+  try {
+    await chrome.contextMenus.removeAll();
     chrome.contextMenus.create({
       id: "download-link",
       title: "Download Link with DownloadAnything",
@@ -446,7 +560,9 @@ function createContextMenus() {
       title: "Download Media with DownloadAnything",
       contexts: ["video", "audio"]
     });
-  });
+  } catch (err) {
+    console.error("[StreamSnatcher] Error setting up context menus:", err);
+  }
 }
 
 chrome.runtime.onInstalled.addListener(createContextMenus);
@@ -456,19 +572,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const url = info.linkUrl || info.srcUrl;
   if (!url) return;
 
-  // Extract filename
-  let suggestedFilename = "";
-  if (info.srcUrl) {
-    suggestedFilename = info.srcUrl.split("/").pop().split("?")[0];
-  } else if (info.linkUrl) {
-    suggestedFilename = info.linkUrl.split("/").pop().split("?")[0];
-  }
-
-  if (suggestedFilename && suggestedFilename.includes(".")) {
-    suggestedFilename = decodeURIComponent(suggestedFilename);
-  } else {
-    suggestedFilename = "download";
-  }
+  const suggestedFilename = extractFilename(url);
 
   if (tab && tab.id) {
     try {

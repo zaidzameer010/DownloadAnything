@@ -1,5 +1,5 @@
 import { cancelTask, deleteTask, saveSettings, pauseTask, resumeTask, revealTask } from "./api.js";
-import { updateSettings, notify, getState, switchTab, triggerBinaryInstall } from "./state.js";
+import { updateSettings, notify, getState, switchTab } from "./state.js";
 
 const selectedTaskIds = new Set();
 let currentCategoryFilter = "all";
@@ -46,86 +46,7 @@ export function showToast(msg) {
 }
 
 // ── Window-Exposed Callbacks used from context menu (data-attr delegation) ─
-// uiCancelTask / uiDeleteTask were formerly used from inline onclick;
-// they are now dead — context menu uses uiRemoveTaskOnly / uiDeleteTaskAndFile.
 
-// ── Render Views ───────────────────────────────────────────────────────────
-export function renderOnboarding(state) {
-  const overlay = document.getElementById("onboarding-overlay");
-  if (!overlay) return;
-
-  if (!state.onboarding || !state.onboarding.visible) {
-    overlay.style.display = "none";
-    return;
-  }
-
-  overlay.style.display = "flex";
-
-  const renderStatus = (binaryKey, valElId, barElId, fillElId) => {
-    const bin = state.onboarding[binaryKey];
-    const valEl = document.getElementById(valElId);
-    const barEl = document.getElementById(barElId)?.querySelector(".status-progress-bar");
-    const fillEl = document.getElementById(fillElId);
-
-    if (!valEl) return;
-
-    valEl.className = "status-val";
-
-    if (bin.status === "checking") {
-      valEl.textContent = "Checking...";
-    } else if (bin.status === "installed") {
-      valEl.textContent = "Installed";
-      valEl.classList.add("installed");
-      if (barEl) barEl.style.display = "none";
-    } else if (bin.status === "missing") {
-      valEl.textContent = "Not Installed";
-      valEl.classList.add("missing");
-      if (barEl) barEl.style.display = "none";
-    } else if (bin.status === "downloading") {
-      valEl.textContent = `Downloading (${bin.progress}%)`;
-      valEl.classList.add("downloading");
-      if (barEl) barEl.style.display = "block";
-      if (fillEl) fillEl.style.width = `${bin.progress}%`;
-    } else if (bin.status === "extracting") {
-      valEl.textContent = "Extracting...";
-      valEl.classList.add("downloading");
-      if (barEl) barEl.style.display = "block";
-      if (fillEl) fillEl.style.width = "100%";
-    }
-  };
-
-  renderStatus("ffmpeg", "val-ffmpeg", "status-ffmpeg", "fill-ffmpeg");
-  renderStatus("ytdlp", "val-ytdlp", "status-ytdlp", "fill-ytdlp");
-
-  const errorEl = document.getElementById("onboarding-error");
-  if (errorEl) {
-    if (state.onboarding.error) {
-      errorEl.textContent = `Error: ${state.onboarding.error}`;
-      errorEl.style.display = "block";
-    } else {
-      errorEl.style.display = "none";
-    }
-  }
-
-  const installBtn = document.getElementById("btn-onboarding-install");
-  if (installBtn) {
-    const eitherMissing = state.onboarding.ffmpeg.status === "missing" || state.onboarding.ytdlp.status === "missing";
-    
-    if (state.onboarding.installing) {
-      installBtn.style.display = "inline-flex";
-      installBtn.disabled = true;
-      installBtn.innerHTML = '<i data-lucide="loader" class="spin" style="animation: spin 1s linear infinite; margin-right: 8px;"></i> Installing...';
-    } else if (eitherMissing) {
-      installBtn.style.display = "inline-flex";
-      installBtn.disabled = false;
-      installBtn.innerHTML = '<i data-lucide="download-cloud"></i> Install Required Tools';
-    } else {
-      installBtn.style.display = "none";
-    }
-    
-    if (window.lucide) window.lucide.createIcons();
-  }
-}
 
 let startupToastTimer = null;
 let showedStartupToast = false;
@@ -191,7 +112,6 @@ export function renderDashboard(state) {
   renderMeta(state);
   renderNavigation(state);
   renderActiveView(state);
-  renderOnboarding(state);
 
   if (state.activeTab === "downloads") {
     renderTasks(state);
@@ -346,7 +266,8 @@ function renderTasks(state) {
   tbody.innerHTML = filteredTasks.map(t => {
     const r = 16;
     const c = 2 * Math.PI * r;
-    const off = c - (t.progress / 100) * c;
+    const progressVal = t.progress || 0;
+    const off = c - (progressVal / 100) * c;
     let loc = t.final_path || t.custom_path || (state.settings.categories?.[t.category]) || "—";
     if (loc && loc !== "—" && loc === t.final_path) {
       const sep = loc.includes("\\") ? "\\" : "/";
@@ -357,9 +278,19 @@ function renderTasks(state) {
     const isSelected = selectedTaskIds.has(t.task_id);
     const rowClass = isSelected ? "selected" : "";
 
+    let statusText = t.status;
     let badgeIcon = "";
+    const statusClass = t.status.replace(/\s+/g, '-');
+    const PROCESSING_STATUSES = ["stitching", "embedding", "finalizing"];
     if (t.status === "downloading") {
       badgeIcon = `<i data-lucide="arrow-down-to-line" style="width:11px;height:11px;margin-right:3px;"></i>`;
+      if (t.fragment_index !== undefined && t.fragment_index !== null) {
+        if (t.fragment_count) {
+          statusText = `downloading (${t.fragment_index}/${t.fragment_count})`;
+        } else {
+          statusText = `downloading (frag ${t.fragment_index})`;
+        }
+      }
     } else if (t.status === "completed") {
       badgeIcon = `<i data-lucide="check" style="width:11px;height:11px;margin-right:3px;"></i>`;
     } else if (t.status === "error") {
@@ -370,6 +301,10 @@ function renderTasks(state) {
       badgeIcon = `<i data-lucide="ban" style="width:11px;height:11px;margin-right:3px;"></i>`;
     } else if (t.status === "paused") {
       badgeIcon = `<i data-lucide="pause" style="width:11px;height:11px;margin-right:3px;"></i>`;
+    } else if (PROCESSING_STATUSES.includes(t.status)) {
+      badgeIcon = `<i data-lucide="loader" class="spin" style="width:11px;height:11px;margin-right:3px;"></i>`;
+      const LABELS = { stitching: "Stitching", embedding: "Embedding", finalizing: "Finalizing" };
+      statusText = LABELS[t.status] || t.status;
     }
 
     return `
@@ -385,14 +320,14 @@ function renderTasks(state) {
               <circle class="fg" cx="18" cy="18" r="${r}" fill="none" stroke-width="3"
                 stroke-dasharray="${c}" stroke-dashoffset="${off}"/>
             </svg>
-            <span>${Math.round(t.progress)}%</span>
+            <span>${Math.round(progressVal)}%</span>
           </div>`}
         </td>
         <td class="title-col" title="${escapeHtml(t.title || t.url)}">${escapeHtml(t.title || t.url)}</td>
         <td class="size-col">${fmtBytes(t.total_bytes || t.downloaded_bytes)}</td>
         <td class="speed-col">${fmtSpeed(t.speed)}</td>
         <td class="eta-col">${fmtETA(t.eta)}</td>
-        <td class="status-col"><span class="badge ${t.status}">${badgeIcon}${t.status}</span></td>
+        <td class="status-col"><span class="badge ${statusClass}">${badgeIcon}${statusText}</span></td>
         <td class="location-col" title="${escapeHtml(loc)}">${escapeHtml(loc)}</td>
       </tr>`;
   }).join("");
@@ -652,8 +587,58 @@ window.uiRemoveTaskOnly = async (id) => {
   }
 };
 
+function showDeleteConfirmModal(message, taskTitles = []) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById("delete-confirm-overlay");
+    const msgEl = document.getElementById("delete-confirm-message");
+    const listEl = document.getElementById("delete-confirm-files-list");
+    const cancelBtn = document.getElementById("btn-delete-confirm-cancel");
+    const actionBtn = document.getElementById("btn-delete-confirm-action");
+
+    if (!overlay || !msgEl || !listEl || !cancelBtn || !actionBtn) {
+      resolve(confirm(message));
+      return;
+    }
+
+    msgEl.textContent = message;
+
+    if (taskTitles && taskTitles.length > 0) {
+      listEl.innerHTML = taskTitles.map(title => `
+        <div class="delete-files-list-item">
+          <i data-lucide="file" style="width:14px;height:14px;"></i>
+          <span>${escapeHtml(title)}</span>
+        </div>
+      `).join("");
+      listEl.style.display = "flex";
+      if (window.lucide) {
+        window.lucide.createIcons();
+      }
+    } else {
+      listEl.style.display = "none";
+    }
+
+    overlay.style.display = "flex";
+
+    const cleanup = (result) => {
+      cancelBtn.onclick = null;
+      actionBtn.onclick = null;
+      overlay.style.display = "none";
+      resolve(result);
+    };
+
+    cancelBtn.onclick = () => cleanup(false);
+    actionBtn.onclick = () => cleanup(true);
+  });
+}
+
 window.uiDeleteTaskAndFile = async (id) => {
-  if (confirm("Are you sure you want to permanently delete the downloaded file from disk?")) {
+  const task = getState().tasks.find(t => t.task_id === id);
+  const title = task ? task.title : "Unknown File";
+  const confirmed = await showDeleteConfirmModal(
+    "Are you sure you want to permanently delete the downloaded file from disk?",
+    [title]
+  );
+  if (confirmed) {
     try {
       await deleteTask(id, true);
       selectedTaskIds.delete(id);
@@ -678,7 +663,6 @@ export function setupUIEventListeners() {
   const bulkResumeBtn = document.getElementById("bulk-resume");
   const bulkRemoveBtn = document.getElementById("bulk-remove");
   const bulkDeleteBtn = document.getElementById("bulk-delete");
-  const bulkClearBtn = document.getElementById("bulk-clear");
 
   if (tbody) {
     tbody.onclick = (e) => {
@@ -733,18 +717,26 @@ export function setupUIEventListeners() {
   if (selectAllCheckbox) {
     selectAllCheckbox.onchange = (e) => {
       const stateVal = getState();
-      if (e.target.checked) {
-        stateVal.tasks.forEach(t => selectedTaskIds.add(t.task_id));
-      } else {
-        selectedTaskIds.clear();
+      
+      // Compute currently filtered tasks
+      let filteredTasks = stateVal.tasks;
+      if (currentCategoryFilter !== "all") {
+        filteredTasks = filteredTasks.filter(t => t.category === currentCategoryFilter);
       }
-      updateSelectionUI();
-    };
-  }
+      if (currentSearchQuery && currentSearchQuery.trim()) {
+        const query = currentSearchQuery.toLowerCase().trim();
+        filteredTasks = filteredTasks.filter(t => {
+          const title = (t.title || "").toLowerCase();
+          const url = (t.url || "").toLowerCase();
+          return title.includes(query) || url.includes(query);
+        });
+      }
 
-  if (bulkClearBtn) {
-    bulkClearBtn.onclick = () => {
-      selectedTaskIds.clear();
+      if (e.target.checked) {
+        filteredTasks.forEach(t => selectedTaskIds.add(t.task_id));
+      } else {
+        filteredTasks.forEach(t => selectedTaskIds.delete(t.task_id));
+      }
       updateSelectionUI();
     };
   }
@@ -810,7 +802,17 @@ export function setupUIEventListeners() {
     bulkDeleteBtn.onclick = async () => {
       const ids = Array.from(selectedTaskIds);
       if (!ids.length) return;
-      if (confirm(`Are you sure you want to permanently delete files for ${ids.length} selected tasks?`)) {
+      const allTasks = getState().tasks;
+      const titles = ids.map(id => {
+        const t = allTasks.find(x => x.task_id === id);
+        return t ? t.title : "Unknown File";
+      });
+
+      const confirmed = await showDeleteConfirmModal(
+        `Are you sure you want to permanently delete files for ${ids.length} selected tasks?`,
+        titles
+      );
+      if (confirmed) {
         let successCount = 0;
         await Promise.all(ids.map(async (id) => {
           try {
@@ -929,11 +931,11 @@ export function setupUIEventListeners() {
     clearCompletedBtn.onclick = async () => {
       const stateVal = getState();
       const completedTasks = stateVal.tasks.filter(t => 
-        t.status === "completed" || t.status === "error" || t.status === "cancelled"
+        t.status === "completed"
       );
       
       if (completedTasks.length === 0) {
-        showToast("No completed or stopped tasks to clear");
+        showToast("No completed tasks to clear");
         return;
       }
 
@@ -948,7 +950,7 @@ export function setupUIEventListeners() {
             console.error(`Failed to clear task ${t.task_id}`, err);
           }
         }));
-        showToast(`Cleared ${successCount} completed/stopped tasks`);
+        showToast(`Cleared ${successCount} completed tasks`);
       } catch (err) {
         showToast("Failed to clear tasks");
       } finally {
@@ -957,11 +959,6 @@ export function setupUIEventListeners() {
     };
   }
 
-  const onboardingInstallBtn = document.getElementById("btn-onboarding-install");
-  if (onboardingInstallBtn) {
-    onboardingInstallBtn.onclick = () => {
-      triggerBinaryInstall();
-    };
-  }
+
 
 }
