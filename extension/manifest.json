@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "Stream Snatcher — Enterprise Media Acquisition",
-  "version": "1.0.0",
-  "description": "Silently sniff HLS/DASH/MP4 streams, overlay download buttons, and route to the local FastAPI acquisition engine.",
-  "minimum_chrome_version": "114",
+  "name": "DownloadAnything — Media Acquisition Helper",
+  "version": "3.0.0",
+  "description": "Sniff HLS/DASH/MP4 streams and file downloads, overlay acquire buttons, and route them to the local DownloadAnything engine.",
+  "minimum_chrome_version": "116",
   "permissions": [
     "activeTab",
     "contextMenus",
@@ -29,6 +29,6 @@
     }
   ],
   "action": {
-    "default_title": "Stream Snatcher"
+    "default_title": "DownloadAnything — acquire media on this page"
   }
 }

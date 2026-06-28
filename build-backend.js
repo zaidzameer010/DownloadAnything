@@ -34,7 +34,7 @@ console.log('Changes detected or sidecar missing. Compiling Python backend...');
 
 try {
   // Run PyInstaller
-  execSync('pyinstaller --onefile --clean main.py', { stdio: 'inherit' });
+  execSync('pyinstaller --onefile --clean --noupx main.py', { stdio: 'inherit' });
 } catch (error) {
   console.error('Failed to run PyInstaller:', error.message);
   process.exit(1);

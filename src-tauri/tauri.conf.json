@@ -4,9 +4,10 @@
   "version": "0.2.0",
   "identifier": "com.DownloadAnything.dev",
   "build": {
-    "frontendDist": "../frontend",
-    "beforeDevCommand": "node build-backend.js",
-    "beforeBuildCommand": "node build-backend.js"
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "bun run build-backend.js && bun run dev",
+    "beforeBuildCommand": "bun run build-backend.js && bun run build"
   },
   "app": {
     "withGlobalTauri": true,

@@ -1,5 +1,7 @@
-fastapi
+fastapi[standard]
 uvicorn
 yt-dlp
 pydantic
 pyinstaller
+orjson
+uvloop

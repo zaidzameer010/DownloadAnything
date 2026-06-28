@@ -1,0 +1,230 @@
+/**
+ * style.css — Global design system & layout
+ */
+:root {
+  color-scheme: dark;
+  --bg: #030303;
+  --bg-gradient: radial-gradient(circle at 50% 0%, #101014 0%, #030303 75%);
+  --panel: rgba(18, 18, 22, 0.45);
+  --panel-solid: #0d0d0f;
+  --panel-hover: rgba(255, 255, 255, 0.02);
+  --border: rgba(255, 255, 255, 0.06);
+  --border-hover: rgba(255, 255, 255, 0.12);
+  --accent-primary: #ffffff;
+  --accent-secondary: #a1a1aa; /* Zinc-400 */
+  --text: #f4f4f5; /* Zinc-100 */
+  --text-inverse: #09090b; /* Zinc-950 */
+  --muted: #71717a; /* Zinc-500 */
+  --muted-dark: #3f3f46; /* Zinc-700 */
+
+  /* Semantics */
+  --danger: #ef4444; /* Rose-500 */
+  --danger-bg: rgba(239, 68, 68, 0.08);
+  --danger-border: rgba(239, 68, 68, 0.15);
+
+  --success: #10b981; /* Emerald-500 */
+  --success-bg: rgba(16, 185, 129, 0.08);
+  --success-border: rgba(16, 185, 129, 0.15);
+
+  --warning: #f59e0b; /* Amber-500 */
+  --warning-bg: rgba(245, 158, 11, 0.08);
+  --warning-border: rgba(245, 158, 11, 0.15);
+
+  --info: #0ea5e9; /* Sky-500 */
+  --info-bg: rgba(14, 165, 233, 0.08);
+  --info-border: rgba(14, 165, 233, 0.15);
+
+  --font-display: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+  /* Custom Design Engineering Easing Curves */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-interactive: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+  --shadow-glow: 0 0 24px rgba(255, 255, 255, 0.01);
+}
+
+h1, h2, h3, h4, h5, h6 {
+  text-wrap: balance;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  min-height: 100vh;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  background-image: var(--bg-gradient);
+  background-attachment: fixed;
+  color: var(--text);
+  padding: 0;
+  overflow: hidden;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 9999px;
+  transition: background-color 0.2s var(--ease-out);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+/* Layout wrapper */
+.app-layout {
+  display: flex;
+  min-height: 100vh;
+  width: 100vw;
+  background: transparent;
+}
+
+/* Sidebar navigation */
+.sidebar {
+  width: 260px;
+  height: 100vh;
+  position: fixed;
+  left: 0;
+  top: 0;
+  background: #070709;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 2.5rem 1.25rem 2rem 1.25rem;
+  z-index: 100;
+  overflow-y: auto;
+}
+
+/* Main scrollable content */
+.main-content {
+  margin-left: 260px;
+  flex: 1;
+  padding: 3rem 4rem;
+  height: 100vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+}
+
+/* View panel visibility */
+.view-panel {
+  display: none;
+  animation: viewFadeIn 0.35s var(--ease-out) forwards;
+}
+
+.view-panel.active {
+  display: block;
+}
+
+@keyframes viewFadeIn {
+  from { opacity: 0; transform: scale(0.985) translateY(6px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+/* Offline Banner */
+.offline-banner {
+  display: none;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.15);
+  color: var(--danger);
+  padding: 12px 20px;
+  border-radius: 12px;
+  margin-bottom: 2rem;
+  align-items: center;
+  gap: 12px;
+  font-weight: 500;
+  font-size: 0.85rem;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: fadeIn 0.4s var(--ease-out);
+}
+
+.offline-banner.visible {
+  display: flex;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Responsive sidebar */
+@media (max-width: 850px) {
+  body {
+    overflow: auto;
+  }
+  .app-layout {
+    flex-direction: column;
+  }
+  .sidebar {
+    position: relative;
+    width: 100%;
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 1rem 1.5rem;
+    flex-direction: row;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 2.5rem;
+  }
+  .sidebar-brand {
+    margin-bottom: 0 !important;
+  }
+  .sidebar-menu {
+    flex-direction: row;
+    gap: 8px;
+    flex: 0;
+  }
+  .sidebar-menu .menu-item {
+    width: auto;
+    padding: 8px 12px;
+  }
+  .sidebar-footer {
+    display: none;
+  }
+  .main-content {
+    margin-left: 0;
+    height: auto;
+    padding: 2rem 1.5rem;
+  }
+}
+
+/* Honor prefers-reduced-motion media query */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-delay: 0s !important;
+    animation-duration: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0s !important;
+    scroll-behavior: auto !important;
+    transform: none !important;
+  }
+}
