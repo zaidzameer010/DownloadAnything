@@ -668,7 +668,7 @@
       categoryFieldsBuilt = true;
       await buildCategoryFields(body, actions, async (choice) => {
         if (choice.cancelled) return closeDialog();
-        await submitDownload(dialog, state, choice, tier, mediaTitle, closeDialog);
+        await submitDownload(dialog, state, choice, tier, mediaTitle, data.title, closeDialog);
       });
     };
 
@@ -784,7 +784,7 @@
     return formats;
   }
 
-  async function submitDownload(dialog, state, choice, tier, mediaTitle, closeDialog) {
+  async function submitDownload(dialog, state, choice, tier, mediaTitle, title, closeDialog) {
     const { selectedFormat, selectedUrl, bestAudio, bestVideo } = state;
     const isVideo = selectedFormat
       ? !!(selectedFormat.vcodec && selectedFormat.vcodec !== "none")
@@ -804,6 +804,7 @@
       custom_path: choice.customPath,
       is_video: isVideo,
       page_title: mediaTitle,
+      title: title || null,
       is_stream: tier === "stream",
       estimated_total_bytes: estimatedTotalBytes,
     };

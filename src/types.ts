@@ -25,6 +25,13 @@ export interface Task {
   readonly format_id?: string | null;
   readonly fragment_index?: number | null;
   readonly fragment_count?: number | null;
+  readonly is_video?: boolean;
+  readonly page_title?: string | null;
+  readonly is_stream?: boolean;
+  readonly error?: string | null;
+  readonly started_at?: number;
+  readonly finished_at?: number;
+  readonly has_custom_title?: boolean;
 }
 
 export type MergeFormat = "mp4" | "mkv" | "webm";

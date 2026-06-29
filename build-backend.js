@@ -18,14 +18,38 @@ if (platform === 'darwin') {
 const binariesDir = path.join(__dirname, 'src-tauri', 'binaries');
 const destName = platform === 'win32' ? `main-${targetTriple}.exe` : `main-${targetTriple}`;
 const destPath = path.join(binariesDir, destName);
-const srcPyPath = path.join(__dirname, 'main.py');
+// Incremental build check: skip if sidecar exists and is newer than any source .py files
+let maxMtime = 0;
+const getPythonFiles = (dir) => {
+  let results = [];
+  if (!fs.existsSync(dir)) return results;
+  const list = fs.readdirSync(dir);
+  list.forEach((file) => {
+    const fullPath = path.join(dir, file);
+    const stat = fs.statSync(fullPath);
+    if (stat && stat.isDirectory()) {
+      if (file !== 'node_modules' && file !== '.git' && file !== 'dist' && file !== 'build' && file !== 'src-tauri') {
+        results = results.concat(getPythonFiles(fullPath));
+      }
+    } else if (file.endsWith('.py')) {
+      results.push(fullPath);
+    }
+  });
+  return results;
+};
 
-// Incremental build check: skip if sidecar exists and is newer than main.py
-if (fs.existsSync(destPath) && fs.existsSync(srcPyPath)) {
-  const srcStat = fs.statSync(srcPyPath);
+if (fs.existsSync(destPath)) {
+  const pyFiles = getPythonFiles(__dirname);
+  pyFiles.forEach((file) => {
+    const stat = fs.statSync(file);
+    if (stat.mtimeMs > maxMtime) {
+      maxMtime = stat.mtimeMs;
+    }
+  });
+
   const destStat = fs.statSync(destPath);
-  if (destStat.mtimeMs > srcStat.mtimeMs) {
-    console.log('Python backend sidecar is up to date (incremental check). Skipping PyInstaller build.');
+  if (destStat.mtimeMs > maxMtime) {
+    console.log('Python backend sidecar is up to date (incremental check of all python files). Skipping PyInstaller build.');
     process.exit(0);
   }
 }

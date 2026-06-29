@@ -16,6 +16,8 @@ import {
   FileX,
   File,
   RefreshCw,
+  Copy,
+  Info,
 } from "lucide-react";
 import {
   useReactTable,
@@ -50,6 +52,11 @@ interface DeleteModalState {
   readonly isBulk: boolean;
 }
 
+interface PropertiesModalState {
+  readonly isOpen: boolean;
+  readonly taskId: string | null;
+}
+
 const columnHelper = createColumnHelper<Task>();
 
 const classNameMap: Record<string, string> = {
@@ -81,6 +88,10 @@ export function DownloadsView({
     isOpen: false,
     taskIds: [],
     isBulk: false,
+  });
+  const [propertiesModal, setPropertiesModal] = useState<PropertiesModalState>({
+    isOpen: false,
+    taskId: null,
   });
 
   const [, startTransition] = useTransition();
@@ -593,6 +604,19 @@ export function DownloadsView({
                 >
                   <FolderOpen size={14} /> Reveal in Finder
                 </button>
+                <button
+                  className="context-menu-item"
+                  onClick={() =>
+                    handleContextAction(() => {
+                      setPropertiesModal({
+                        isOpen: true,
+                        taskId: task.task_id,
+                      });
+                    })
+                  }
+                >
+                  <Info size={14} /> Properties
+                </button>
                 <div className="context-menu-divider" />
                 <button
                   className="context-menu-item"
@@ -688,6 +712,219 @@ export function DownloadsView({
                 Delete Permanently
               </button>
             </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* Properties Modal */}
+      {propertiesModal.isOpen && propertiesModal.taskId && createPortal(
+        <div
+          className="onboarding-overlay"
+          style={{ display: "flex" }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setPropertiesModal({ isOpen: false, taskId: null });
+            }
+          }}
+        >
+          <div className="onboarding-card properties-modal-card">
+            {(() => {
+              const task = tasks.find((t) => t.task_id === propertiesModal.taskId);
+              if (!task) return null;
+
+              const handleCopy = (text: string, label: string) => {
+                navigator.clipboard.writeText(text);
+                showToast(`${label} copied to clipboard`);
+              };
+
+              return (
+                <>
+                  <div className="properties-header">
+                    <h2>
+                      <Info size={18} style={{ color: "var(--info)" }} /> Task Properties
+                    </h2>
+                  </div>
+
+                  <div className="properties-content">
+                    <div className="title-row">
+                      <span className="property-label">Title</span>
+                      <div className="property-value" style={{ fontWeight: 600, color: "var(--text)", wordBreak: "break-word" }}>
+                        {task.title || "Untitled Download"}
+                      </div>
+                    </div>
+
+                    <div className="properties-grid">
+                      <div className="property-item">
+                        <span className="property-label">Task ID</span>
+                        <div className="property-value">
+                          <code>{task.task_id}</code>
+                          <button
+                            className="ghost-icon-btn"
+                            title="Copy Task ID"
+                            onClick={() => handleCopy(task.task_id, "Task ID")}
+                          >
+                            <Copy size={12} />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="property-item">
+                        <span className="property-label">Status</span>
+                        <div className="property-value">
+                          <span className={`badge ${task.status.replace(/\s+/g, "-")}`}>
+                            {task.status}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="property-item full-width">
+                        <span className="property-label">Source URL</span>
+                        <div className="property-value url-val">
+                          <a href={task.url} target="_blank" rel="noreferrer" title={task.url}>
+                            {task.url}
+                          </a>
+                          <button
+                            className="ghost-icon-btn"
+                            title="Copy URL"
+                            onClick={() => handleCopy(task.url, "URL")}
+                          >
+                            <Copy size={12} />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="property-item">
+                        <span className="property-label">Category</span>
+                        <div className="property-value">{task.category || "Default"}</div>
+                      </div>
+
+                      <div className="property-item">
+                        <span className="property-label">Format ID</span>
+                        <div className="property-value">
+                          <code>{task.format_id || "default"}</code>
+                        </div>
+                      </div>
+
+                      <div className="property-item">
+                        <span className="property-label">Media Type</span>
+                        <div className="property-value">
+                          {task.is_stream ? "Segmented Stream" : task.is_video ? "Video" : "Audio / File"}
+                        </div>
+                      </div>
+
+                      {task.page_title && task.page_title !== task.title && (
+                        <div className="property-item full-width">
+                          <span className="property-label">Original Page Title</span>
+                          <div className="property-value" style={{ wordBreak: "break-word" }}>{task.page_title}</div>
+                        </div>
+                      )}
+
+                      {task.started_at && task.started_at > 0 && (
+                        <div className="property-item">
+                          <span className="property-label">Started At</span>
+                          <div className="property-value">
+                            {new Date(task.started_at * 1000).toLocaleString()}
+                          </div>
+                        </div>
+                      )}
+
+                      {task.finished_at && task.finished_at > 0 && (
+                        <div className="property-item">
+                          <span className="property-label">Finished At</span>
+                          <div className="property-value">
+                            {new Date(task.finished_at * 1000).toLocaleString()}
+                          </div>
+                        </div>
+                      )}
+
+                      {task.status === "error" && task.error && (
+                        <div className="property-item full-width error-val">
+                          <span className="property-label" style={{ color: "var(--danger)" }}>Error Message</span>
+                          <div className="property-value" style={{ color: "var(--danger)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                            {task.error}
+                          </div>
+                        </div>
+                      )}
+
+                      {task.status !== "completed" && (
+                        <>
+                          <div className="property-item full-width">
+                            <span className="property-label">Progress</span>
+                            <div className="property-value progress-value-container">
+                              <div className="properties-progress-bar-bg">
+                                <div
+                                  className="properties-progress-bar-fg"
+                                  style={{ width: `${task.progress || 0}%` }}
+                                />
+                              </div>
+                              <span className="progress-percentage">{Math.round(task.progress || 0)}%</span>
+                            </div>
+                          </div>
+
+                          <div className="property-item">
+                            <span className="property-label">Speed</span>
+                            <div className="property-value">{fmtSpeed(task.speed)}</div>
+                          </div>
+
+                          <div className="property-item">
+                            <span className="property-label">ETA</span>
+                            <div className="property-value">{fmtETA(task.eta)}</div>
+                          </div>
+                        </>
+                      )}
+
+                      <div className="property-item">
+                        <span className="property-label">File Size</span>
+                        <div className="property-value">
+                          {task.status === "completed"
+                            ? fmtBytes(task.total_bytes || task.downloaded_bytes)
+                            : `${fmtBytes(task.downloaded_bytes)} of ${fmtBytes(task.total_bytes || 0)}`}
+                        </div>
+                      </div>
+
+                      <div className="property-item full-width">
+                        <span className="property-label">Destination Path</span>
+                        <div className="property-value path-val">
+                          <span title={task.final_path || task.custom_path || "—"}>
+                            {task.final_path || task.custom_path || "—"}
+                          </span>
+                          {(task.final_path || task.custom_path) && (
+                            <button
+                              className="ghost-icon-btn"
+                              title="Copy Path"
+                              onClick={() => handleCopy(task.final_path || task.custom_path || "", "Path")}
+                            >
+                              <Copy size={12} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {task.fragment_index !== undefined && task.fragment_index !== null && (
+                        <div className="property-item">
+                          <span className="property-label">Fragments</span>
+                          <div className="property-value">
+                            {task.fragment_count
+                              ? `${task.fragment_index} / ${task.fragment_count}`
+                              : `Fragment ${task.fragment_index}`}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="properties-actions">
+                    <button
+                      className="primary"
+                      onClick={() => setPropertiesModal({ isOpen: false, taskId: null })}
+                    >
+                      Close
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>,
         document.body
