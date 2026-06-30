@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag for release (e.g., v1.0.0)'
+        required: true
 
 jobs:
   release:
@@ -20,6 +25,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Forces the workflow to fetch the absolute latest commit that triggered the run
+          ref: ${{ github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -53,8 +61,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_PUBKEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'DownloadAnything ${{ github.ref_name }}'
+          # Uses the manual input if dispatched manually; falls back to the git tag on push
+          tagName: ${{ github.event.inputs.version || github.ref_name }}
+          releaseName: 'DownloadAnything ${{ github.event.inputs.version || github.ref_name }}'
           releaseBody: 'DownloadAnything Release'
           releaseDraft: true
           prerelease: false
@@ -62,8 +71,8 @@ jobs:
           args: --config '{"plugins":{"updater":{"pubkey":"${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}"}}}'
 
       - name: Cleanup old caches
+        shell: bash # Forces Bash on Windows so '|| true' doesn't cause a syntax error
         run: |
           gh cache delete --all --ref "${{ github.ref }}" || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
