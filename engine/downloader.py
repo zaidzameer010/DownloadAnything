@@ -309,6 +309,8 @@ class YTDownloader:
             "format": format_spec,
             "format_sort": format_sort,
             "concurrent_fragment_downloads": self.settings.concurrent_fragments,
+            "compat_opts": ["allow-unsafe-ext"],
+            "extractor_args": {"generic": {"impersonate": ["chrome"]}},
             "external_downloader": {
                 "m3u8": "native",
                 "dash": "native",
@@ -517,6 +519,8 @@ class YTDownloader:
 
     def _download_once(self, task: DownloadTask, opts: JsonObj) -> None:
         with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl._ies.pop("KnownPiracy", None)
+            ydl._ies.pop("KnownDRM", None)
             info = ydl.extract_info(task.url, download=True)
         if not info:
             raise DownloadError("No info extracted")

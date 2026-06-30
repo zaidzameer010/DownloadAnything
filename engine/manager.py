@@ -73,6 +73,7 @@ def build_probe_opts(settings: AppSettings, headers: dict[str, str] | None) -> J
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
+        "extractor_args": {"generic": {"impersonate": ["chrome"]}},
     }
     if headers:
         filtered_headers = {k: v for k, v in headers.items() if k.lower() != "cookie"}
@@ -83,6 +84,8 @@ def build_probe_opts(settings: AppSettings, headers: dict[str, str] | None) -> J
 
 def _extract_once(url: str, opts: JsonObj) -> Any:
     with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl._ies.pop("KnownPiracy", None)
+        ydl._ies.pop("KnownDRM", None)
         return ydl.extract_info(url, download=False)
 
 
@@ -734,6 +737,33 @@ class DownloadManager:
                     prefer_page=is_stream
                     or not payload.get("is_video", True),
                 )
+
+        # Resolve target directory
+        target_dir = Path(
+            payload.get("custom_path")
+            or self.settings.categories.get(payload.get("category"))
+            or self.settings.default_download_path
+        ).resolve()
+
+        # Collision Check: Same URL, title, or filename on disk (auto-increment name)
+        base_title = title
+        title_counter = 1
+        collided = False
+        while any(t.url == url or t.title == title for t in self._tasks.values()):
+            title = f"{base_title} ({title_counter})"
+            title_counter += 1
+            collided = True
+
+        if collided:
+            has_custom_title = True
+
+        if filename:
+            stem = Path(filename).stem
+            ext = Path(filename).suffix
+            file_counter = 1
+            while any(t.url == url or t.filename == filename for t in self._tasks.values()) or (target_dir / filename).exists():
+                filename = f"{stem} ({file_counter}){ext}"
+                file_counter += 1
 
         task = DownloadTask(
             task_id=uuid.uuid4().hex,

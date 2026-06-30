@@ -126,9 +126,11 @@
   /* ── Media scanning (shadow-DOM aware) ───────────────────────────────── */
 
   const findAllMedia = (root = document) => {
+    if (!root) return [];
     const found = [...(root.querySelectorAll?.("video, audio") || [])];
-    const hosts = root.querySelectorAll?.("div, span, article, section, header, footer, main, nav, aside, :not(:defined)") || [];
-    for (const node of hosts) {
+    // Restrict Shadow DOM checking to custom components or elements matching player patterns
+    const shadowHosts = root.querySelectorAll?.("[class*='player'], [id*='player'], :not(:defined), shaka-video-container, video-js") || [];
+    for (const node of shadowHosts) {
       if (node.shadowRoot) {
         found.push(...findAllMedia(node.shadowRoot));
       }
@@ -136,21 +138,8 @@
     return found;
   };
 
-  const PLAYER_HINTS = ["player", "video-container", "video-wrap", "video-player"];
-
   const findPlayerContainer = (mediaEl) => {
-    if (!mediaEl?.parentElement) return document.body;
-    if (mediaEl.parentElement.shadowRoot?.contains(mediaEl)) {
-      return mediaEl.parentElement.shadowRoot;
-    }
-    let player = mediaEl.parentElement;
-    let current = mediaEl.parentElement;
-    while (current && current !== document.body) {
-      const signature = `${current.className || ""} ${current.id || ""}`.toLowerCase();
-      if (PLAYER_HINTS.some((hint) => signature.includes(hint))) player = current;
-      current = current.parentElement;
-    }
-    return player;
+    return mediaEl?.parentElement || document.body;
   };
 
   /* ── Title extraction ────────────────────────────────────────────────── */
@@ -291,6 +280,20 @@
   function registerPlayerTrigger(mediaEl) {
     if (overlays.has(mediaEl)) return;
 
+    if (!mediaEl.__da_loadstart_bound__) {
+      mediaEl.__da_loadstart_bound__ = true;
+      mediaEl.addEventListener("loadstart", () => {
+        const overlay = overlays.get(mediaEl);
+        if (overlay) {
+          overlay.unmount();
+          overlays.delete(mediaEl);
+        }
+        setTimeout(() => {
+          registerPlayerTrigger(mediaEl);
+        }, 500);
+      });
+    }
+
     const container = findPlayerContainer(mediaEl);
     const state = {
       mediaEl,
@@ -309,8 +312,10 @@
         }
 
         bindSharedListeners();
-        if (window.getComputedStyle(this.container).position === "static") {
-          this.container.style.position = "relative";
+        if (this.container !== document.body && this.container !== document.documentElement) {
+          if (window.getComputedStyle(this.container).position === "static") {
+            this.container.style.position = "relative";
+          }
         }
 
         const host = el("div", {
@@ -385,6 +390,11 @@
 
         this.host = host;
         const targetContainer = this.container === document.body ? (this.mediaEl.parentElement || document.body) : this.container;
+        if (targetContainer !== document.body && targetContainer !== document.documentElement) {
+          if (window.getComputedStyle(targetContainer).position === "static") {
+            targetContainer.style.position = "relative";
+          }
+        }
         targetContainer.appendChild(host);
 
         requestAnimationFrame(() => {
