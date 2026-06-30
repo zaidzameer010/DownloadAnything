@@ -9,13 +9,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 import orjson
 import yt_dlp
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, ORJSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -83,18 +82,17 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def disable_static_cache(request: Request, call_next: Callable[[Request], Awaitable[Any]]):
-    response = await call_next(request)
-    if request.url.path.startswith("/static/"):
+class NoCacheStaticFiles(StaticFiles):
+    def file_response(self, *args: Any, **kwargs: Any) -> FileResponse:
+        response = super().file_response(*args, **kwargs)
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
-    return response
+        return response
 
 
 if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/static", NoCacheStaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.get("/")

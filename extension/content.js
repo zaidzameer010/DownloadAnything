@@ -20,7 +20,7 @@
   const escapeHtml = (value) =>
     String(value ?? "").replace(
       /[&<>"']/g,
-      (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]),
+      (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]),
     );
 
   const el = (tag, attrs = {}, ...children) => {
@@ -37,8 +37,8 @@
     return node;
   };
 
-  const errorMessage = (e) =>
-    e instanceof Error ? e.message : typeof e === "string" ? e : JSON.stringify(e);
+  const errorMessage = (err) =>
+    err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err);
 
   const formatBytes = (bytes) => {
     if (bytes === null || bytes === undefined || isNaN(bytes)) return "—";
@@ -65,7 +65,8 @@
   const keepalivePort = () => {
     try {
       return chrome.runtime.connect({ name: "keepalive" });
-    } catch {
+    } catch (err) {
+      console.warn("[DownloadAnything] Failed to connect keepalive port:", err);
       return null;
     }
   };
@@ -106,8 +107,8 @@
     } finally {
       try {
         port?.disconnect();
-      } catch {
-        /* ignore */
+      } catch (err) {
+        console.debug("[DownloadAnything] Error disconnecting keepalive port:", err);
       }
     }
   };
@@ -126,9 +127,11 @@
 
   const findAllMedia = (root = document) => {
     const found = [...(root.querySelectorAll?.("video, audio") || [])];
-    const hosts = root.querySelectorAll?.("*") || [];
+    const hosts = root.querySelectorAll?.("div, span, article, section, header, footer, main, nav, aside, :not(:defined)") || [];
     for (const node of hosts) {
-      if (node.shadowRoot) found.push(...findAllMedia(node.shadowRoot));
+      if (node.shadowRoot) {
+        found.push(...findAllMedia(node.shadowRoot));
+      }
     }
     return found;
   };
@@ -156,84 +159,58 @@
     "YouTube", "Twitch", "Vimeo", "Netflix", "Disney+", "TikTok", "Twitter",
     "X", "Facebook", "Instagram", "Reddit", "Dailymotion", "Rumble", "Bilibili",
   ];
-
-  const SITE_TITLE_SELECTOR = {
-    "youtube.com": "ytd-watch-metadata h1, ytd-video-primary-info-renderer h1",
-    "youtu.be": "ytd-watch-metadata h1, ytd-video-primary-info-renderer h1",
-    "twitch.tv": '[data-a-target="stream-title"], [data-a-target="video-title"]',
-  };
-
-  const firstText = (selector, root = document) =>
-    root.querySelector(selector)?.textContent?.trim() || "";
-
   function getMediaTitle(mediaEl) {
-    const host = window.location.hostname.toLowerCase();
+    const firstAttr = (selector, attr) => document.querySelector(selector)?.getAttribute(attr)?.trim() || "";
 
-    // 1. Site-specific selectors (handle SPA dynamic titles)
-    for (const [domain, selector] of Object.entries(SITE_TITLE_SELECTOR)) {
-      if (host.includes(domain)) {
-        const title = firstText(selector);
-        if (title) return title;
-      }
-    }
+    // 1. OpenGraph / Meta title content (usually extremely clean and accurate for media)
+    let title = firstAttr("meta[property='og:title']", "content") ||
+                firstAttr("meta[name='twitter:title']", "content");
 
-    // 2. Element / player attributes
-    if (mediaEl) {
-      const direct = mediaEl.getAttribute("title") || mediaEl.getAttribute("aria-label");
-      if (direct?.trim()) return direct.trim();
-
-      const container = findPlayerContainer(mediaEl);
-      if (container && container !== document.body) {
-        const containerTitle =
-          container.getAttribute?.("title") || container.getAttribute?.("aria-label");
-        if (containerTitle?.trim()) return containerTitle.trim();
-
-        for (const selector of [".video-title", ".title", ".media-title", ".caption", "figcaption"]) {
-          const text = firstText(selector, container);
-          if (text) return text;
-        }
-      }
-
-      // 3. Nearest preceding heading
-      let current = mediaEl;
-      for (let depth = 0; current && current !== document.body && depth < 5; depth++) {
-        let sibling = current.previousElementSibling;
-        while (sibling) {
-          const heading = sibling.matches("h1, h2, h3, h4")
-            ? sibling
-            : sibling.querySelector("h1, h2, h3, h4");
-          if (heading?.textContent?.trim()) return heading.textContent.trim();
-          sibling = sibling.previousElementSibling;
-        }
-        current = current.parentElement;
-      }
-    }
-
-    // 4. Cleaned document.title
-    let title = (document.title || "").trim();
-    if (title) {
-      const lowered = title.toLowerCase();
-      for (const suffix of TITLE_SUFFIXES) {
-        const token = ` - ${suffix}`.toLowerCase();
-        if (lowered.endsWith(token)) {
-          title = title.slice(0, -token.length).trim();
+    // 2. Main Page Heading (H1) - usually what the user sees on screen
+    if (!title) {
+      const h1s = Array.from(document.querySelectorAll("h1"));
+      for (const h1 of h1s) {
+        const text = h1.textContent?.trim();
+        if (text && h1.offsetWidth > 0 && h1.offsetHeight > 0) {
+          title = text;
           break;
         }
       }
-      title = title
-        .replace(/\s*[-|·•–—]\s*(YouTube|Vimeo|Twitch|Dailymotion|Twitter|X|Facebook|Instagram|TikTok|Reddit|Bilibili|Rumble|Odysee|PeerTube|Niconico|SoundCloud|Spotify|Netflix|Prime Video|Disney\+|Apple TV)\s*$/i, "")
-        .trim();
-      if (title) return title;
     }
 
-    // 5. Metadata fallbacks
-    return (
-      firstText("meta[property='og:title']") ||
-      firstText("meta[name='twitter:title']") ||
-      firstText("h1") ||
-      document.title ||
-      "Unknown media"
-    );
+    // 3. Media Element attributes
+    if (!title && mediaEl) {
+      title = mediaEl.getAttribute("title")?.trim() || mediaEl.getAttribute("aria-label")?.trim();
+    }
+
+    // 4. HTML document title (cleaned)
+    if (!title) {
+      title = (document.title || "").trim();
+    }
+
+    if (!title) {
+      return "Unknown media";
+    }
+
+    // Clean common site suffixes (e.g. " - YouTube", " | Twitch")
+    const lowered = title.toLowerCase();
+    for (const suffix of TITLE_SUFFIXES) {
+      const token = ` - ${suffix}`.toLowerCase();
+      if (lowered.endsWith(token)) {
+        title = title.slice(0, -token.length).trim();
+        break;
+      }
+      const pipeToken = ` | ${suffix}`.toLowerCase();
+      if (lowered.endsWith(pipeToken)) {
+        title = title.slice(0, -pipeToken.length).trim();
+        break;
+      }
+    }
+    title = title
+      .replace(/\s*[-|·•–—]\s*(YouTube|Vimeo|Twitch|Dailymotion|Twitter|X|Facebook|Instagram|TikTok|Reddit|Bilibili|Rumble|Odysee|PeerTube|Niconico|SoundCloud|Spotify|Netflix|Prime Video|Disney\+|Apple TV)\s*$/i, "")
+      .trim();
+
+    return title || "Unknown media";
   }
 
   /* ── Overlay buttons ─────────────────────────────────────────────────── */
@@ -243,130 +220,214 @@
 
   const isFullscreen = () => !!document.fullscreenElement;
 
+  let cachedSniffedStreams = [];
+  let lastStreamFetchTime = 0;
+
+  async function getSniffedStreams() {
+    const now = Date.now();
+    if (now - lastStreamFetchTime < 1500) {
+      return cachedSniffedStreams;
+    }
+    try {
+      const res = await sendToBackground("GET_TAB_STREAMS");
+      cachedSniffedStreams = res?.data?.urls || [];
+      lastStreamFetchTime = now;
+    } catch (err) {
+      console.debug("[DownloadAnything] Failed fetching tab streams:", err);
+    }
+    return cachedSniffedStreams;
+  }
+
+  const isDownloadable = (mediaEl, sniffed = []) => {
+    if (!mediaEl) return false;
+    const src = (mediaEl.currentSrc || mediaEl.src || "").trim();
+    if (src && !src.startsWith("blob:")) return true;
+
+    const sources = mediaEl.querySelectorAll("source");
+    for (const source of sources) {
+      const sSrc = (source.src || "").trim();
+      if (sSrc && !sSrc.startsWith("blob:")) return true;
+    }
+
+    if (src.startsWith("blob:") && sniffed.some((url) => url && !url.startsWith("blob:"))) return true;
+    return false;
+  };
+
   function bindSharedListeners() {
     if (sharedListenersBound) return;
     sharedListenersBound = true;
 
     document.addEventListener("fullscreenchange", () =>
-      overlays.forEach((o) => o.updateVisibility()),
+      overlays.forEach((overlay) => overlay.updateVisibility()),
     );
 
-    // Single observer drives both pruning (detached media) and rescanning.
+    // Drives detached overlay cleanup (instantly) and debounced rescanning (only when elements are added)
     let scanTimer = null;
-    new MutationObserver(() => {
+    new MutationObserver((mutations) => {
       for (const overlay of overlays.values()) {
-        if (!overlay.mediaEl.isConnected || !overlay.host.isConnected) overlay.destroy();
+        if (!overlay.mediaEl.isConnected || !overlay.container.isConnected) {
+          overlay.unmount();
+          overlays.delete(overlay.mediaEl);
+        }
       }
-      if (!scanTimer) scanTimer = setTimeout(() => { scanTimer = null; scan(); }, 250);
+      
+      let hasAdditions = false;
+      for (const mutation of mutations) {
+        if (mutation.addedNodes && mutation.addedNodes.length > 0) {
+          hasAdditions = true;
+          break;
+        }
+      }
+      if (hasAdditions) {
+        if (scanTimer) clearTimeout(scanTimer);
+        scanTimer = setTimeout(() => {
+          scanTimer = null;
+          scan();
+        }, 600);
+      }
     }).observe(document.documentElement, { childList: true, subtree: true });
   }
 
-  function createOverlay(mediaEl) {
+  function registerPlayerTrigger(mediaEl) {
     if (overlays.has(mediaEl)) return;
-    bindSharedListeners();
 
     const container = findPlayerContainer(mediaEl);
-    if (window.getComputedStyle(container).position === "static") {
-      container.style.position = "relative";
-    }
-
-    const host = el("div", {
-      style: [
-        "position:absolute", "top:10px", "left:10px", "z-index:2147483647",
-        "pointer-events:auto", "opacity:0",
-        "font-family:Inter,Segoe UI,-apple-system,sans-serif",
-        "transition:opacity .25s ease-in-out",
-      ].join(";"),
-    });
-
-    const shadow = host.attachShadow({ mode: "closed" });
-    shadow.innerHTML = `
-      <style>
-        :host { all:initial; display:block; }
-        .wrap { position:relative; display:inline-block; }
-        .btn {
-          display:flex; align-items:center; justify-content:center; gap:6px; width:108px; height:32px;
-          cursor:pointer; box-sizing:border-box;
-          background:rgba(0,0,0,.85); color:#fff; font-size:12px; font-weight:600;
-          border:1px solid rgba(255,255,255,.15); border-radius:8px;
-          backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
-          box-shadow:0 4px 16px rgba(0,0,0,.6), inset 0 0 0 1px rgba(255,255,255,.05);
-          transition:transform .2s cubic-bezier(.16,1,.3,1), background-color .2s, border-color .2s;
-        }
-        .btn:hover { transform:translateY(-1px); border-color:rgba(255,255,255,.35); }
-        .btn:active { transform:scale(.96); }
-        .btn svg { flex-shrink:0; }
-        .tip {
-          position:absolute; top:calc(100% + 8px); right:0; transform:translateY(4px);
-          background:rgba(5,5,5,.95); color:#f0f0f0; font-size:11px; font-weight:500;
-          line-height:1.5; padding:7px 11px; border-radius:7px;
-          border:1px solid rgba(255,255,255,.15); max-width:320px; min-width:120px;
-          box-shadow:0 8px 24px rgba(0,0,0,.7); backdrop-filter:blur(12px);
-          pointer-events:none; opacity:0; transition:opacity .18s, transform .18s;
-        }
-        .wrap:hover .tip { opacity:1; transform:translateY(0); }
-      </style>
-      <div class="wrap">
-        <div class="btn">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-          Download
-        </div>
-        <div class="tip"></div>
-      </div>`;
-
-    const tooltip = shadow.querySelector(".tip");
-    tooltip.textContent = getMediaTitle(mediaEl);
-    shadow.querySelector(".btn").addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      openExtractor(mediaEl);
-    });
-    shadow.querySelector(".wrap").addEventListener("mouseenter", () => {
-      tooltip.textContent = getMediaTitle(mediaEl);
-    });
-
-    const overlay = {
-      host,
+    const state = {
       mediaEl,
-      _overContainer: false,
-      _overHost: false,
+      container,
+      host: null,
+      destroyTimeout: null,
+      isMouseOverContainer: false,
+      isMouseOverHost: false,
+
+      async mount() {
+        if (this.host) return;
+
+        const sniffed = await getSniffedStreams();
+        if (!isDownloadable(this.mediaEl, sniffed)) {
+          return;
+        }
+
+        bindSharedListeners();
+        if (window.getComputedStyle(this.container).position === "static") {
+          this.container.style.position = "relative";
+        }
+
+        const host = el("div", {
+          style: [
+            "position:absolute", "top:10px", "left:10px", "z-index:2147483647",
+            "pointer-events:auto", "opacity:0",
+            "font-family:Inter,Segoe UI,-apple-system,sans-serif",
+            "transition:opacity .2s ease-in-out",
+          ].join(";"),
+        });
+
+        const shadow = host.attachShadow({ mode: "closed" });
+        shadow.innerHTML = `
+          <style>
+            :host { all:initial; display:block; }
+            .wrap { position:relative; display:inline-block; }
+            .btn {
+              display:flex; align-items:center; justify-content:center; gap:6px; width:108px; height:32px;
+              cursor:pointer; box-sizing:border-box;
+              background:rgba(10,10,10,.85); color:#fff; font-size:12px; font-weight:600;
+              border:1px solid rgba(255,255,255,.15); border-radius:8px;
+              backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+              box-shadow:0 4px 16px rgba(0,0,0,.6), inset 0 0 0 1px rgba(255,255,255,.05);
+              transition:transform .2s cubic-bezier(.16,1,.3,1), background .2s, border-color .2s, box-shadow .2s;
+            }
+            .btn:hover {
+              transform:translateY(-1.5px);
+              background:rgba(30,30,30,.95);
+              border-color:rgba(255,255,255,.45);
+              box-shadow:0 8px 24px rgba(0,0,0,.8), inset 0 0 0 1px rgba(255,255,255,.15);
+            }
+            .btn:active { transform:scale(.96); }
+            .btn svg { flex-shrink:0; }
+            .tip {
+              position:absolute; top:calc(100% + 8px); left:0; transform:translateY(4px);
+              background:rgba(10,10,10,.95); color:#f0f0f0; font-size:11px; font-weight:500;
+              line-height:1.5; padding:7px 11px; border-radius:7px;
+              border:1px solid rgba(255,255,255,.15); max-width:300px; min-width:120px;
+              box-shadow:0 8px 24px rgba(0,0,0,.7); backdrop-filter:blur(12px);
+              pointer-events:none; opacity:0; transition:opacity .18s, transform .18s;
+              word-break:break-word; overflow-wrap:break-word;
+            }
+            .wrap:hover .tip { opacity:1; transform:translateY(0); }
+          </style>
+          <div class="wrap">
+            <div class="btn">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+              Download
+            </div>
+            <div class="tip"></div>
+          </div>`;
+
+        const tooltip = shadow.querySelector(".tip");
+        tooltip.textContent = getMediaTitle(this.mediaEl);
+        shadow.querySelector(".btn").addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          openExtractor(this.mediaEl);
+        });
+        shadow.querySelector(".wrap").addEventListener("mouseenter", () => {
+          tooltip.textContent = getMediaTitle(this.mediaEl);
+        });
+
+        host.addEventListener("mouseenter", () => {
+          this.isMouseOverHost = true;
+          this.updateVisibility();
+        });
+        host.addEventListener("mouseleave", () => {
+          this.isMouseOverHost = false;
+          this.queueDestroy();
+        });
+
+        this.host = host;
+        const targetContainer = this.container === document.body ? (this.mediaEl.parentElement || document.body) : this.container;
+        targetContainer.appendChild(host);
+
+        requestAnimationFrame(() => {
+          if (this.host) this.updateVisibility();
+        });
+      },
+
       updateVisibility() {
-        const visible = !isFullscreen() && (this._overContainer || this._overHost);
-        host.style.opacity = visible ? "1" : "0";
-        host.style.pointerEvents = visible ? "auto" : "none";
+        if (!this.host) return;
+        const visible = !isFullscreen() && (this.isMouseOverContainer || this.isMouseOverHost);
+        this.host.style.opacity = visible ? "1" : "0";
+        this.host.style.pointerEvents = visible ? "auto" : "none";
       },
-      mount() {
-        // Natively positioned inside the player container
+
+      queueDestroy() {
+        if (this.destroyTimeout) clearTimeout(this.destroyTimeout);
+        this.destroyTimeout = setTimeout(() => {
+          if (!this.isMouseOverContainer && !this.isMouseOverHost) {
+            this.unmount();
+          }
+        }, 300);
       },
-      destroy() {
-        host.remove();
-        overlays.delete(mediaEl);
-      },
+
+      unmount() {
+        if (this.destroyTimeout) clearTimeout(this.destroyTimeout);
+        if (this.host) {
+          this.host.remove();
+          this.host = null;
+        }
+      }
     };
 
     container.addEventListener("mouseenter", () => {
-      overlay._overContainer = true;
-      overlay.updateVisibility();
+      state.isMouseOverContainer = true;
+      if (state.destroyTimeout) clearTimeout(state.destroyTimeout);
+      state.mount();
     });
     container.addEventListener("mouseleave", () => {
-      overlay._overContainer = false;
-      setTimeout(() => overlay.updateVisibility(), 100);
-    });
-    host.addEventListener("mouseenter", () => {
-      overlay._overHost = true;
-      overlay.updateVisibility();
-    });
-    host.addEventListener("mouseleave", () => {
-      overlay._overHost = false;
-      setTimeout(() => overlay.updateVisibility(), 100);
+      state.isMouseOverContainer = false;
+      state.queueDestroy();
     });
 
-    overlays.set(mediaEl, overlay);
-    const targetContainer = container === document.body ? (mediaEl.parentElement || document.body) : container;
-    if (window.getComputedStyle(targetContainer).position === "static") {
-      targetContainer.style.position = "relative";
-    }
-    targetContainer.appendChild(host);
+    overlays.set(mediaEl, state);
   }
 
   /* ── Shared dialog shell + styles ────────────────────────────────────── */
@@ -535,14 +596,14 @@
       setStatus("🔍 Probing page with yt-dlp…");
       const pageProbe = await sendToBackground("EXTRACT", { url: pageUrl, page_title: mediaTitle });
       if (pageProbe?.ok) {
-        const data = pageProbe.data;
-        const hasReal = data.formats?.some(
-          (f) =>
-            (f.vcodec && f.vcodec !== "none" && f.vcodec !== "direct") ||
-            (f.acodec && f.acodec !== "none" && f.acodec !== "direct"),
+        const probeResult = pageProbe.data;
+        const hasReal = probeResult.formats?.some(
+          (format) =>
+            (format.vcodec && format.vcodec !== "none" && format.vcodec !== "direct") ||
+            (format.acodec && format.acodec !== "none" && format.acodec !== "direct"),
         );
-        if (hasReal && data.extraction_method !== "direct") {
-          return { data, url: pageUrl, tier: data.extraction_method === "stream" ? "stream" : "native" };
+        if (hasReal && probeResult.extraction_method !== "direct") {
+          return { data: probeResult, url: pageUrl, tier: probeResult.extraction_method === "stream" ? "stream" : "native" };
         }
       }
 
@@ -561,11 +622,11 @@
 
       for (const streamUrl of candidates) {
         setStatus(`🔗 Probing stream: ${truncate(streamUrl, 48)}…`);
-        const probe = await sendToBackground("EXTRACT", { url: streamUrl, page_title: mediaTitle });
-        if (probe?.ok && probe.data.formats?.length) {
-          const method = probe.data.extraction_method;
+        const streamProbe = await sendToBackground("EXTRACT", { url: streamUrl, page_title: mediaTitle });
+        if (streamProbe?.ok && streamProbe.data.formats?.length) {
+          const method = streamProbe.data.extraction_method;
           return {
-            data: probe.data,
+            data: streamProbe.data,
             url: streamUrl,
             tier: method === "direct" ? "direct" : method === "stream" ? "stream" : "native",
           };
@@ -638,7 +699,7 @@
     })();
   }
 
-  function renderProbeResult(dialog, { data, url, tier }, mediaEl, closeDialog) {
+  function renderProbeResult(dialog, { data: probeResult, url, tier }, mediaEl, closeDialog) {
     const { root, body, actions } = dialog;
     const style = TIER_STYLES[tier] || TIER_STYLES.direct;
     const mediaTitle = getMediaTitle(mediaEl);
@@ -652,9 +713,10 @@
     source.textContent = url;
     body.prepend(badge, source);
 
-    const count = data.formats.length;
+    const count = probeResult.formats.length;
+    const displayTitle = (mediaTitle && mediaTitle !== "Unknown media") ? mediaTitle : (probeResult.title || "—");
     setStatus(
-      `${data.title || "—"}${data.duration ? ` · ${Math.round(data.duration)}s` : ""} · ${count} format${count !== 1 ? "s" : ""}`,
+      `${displayTitle}${probeResult.duration ? ` · ${Math.round(probeResult.duration)}s` : ""} · ${count} format${count !== 1 ? "s" : ""}`,
     );
 
     const list = el("div", { class: "da-list" });
@@ -668,7 +730,7 @@
       categoryFieldsBuilt = true;
       await buildCategoryFields(body, actions, async (choice) => {
         if (choice.cancelled) return closeDialog();
-        await submitDownload(dialog, state, choice, tier, mediaTitle, data.title, closeDialog);
+        await submitDownload(dialog, state, choice, tier, mediaTitle, probeResult.title, closeDialog);
       });
     };
 
@@ -679,39 +741,66 @@
       revealCategory();
     };
 
-    buildFormatRows(list, data, tier, style, selectRow, state);
+    buildFormatRows(list, probeResult, tier, style, selectRow, state);
   }
 
-  function buildFormatRows(list, data, tier, style, selectRow, state) {
+  function buildFormatRows(list, probeResult, tier, style, selectRow, state) {
     if (tier === "direct") {
       const row = el("div", {
         class: "da-row",
-        html: `<strong>Direct HTTP Download</strong><small>${escapeHtml((data.formats[0]?.ext || "FILE").toUpperCase())}</small>`,
+        html: `<strong>Direct HTTP Download</strong><small>${escapeHtml((probeResult.formats[0]?.ext || "FILE").toUpperCase())}</small>`,
       });
-      row.addEventListener("click", () => selectRow(row, data.formats[0]));
+      row.addEventListener("click", () => selectRow(row, probeResult.formats[0]));
       list.append(row);
       return;
     }
 
-    const videoFormats = pickBestCodecs(
-      data.formats.filter((f) => f.vcodec && f.vcodec !== "none" && f.vcodec !== "direct"),
+    const rawVideoFormats = probeResult.formats.filter(
+      (format) => 
+        (format.vcodec && format.vcodec !== "none" && format.vcodec !== "direct") ||
+        (format.resolution && format.resolution !== "multiple" && format.resolution !== "audio only") ||
+        (format.height && format.height > 0)
     );
+
+    // Group formats by resolution and pick the best codec/bitrate per resolution
     const byResolution = new Map();
-    for (const f of videoFormats) {
-      const key = f.resolution || `${f.tbr || 0}k`;
-      if (!byResolution.has(key) || (f.tbr || 0) > (byResolution.get(key).tbr || 0)) {
-        byResolution.set(key, f);
+    for (const format of rawVideoFormats) {
+      const resolutionKey = format.resolution || `${format.width || 0}x${format.height || 0}`;
+      
+      const existing = byResolution.get(resolutionKey);
+      if (!existing) {
+        byResolution.set(resolutionKey, format);
+      } else {
+        const codecScore = (fmt) => {
+          const codecStr = String(fmt.vcodec || "").toLowerCase();
+          if (codecStr.includes("av01") || codecStr.includes("av1")) return 3;
+          if (codecStr.includes("vp09") || codecStr.includes("vp9")) return 2;
+          if (codecStr.includes("avc") || codecStr.includes("h264") || codecStr.includes("h.264")) return 1;
+          return 0;
+        };
+
+        const existingScore = codecScore(existing);
+        const formatScore = codecScore(format);
+
+        if (formatScore > existingScore) {
+          byResolution.set(resolutionKey, format);
+        } else if (formatScore === existingScore) {
+          if ((format.tbr || 0) > (existing.tbr || 0)) {
+            byResolution.set(resolutionKey, format);
+          }
+        }
       }
     }
-    const sorted = [...byResolution.values()].sort(
+
+    const sortedVideoFormats = [...byResolution.values()].sort(
       (a, b) => (b.height || b.tbr || 0) - (a.height || a.tbr || 0),
     );
 
-    const audioFormats = data.formats
-      .filter((f) => (f.vcodec === "none" || !f.vcodec) && f.acodec && f.acodec !== "none")
+    const audioFormats = probeResult.formats
+      .filter((format) => (format.vcodec === "none" || !format.vcodec) && format.acodec && format.acodec !== "none")
       .sort((a, b) => (b.abr || 0) - (a.abr || 0));
     const bestAudio = audioFormats[0] || null;
-    const bestVideo = sorted[0] || null;
+    const bestVideo = sortedVideoFormats[0] || null;
 
     const bestIsComposite = bestVideo?.format_id?.includes("+ba");
     const bestSize = bestVideo?.filesize || null;
@@ -724,39 +813,39 @@
     best.addEventListener("click", () => selectRow(best, null)); // null → let yt-dlp pick
     list.append(best);
 
-    for (const f of sorted) {
-      const isComposite = f.format_id && f.format_id.includes("+ba");
-      const total = f.filesize;
+    for (const format of sortedVideoFormats) {
+      const isComposite = format.format_id && format.format_id.includes("+ba");
+      const total = format.filesize;
       const meta = [
-        f.ext,
-        f.fps ? `${f.fps}fps` : null,
-        f.vcodec !== "none" ? f.vcodec : null,
-        isComposite ? `+ Audio (${f.acodec})` : null,
+        format.ext,
+        format.fps ? `${format.fps}fps` : null,
+        format.vcodec !== "none" ? format.vcodec : null,
+        isComposite ? `+ Audio (${format.acodec})` : null,
         total ? (isComposite ? `~${formatBytes(total)}` : formatBytes(total)) : null,
       ]
         .filter(Boolean)
         .join(" · ");
       const row = el("div", {
         class: "da-row",
-        html: `<strong>${escapeHtml(f.resolution || "unknown")}</strong><small>${escapeHtml(meta)}</small>`,
+        html: `<strong>${escapeHtml(format.resolution || "unknown")}</strong><small>${escapeHtml(meta)}</small>`,
       });
-      row.addEventListener("click", () => selectRow(row, f));
+      row.addEventListener("click", () => selectRow(row, format));
       list.append(row);
     }
 
     if (audioFormats.length) {
       list.append(el("div", { class: "da-sep", html: "Audio only" }));
       const byCodec = new Map();
-      for (const f of audioFormats) {
-        const key = `${f.acodec}@${Math.round(f.abr || 0)}`;
-        byCodec.set(key, f);
+      for (const format of audioFormats) {
+        const key = `${format.acodec}@${Math.round(format.abr || 0)}`;
+        byCodec.set(key, format);
       }
-      for (const f of byCodec.values()) {
+      for (const format of byCodec.values()) {
         const row = el("div", {
           class: "da-row",
-          html: `<strong>${escapeHtml(f.acodec)}</strong><small>${escapeHtml(`${f.abr ? `${f.abr}kbps` : ""} · ${f.ext}`)}</small>`,
+          html: `<strong>${escapeHtml(format.acodec)}</strong><small>${escapeHtml(`${format.abr ? `${format.abr}kbps` : ""} · ${format.ext}`)}</small>`,
         });
-        row.addEventListener("click", () => selectRow(row, f));
+        row.addEventListener("click", () => selectRow(row, format));
         list.append(row);
       }
     }
@@ -764,24 +853,6 @@
     // Stash best estimates for payload sizing.
     state.bestAudio = bestAudio;
     state.bestVideo = bestVideo;
-  }
-
-  /** AV1 → VP9 → H.264 codec waterfall, else keep everything. */
-  function pickBestCodecs(formats) {
-    const match = (codec, needles) => {
-      const value = String(codec || "").toLowerCase();
-      return needles.some((n) => value.includes(n));
-    };
-    if (formats.some((f) => match(f.vcodec, ["av01", "av1"]))) {
-      return formats.filter((f) => match(f.vcodec, ["av01", "av1"]));
-    }
-    if (formats.some((f) => match(f.vcodec, ["vp09", "vp9"]))) {
-      return formats.filter((f) => match(f.vcodec, ["vp09", "vp9"]));
-    }
-    if (formats.some((f) => match(f.vcodec, ["avc", "h264"]))) {
-      return formats.filter((f) => match(f.vcodec, ["avc", "h264"]));
-    }
-    return formats;
   }
 
   async function submitDownload(dialog, state, choice, tier, mediaTitle, title, closeDialog) {
@@ -824,7 +895,7 @@
 
   /* ── Standard-file "route download" popup ────────────────────────────── */
 
-  function openRoutePopup(url, filename) {
+  function openRoutePopup(url, filename, referrer) {
     if (document.querySelector(".da-backdrop[data-route]")) return;
     const dialog = mountDialog({
       titleText:
@@ -884,6 +955,7 @@
           btn.textContent = "Queuing…";
           const payload = {
             url,
+            referrer,
             format_id: "direct_stream",
             category: select.value === "__custom" ? null : select.value,
             custom_path: select.value === "__custom" ? custom.value.trim() : null,
@@ -927,14 +999,45 @@
     setTimeout(() => toast.remove(), 2800);
   }
 
+  /* ── URL Change handling ─────────────────────────────────────────────── */
+
+  let lastHref = location.href;
+
+  function clearAllOverlays() {
+    overlays.forEach((overlay) => overlay.unmount());
+    overlays.clear();
+  }
+
+  function resetCaches() {
+    cachedSniffedStreams = [];
+    lastStreamFetchTime = 0;
+  }
+
+  function handleUrlChange() {
+    resetCaches();
+    clearAllOverlays();
+    scan();
+  }
+
+  function checkUrlChange() {
+    if (location.href !== lastHref) {
+      lastHref = location.href;
+      handleUrlChange();
+    }
+  }
+
   /* ── Scan + observe ──────────────────────────────────────────────────── */
 
-  const scan = () => findAllMedia(document).forEach(createOverlay);
+  const scan = () => findAllMedia(document).forEach(registerPlayerTrigger);
 
   const init = () => {
     scan();
     bindSharedListeners();
     setTimeout(scan, 2000); // catch lazy-loaded iframes/players
+
+    window.addEventListener("popstate", checkUrlChange);
+    window.addEventListener("hashchange", checkUrlChange);
+    setInterval(checkUrlChange, 500);
   };
 
   if (document.readyState === "complete") {
@@ -958,19 +1061,27 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     switch (message?.type) {
+      case "PING":
+        sendResponse({ ok: true });
+        break;
+      case "URL_CHANGED":
+        lastHref = location.href;
+        handleUrlChange();
+        sendResponse({ ok: true });
+        break;
       case "SHOW_ADD_DOWNLOAD_POPUP":
-        openRoutePopup(message.url, message.filename);
+        openRoutePopup(message.url, message.filename, message.referrer);
         sendResponse({ ok: true });
         break;
       case "OPEN_EXTRACTOR_MODAL_IN_TOP": {
-        const mock = {
+        const mockMediaElement = {
           currentSrc: message.mediaSrc || "",
           src: message.mediaSrc || "",
           getAttribute: (attr) => (attr === "title" ? message.mediaTitle : null),
           parentElement: null,
           isConnected: true,
         };
-        showExtractorDialog(mock, message.url, message.mediaTitle);
+        showExtractorDialog(mockMediaElement, message.url, message.mediaTitle);
         sendResponse({ ok: true });
         break;
       }

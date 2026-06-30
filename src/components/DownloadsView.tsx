@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Copy,
   Info,
+  Zap,
 } from "lucide-react";
 import {
   useReactTable,
@@ -26,7 +27,7 @@ import {
   createColumnHelper,
 } from "@tanstack/react-table";
 import type { RowSelectionState, Row } from "@tanstack/react-table";
-import type { Task, Settings, TaskStatus } from "../types";
+import type { Task, Settings } from "../types";
 import { fmtBytes, fmtSpeed, fmtETA } from "../utils/format";
 
 interface DownloadsViewProps {
@@ -81,7 +82,6 @@ export function DownloadsView({
   showToast,
 }: DownloadsViewProps) {
   const [searchQuery, setSearchQuery] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("all");
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [deleteModal, setDeleteModal] = useState<DeleteModalState>({
@@ -128,14 +128,8 @@ export function DownloadsView({
     }
   }, [tasks, rowSelection]);
 
-  // Categories list
-  const categories = Object.keys(settings.categories || {});
-
   // Filtering logic
   let filteredTasks = tasks;
-  if (categoryFilter !== "all") {
-    filteredTasks = filteredTasks.filter((t) => t.category === categoryFilter);
-  }
   if (searchQuery.trim()) {
     const query = searchQuery.toLowerCase().trim();
     filteredTasks = filteredTasks.filter((t) => {
@@ -150,25 +144,29 @@ export function DownloadsView({
     columnHelper.display({
       id: "select",
       header: ({ table }) => (
-        <input
-          type="checkbox"
-          id="select-all-tasks"
-          checked={table.getIsAllRowsSelected()}
-          ref={(input) => {
-            if (input) {
-              input.indeterminate = table.getIsSomeRowsSelected();
-            }
-          }}
-          onChange={table.getToggleAllRowsSelectedHandler()}
-        />
+        table.getIsSomeRowsSelected() || table.getIsAllRowsSelected() ? (
+          <input
+            type="checkbox"
+            id="select-all-tasks"
+            checked={table.getIsAllRowsSelected()}
+            ref={(input) => {
+              if (input) {
+                input.indeterminate = table.getIsSomeRowsSelected();
+              }
+            }}
+            onChange={table.getToggleAllRowsSelectedHandler()}
+          />
+        ) : null
       ),
       cell: ({ row }) => (
-        <input
-          type="checkbox"
-          className="task-checkbox"
-          checked={row.getIsSelected()}
-          onChange={row.getToggleSelectedHandler()}
-        />
+        row.getIsSelected() ? (
+          <input
+            type="checkbox"
+            className="task-checkbox"
+            checked={row.getIsSelected()}
+            onChange={row.getToggleSelectedHandler()}
+          />
+        ) : null
       ),
     }),
     columnHelper.accessor("progress", {
@@ -176,37 +174,10 @@ export function DownloadsView({
       header: "Progress",
       cell: ({ row }) => {
         const t = row.original;
-        const r = 17;
-        const c = 2 * Math.PI * r;
-        const progressVal = t.progress || 0;
-        const off = c - (progressVal / 100) * c;
+        const progressVal = t.status === "completed" ? 100 : (t.progress || 0);
 
-        return t.status === "completed" ? (
-          "—"
-        ) : (
-          <div className="progress-ring">
-            <svg width="38" height="38">
-              <circle
-                className="bg"
-                cx="19"
-                cy="19"
-                r={r}
-                fill="none"
-                strokeWidth="3"
-              />
-              <circle
-                className="fg"
-                cx="19"
-                cy="19"
-                r={r}
-                fill="none"
-                strokeWidth="3"
-                strokeDasharray={c}
-                strokeDashoffset={off}
-              />
-            </svg>
-            <span>{Math.round(progressVal)}%</span>
-          </div>
+        return (
+          <span className="progress-percentage-text">{Math.round(progressVal)}%</span>
         );
       },
     }),
@@ -216,29 +187,10 @@ export function DownloadsView({
       cell: ({ row }) => {
         const t = row.original;
         return (
-          <div style={{ display: "flex", alignItems: "center", gap: "8px", overflow: "hidden" }}>
-            <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          <div className="title-cell-container">
+            <span className="title-cell-text">
               {t.title || t.url}
             </span>
-            {t.format_id && t.format_id.includes("+ba") && (
-              <span
-                className="badge"
-                style={{
-                  fontSize: "9px",
-                  padding: "2px 6px",
-                  background: "rgba(255,255,255,0.08)",
-                  color: "#a0a0b0",
-                  border: "1px solid rgba(255,255,255,0.1)",
-                  borderRadius: "4px",
-                  flexShrink: 0,
-                  fontWeight: 600,
-                  letterSpacing: "0.5px"
-                }}
-                title="Audio track is being merged natively"
-              >
-                + AUDIO
-              </span>
-            )}
           </div>
         );
       },
@@ -248,18 +200,18 @@ export function DownloadsView({
       header: "Size",
       cell: ({ row }) => {
         const t = row.original;
-        return fmtBytes(t.total_bytes || t.downloaded_bytes);
+        return <span className="size-text">{fmtBytes(t.total_bytes || t.downloaded_bytes)}</span>;
       },
     }),
     columnHelper.accessor("speed", {
       id: "speed",
       header: "Speed",
-      cell: ({ getValue }) => fmtSpeed(getValue()),
+      cell: ({ getValue }) => <span className="speed-text">{fmtSpeed(getValue())}</span>,
     }),
     columnHelper.accessor("eta", {
       id: "eta",
       header: "ETA",
-      cell: ({ getValue }) => fmtETA(getValue()),
+      cell: ({ getValue }) => <span className="eta-text">{fmtETA(getValue())}</span>,
     }),
     columnHelper.accessor("status", {
       id: "status",
@@ -273,27 +225,25 @@ export function DownloadsView({
         const PROCESSING_STATUSES: readonly string[] = ["stitching", "embedding", "finalizing"];
 
         if (t.status === "downloading") {
-          badgeIcon = <ArrowDownToLine size={11} style={{ marginRight: 3 }} />;
-          if (t.fragment_index !== undefined && t.fragment_index !== null) {
-            if (t.fragment_count) {
-              statusText = `downloading (${t.fragment_index}/${t.fragment_count})`;
-            } else {
-              statusText = `downloading (frag ${t.fragment_index})`;
-            }
-          }
+          badgeIcon = t.using_aria2c ? (
+            <Zap className="badge-icon aria2c-status-icon" size={11} fill="currentColor" />
+          ) : (
+            <ArrowDownToLine className="badge-icon" size={11} />
+          );
+          statusText = "downloading";
         } else if (t.status === "completed") {
-          badgeIcon = <Check size={11} style={{ marginRight: 3 }} />;
+          badgeIcon = <Check className="badge-icon" size={11} />;
         } else if (t.status === "error") {
-          badgeIcon = <AlertTriangle size={11} style={{ marginRight: 3 }} />;
+          badgeIcon = <AlertTriangle className="badge-icon" size={11} />;
         } else if (t.status === "queued") {
-          badgeIcon = <Clock size={11} style={{ marginRight: 3 }} />;
+          badgeIcon = <Clock className="badge-icon" size={11} />;
         } else if (t.status === "cancelled") {
-          badgeIcon = <Ban size={11} style={{ marginRight: 3 }} />;
+          badgeIcon = <Ban className="badge-icon" size={11} />;
         } else if (t.status === "paused") {
-          badgeIcon = <Pause size={11} style={{ marginRight: 3 }} />;
+          badgeIcon = <Pause className="badge-icon" size={11} />;
         } else if (PROCESSING_STATUSES.includes(t.status)) {
           badgeIcon = (
-            <Loader2 className="spin" size={11} style={{ marginRight: 3, animation: "spin 1.5s linear infinite" }} />
+            <Loader2 className="badge-icon spin" size={11} />
           );
           const labels: Record<string, string> = {
             stitching: "Stitching",
@@ -446,6 +396,48 @@ export function DownloadsView({
       t.status === "cancelled" ||
       t.status === "error"
   );
+  const renderSegments = (t: Task, progressVal: number) => {
+    let N = 0;
+    if (t.fragment_count && t.fragment_count > 1) {
+      N = t.fragment_count;
+    } else if (t.using_aria2c) {
+      N = 16;
+    }
+
+    if (N <= 1) return null;
+
+    const MAX_VISUAL_SEGMENTS = 50;
+    const visualN = N > MAX_VISUAL_SEGMENTS ? MAX_VISUAL_SEGMENTS : N;
+
+    const segmentShare = 100.0 / visualN;
+    const activeSegmentIdx = Math.floor(progressVal / segmentShare);
+    const activeSegmentPercent = ((progressVal % segmentShare) / segmentShare) * 100;
+
+    const segments = [];
+    for (let i = 0; i < visualN; i++) {
+      let fillWidth = "0%";
+      if (i < activeSegmentIdx) {
+        fillWidth = "100%";
+      } else if (i === activeSegmentIdx) {
+        fillWidth = `${activeSegmentPercent}%`;
+      }
+
+      segments.push(
+        <div key={i} className="segment-track">
+          <div 
+            className="segment-fill" 
+            style={{ width: fillWidth }}
+          />
+        </div>
+      );
+    }
+
+    return (
+      <div className="segments-container">
+        {segments}
+      </div>
+    );
+  };
 
   return (
     <div className="view-panel active" id="view-downloads">
@@ -465,27 +457,6 @@ export function DownloadsView({
               onChange={(e) => setSearchQuery(e.target.value)}
             />
           </div>
-        </div>
-
-        <div className="download-filters">
-          <div className="filter-group" id="download-category-filters">
-            <button
-              className={`filter-btn ${categoryFilter === "all" ? "active" : ""}`}
-              onClick={() => setCategoryFilter("all")}
-            >
-              All
-            </button>
-            {categories.map((cat) => (
-              <button
-                key={cat}
-                className={`filter-btn ${categoryFilter === cat ? "active" : ""}`}
-                onClick={() => setCategoryFilter(cat)}
-              >
-                {cat}
-              </button>
-            ))}
-          </div>
-
           <button className="ghost danger" id="clear-completed-btn" onClick={handleClearCompleted}>
             <Trash2 size={14} /> Clear Completed
           </button>
@@ -509,15 +480,7 @@ export function DownloadsView({
           <tbody id="task-body">
             {table.getRowModel().rows.length === 0 ? (
               <tr>
-                <td
-                  colSpan={8}
-                  style={{
-                    textAlign: "center",
-                    color: "var(--muted)",
-                    padding: 40,
-                    fontWeight: 500,
-                  }}
-                >
+                <td colSpan={8} className="empty-state-cell">
                   {tasks.length === 0 ? "No downloads in queue" : "No matching downloads found"}
                 </td>
               </tr>
@@ -531,13 +494,41 @@ export function DownloadsView({
                     className={rowClass}
                     onClick={(e) => rowClick(e, row)}
                     onContextMenu={(e) => handleContextMenu(e, row.id)}
-                    style={{ cursor: "pointer" }}
                   >
-                    {row.getVisibleCells().map((cell) => (
-                      <td key={cell.id} className={classNameMap[cell.column.id]}>
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </td>
-                    ))}
+                    {row.getVisibleCells().map((cell, idx, arr) => {
+                      const isLastCell = idx === arr.length - 1;
+                      const t = row.original;
+                      const progressVal = t.status === "completed" ? 100 : (t.progress || 0);
+
+                      let statusClass = "active";
+                      if (t.status === "completed") {
+                        statusClass = "completed";
+                      } else if (t.status === "error") {
+                        statusClass = "error";
+                      } else if (t.status === "paused" || t.status === "cancelled") {
+                        statusClass = "paused";
+                      } else if (["stitching", "embedding", "finalizing"].includes(t.status)) {
+                        statusClass = "processing";
+                      }
+
+                      return (
+                        <td key={cell.id} className={classNameMap[cell.column.id]}>
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                          {isLastCell && t.status !== "completed" && progressVal > 0 && (
+                            ((t.fragment_count && t.fragment_count > 1) || t.using_aria2c) ? (
+                              <div className={`row-progress-fill segments-wrapper ${statusClass}`}>
+                                {renderSegments(t, progressVal)}
+                              </div>
+                            ) : (
+                              <div
+                                className={`row-progress-fill ${statusClass}`}
+                                style={{ width: `calc((100% - 8px) * ${progressVal / 100})` }}
+                              />
+                            )
+                          )}
+                        </td>
+                      );
+                    })}
                   </tr>
                 );
               })
@@ -552,7 +543,6 @@ export function DownloadsView({
           ref={contextMenuRef}
           className="context-menu"
           style={{
-            display: "flex",
             left: contextMenu.x,
             top: contextMenu.y,
           }}
@@ -676,8 +666,8 @@ export function DownloadsView({
 
       {/* Delete Confirmation Warning Modal */}
       {deleteModal.isOpen && createPortal(
-        <div className="onboarding-overlay" style={{ display: "flex" }}>
-          <div className="onboarding-card delete-confirm-card">
+        <div className="modal-overlay">
+          <div className="modal-card delete-confirm-card">
             <div className="delete-confirm-header">
               <AlertTriangle className="warning-icon" size={24} style={{ color: "var(--danger)" }} />
               <h2>Permanently Delete Files</h2>
@@ -688,7 +678,7 @@ export function DownloadsView({
                 : "Are you sure you want to permanently delete the downloaded file from disk?"}
             </p>
 
-            <div className="delete-files-list" style={{ display: "flex" }}>
+            <div className="delete-files-list">
               {deleteModal.taskIds.map((id) => {
                 const task = tasks.find((t) => t.task_id === id);
                 const title = task ? task.title : "Unknown File";
@@ -720,15 +710,14 @@ export function DownloadsView({
       {/* Properties Modal */}
       {propertiesModal.isOpen && propertiesModal.taskId && createPortal(
         <div
-          className="onboarding-overlay"
-          style={{ display: "flex" }}
+          className="modal-overlay"
           onClick={(e) => {
             if (e.target === e.currentTarget) {
               setPropertiesModal({ isOpen: false, taskId: null });
             }
           }}
         >
-          <div className="onboarding-card properties-modal-card">
+          <div className="modal-card properties-modal-card">
             {(() => {
               const task = tasks.find((t) => t.task_id === propertiesModal.taskId);
               if (!task) return null;
@@ -749,7 +738,7 @@ export function DownloadsView({
                   <div className="properties-content">
                     <div className="title-row">
                       <span className="property-label">Title</span>
-                      <div className="property-value" style={{ fontWeight: 600, color: "var(--text)", wordBreak: "break-word" }}>
+                      <div className="property-value title-value">
                         {task.title || "Untitled Download"}
                       </div>
                     </div>
@@ -816,7 +805,7 @@ export function DownloadsView({
                       {task.page_title && task.page_title !== task.title && (
                         <div className="property-item full-width">
                           <span className="property-label">Original Page Title</span>
-                          <div className="property-value" style={{ wordBreak: "break-word" }}>{task.page_title}</div>
+                          <div className="property-value page-title-value">{task.page_title}</div>
                         </div>
                       )}
 
@@ -840,8 +829,8 @@ export function DownloadsView({
 
                       {task.status === "error" && task.error && (
                         <div className="property-item full-width error-val">
-                          <span className="property-label" style={{ color: "var(--danger)" }}>Error Message</span>
-                          <div className="property-value" style={{ color: "var(--danger)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                          <span className="property-label">Error Message</span>
+                          <div className="property-value error-message-value">
                             {task.error}
                           </div>
                         </div>

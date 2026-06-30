@@ -1,11 +1,11 @@
 import asyncio
+import threading
 from dataclasses import dataclass, field, fields
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from engine.config import JsonObj
 
-# Python 3.11+ has StrEnum, but for compatibility we can inherit from str and Enum
-class TaskStatus(str, Enum):
+class TaskStatus(StrEnum):
     QUEUED = "queued"
     DOWNLOADING = "downloading"
     STITCHING = "stitching"
@@ -27,7 +27,7 @@ _ACTIVE_STATES = frozenset(
 )
 
 # Broadcast throttle interval (seconds).
-_BROADCAST_INTERVAL = 0.5
+_BROADCAST_INTERVAL = 0.1
 
 
 @dataclass
@@ -56,16 +56,16 @@ class DownloadTask:
     has_custom_title: bool = False
     fragment_index: int | None = None
     fragment_count: int | None = None
+    using_aria2c: bool = False
+    prev_parts_bytes: int = 0
 
     # Runtime-only fields (private, never persisted).
-    _pause_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
-    _cancel: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     _hold: bool = field(default=False, repr=False)  # cancel == pause, not abort
     _is_running: bool = field(default=False, repr=False)
     _in_queue: bool = field(default=False, repr=False)
     _last_broadcast: float = field(default=0.0, repr=False)
     _task: asyncio.Task[None] | None = field(default=None, repr=False)
-    _prev_parts_bytes: int = field(default=0, repr=False)
 
     def update(self, **changes: Any) -> None:
         valid = self.__dataclass_fields__

@@ -5,3 +5,5 @@ pydantic
 pyinstaller
 orjson
 uvloop
+aiohttp
+m3u8

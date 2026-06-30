@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useTransition } from "react";
 import { Sliders, Terminal, FolderHeart, Save, Plus, Trash2 } from "lucide-react";
-import type { Settings, MergeFormat, CookiesBrowser } from "../types";
+import type { Settings, MergeFormat } from "../types";
 
 interface ConfigurationViewProps {
   readonly settings: Settings;
@@ -26,10 +26,11 @@ export function ConfigurationView({
   const [concurrentFragments, setConcurrentFragments] = useState(16);
   const [speedLimit, setSpeedLimit] = useState<string>("");
   const [proxy, setProxy] = useState("");
-  const [cookiesBrowser, setCookiesBrowser] = useState<CookiesBrowser>("none");
   const [embedThumbnail, setEmbedThumbnail] = useState(false);
   const [embedSubtitles, setEmbedSubtitles] = useState(false);
   const [subtitleLang, setSubtitleLang] = useState("en");
+  const [enableDownloadInterception, setEnableDownloadInterception] = useState(true);
+  const [interceptMediaOnly, setInterceptMediaOnly] = useState(false);
   const [categoriesList, setCategoriesList] = useState<{ id: string; name: string; path: string }[]>([]);
 
   const [, startTransition] = useTransition();
@@ -45,10 +46,11 @@ export function ConfigurationView({
     setSpeedLimit(bytes ? String(Math.round(bytes / 1024)) : "");
 
     setProxy(settings.proxy || "");
-    setCookiesBrowser(settings.cookies_from_browser || "none");
     setEmbedThumbnail(!!settings.embed_thumbnail);
     setEmbedSubtitles(!!settings.embed_subtitles);
     setSubtitleLang(settings.subtitle_language || "en");
+    setEnableDownloadInterception(settings.enable_download_interception !== false);
+    setInterceptMediaOnly(!!settings.intercept_media_only);
 
     const list = Object.entries(settings.categories || {}).map(([name, path], idx) => ({
       id: `cat-${idx}-${Date.now()}`,
@@ -89,11 +91,12 @@ export function ConfigurationView({
       concurrent_fragments: concurrentFragments,
       rate_limit_bytes_per_sec: rateLimitBytes,
       proxy: proxy.trim(),
-      cookies_from_browser: cookiesBrowser,
       embed_thumbnail: embedThumbnail,
       embed_subtitles: embedSubtitles,
       subtitle_language: subtitleLang.trim(),
       categories: categoriesRecord,
+      enable_download_interception: enableDownloadInterception,
+      intercept_media_only: interceptMediaOnly,
     };
 
     startTransition(() => {
@@ -135,7 +138,7 @@ export function ConfigurationView({
     <div className="view-panel active" id="view-settings">
       <section className="card settings-card">
         <h2>
-          <Sliders size={15} style={{ marginRight: 10 }} /> Configuration
+          <Sliders size={15} /> Configuration
         </h2>
 
         <div className="settings-layout">
@@ -195,6 +198,36 @@ export function ConfigurationView({
                     onChange={(e) => setDefaultPath(e.target.value)}
                   />
                 </div>
+                <div className="toggle-row">
+                  <div className="toggle-info">
+                    <span className="toggle-label">Enable Download Interception</span>
+                    <p>Intercept native browser downloads and route them through the app</p>
+                  </div>
+                  <label className="toggle">
+                    <input
+                      type="checkbox"
+                      checked={enableDownloadInterception}
+                      onChange={(e) => setEnableDownloadInterception(e.target.checked)}
+                    />
+                    <span className="slider"></span>
+                  </label>
+                </div>
+                {enableDownloadInterception && (
+                  <div className="toggle-row">
+                    <div className="toggle-info">
+                      <span className="toggle-label">Intercept Media Only</span>
+                      <p>Only intercept video and audio downloads, leaving other files to Chrome</p>
+                    </div>
+                    <label className="toggle">
+                      <input
+                        type="checkbox"
+                        checked={interceptMediaOnly}
+                        onChange={(e) => setInterceptMediaOnly(e.target.checked)}
+                      />
+                      <span className="slider"></span>
+                    </label>
+                  </div>
+                )}
               </div>
             )}
 
@@ -232,23 +265,6 @@ export function ConfigurationView({
                     value={proxy}
                     onChange={(e) => setProxy(e.target.value)}
                   />
-                </div>
-
-                <div className="form-row">
-                  <label>Load Cookies From Browser</label>
-                  <select
-                    value={cookiesBrowser}
-                    onChange={(e) => setCookiesBrowser(e.target.value as CookiesBrowser)}
-                  >
-                    <option value="none">None</option>
-                    <option value="chrome">Chrome</option>
-                    <option value="firefox">Firefox</option>
-                    <option value="safari">Safari</option>
-                    <option value="edge">Edge</option>
-                    <option value="opera">Opera</option>
-                    <option value="brave">Brave</option>
-                    <option value="vivaldi">Vivaldi</option>
-                  </select>
                 </div>
 
                 <div className="toggle-row">
@@ -335,7 +351,7 @@ export function ConfigurationView({
               </div>
             )}
 
-            <button type="submit" className="primary" id="save-settings" disabled={isSaving}>
+            <button type="submit" className="ghost" id="save-settings" disabled={isSaving}>
               <Save size={16} /> {isSaving ? "Saving..." : "Save Settings"}
             </button>
           </form>

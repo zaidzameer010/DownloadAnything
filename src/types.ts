@@ -32,18 +32,10 @@ export interface Task {
   readonly started_at?: number;
   readonly finished_at?: number;
   readonly has_custom_title?: boolean;
+  readonly using_aria2c?: boolean;
 }
 
 export type MergeFormat = "mp4" | "mkv" | "webm";
-export type CookiesBrowser =
-  | "none"
-  | "chrome"
-  | "firefox"
-  | "safari"
-  | "edge"
-  | "opera"
-  | "brave"
-  | "vivaldi";
 
 export interface Settings {
   max_concurrent_downloads: number;
@@ -52,11 +44,12 @@ export interface Settings {
   concurrent_fragments: number;
   rate_limit_bytes_per_sec: number;
   proxy: string;
-  cookies_from_browser: CookiesBrowser;
   embed_thumbnail: boolean;
   embed_subtitles: boolean;
   subtitle_language: string;
   categories: Record<string, string>;
+  enable_download_interception: boolean;
+  intercept_media_only: boolean;
 }
 
 export interface Health {

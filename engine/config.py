@@ -1,7 +1,6 @@
 import logging
 import os
 import platform
-import sys
 from pathlib import Path
 from typing import Any, Literal
 import orjson
@@ -82,7 +81,8 @@ def _default_settings() -> JsonObj:
         "embed_subtitles": False,
         "subtitle_language": "en",
         "proxy": "",
-        "cookies_from_browser": "none",
+        "enable_download_interception": True,
+        "intercept_media_only": False,
     }
 
 
@@ -100,7 +100,8 @@ class AppSettings(BaseModel):
     embed_subtitles: bool = False
     subtitle_language: str = "en"
     proxy: str = ""
-    cookies_from_browser: str = "none"
+    enable_download_interception: bool = True
+    intercept_media_only: bool = False
 
 
 class SettingsUpdate(BaseModel):
@@ -115,7 +116,8 @@ class SettingsUpdate(BaseModel):
     embed_subtitles: bool | None = None
     subtitle_language: str | None = None
     proxy: str | None = None
-    cookies_from_browser: str | None = None
+    enable_download_interception: bool | None = None
+    intercept_media_only: bool | None = None
 
 
 def load_settings() -> AppSettings:

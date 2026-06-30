@@ -131,7 +131,7 @@ export function App() {
           <div className="startup-toast-header">
             {startupSuccess ? (
               <div className="startup-toast-success-icon">
-                <Check size={14} style={{ color: "var(--success)" }} />
+                <Check size={14} />
               </div>
             ) : (
               <div className="startup-toast-spinner" />

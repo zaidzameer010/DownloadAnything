@@ -17,182 +17,18 @@
  */
 "use strict";
 
+importScripts("constants.js", "filename_extractor.js", "streams.js");
+
 /* ── Config ─────────────────────────────────────────────────────────────── */
 
 const BACKEND_BASE = "http://127.0.0.1:8000";
 const WS_URL = `${BACKEND_BASE.replace(/^http/, "ws")}/ws/progress`;
-
-// Media container/codecs + common downloadable file extensions.
-const MEDIA_EXTS =
-  "m3u8|mpd|mp4|webm|mkv|avi|mov|wmv|flv|mpg|mpeg|3gp|ts|mp3|aac|m4a|flac|wav|ogg|opus|wma|vid";
-const FILE_EXTS =
-  "zip|rar|7z|tar|gz|bz2|xz|dmg|iso|bin|img|pdf|epub|doc|docx|xls|xlsx|ppt|pptx|exe|msi|apk|pkg";
-const STREAM_REGEX = new RegExp(`\\.(${MEDIA_EXTS}|${FILE_EXTS})(?:\\?|#|$)`, "i");
-
-// Sequential HLS/DASH segments — filtered so a stream list isn't flooded.
-const SEGMENT_REGEX =
-  /(?:^|[-_])(?:chunk|seg(?:ment)?|fragment|part)[-_0-9]*\.(?:ts|m4s|aac|mp4)|(?:^|[-_])\d+\.(?:ts|m4s)/i;
-
-const MEDIA_MIME = /video\/|audio\/|mpegurl|dash\+xml/i;
-const FILE_MIME = /application\/(?:pdf|zip|x-7z-compressed|x-rar-compressed)/i;
-
-const CACHE_CAP = 200;        // max entries per cache map
-const MAX_STREAMS_PER_TAB = 50;
-const REQUEST_TIMEOUT_MS = 90_000; // yt-dlp extraction + stream-size probing can be slow
+const REQUEST_TIMEOUT_MS = 90_000;
 
 /* ── Tiny helpers ───────────────────────────────────────────────────────── */
 
-const errorMessage = (e) =>
-  e instanceof Error ? e.message : typeof e === "string" ? e : JSON.stringify(e);
-
-const sessionGet = async (key, fallback) => {
-  try {
-    const result = await chrome.storage.session.get(key);
-    return result[key] !== undefined ? result[key] : fallback;
-  } catch (err) {
-    console.error("[DownloadAnything] session.get(%s):", key, err);
-    return fallback;
-  }
-};
-
-const sessionSet = async (key, value) => {
-  try {
-    await chrome.storage.session.set({ [key]: value });
-  } catch (err) {
-    console.error("[DownloadAnything] session.set(%s):", key, err);
-  }
-};
-
-/**
- * Insert into a JSON map stored under `mapKey`, capped at `cap` entries
- * (oldest dropped by insertion order). NOTE: deliberately does NOT rewrite
- * storage on read — the old code did a wasteful read-modify-write on every
- * access just to "touch" recency, which is pointless for short-lived data.
- */
-async function mapInsert(mapKey, subKey, value, cap = CACHE_CAP) {
-  const map = await sessionGet(mapKey, {});
-  if (!Object.prototype.hasOwnProperty.call(map, subKey)) {
-    const keys = Object.keys(map);
-    if (keys.length >= cap) delete map[keys[0]];
-  }
-  map[subKey] = value;
-  await sessionSet(mapKey, map);
-}
-
-const mapLookup = async (mapKey, subKey) => {
-  const map = await sessionGet(mapKey, {});
-  return Object.prototype.hasOwnProperty.call(map, subKey) ? map[subKey] : null;
-};
-
-const mapRemove = async (mapKey, subKey) => {
-  const map = await sessionGet(mapKey, {});
-  if (Object.prototype.hasOwnProperty.call(map, subKey)) {
-    delete map[subKey];
-    await sessionSet(mapKey, map);
-  }
-};
-
-/* Headers / url→tab caches. Only persisted for media/file URLs (gated by
-   STREAM_REGEX) so we don't hammer storage.session on every CSS/JS/XHR. */
-const isCacheable = (url) => STREAM_REGEX.test(url) && !SEGMENT_REGEX.test(url);
-
-const getRequestHeaders = (url) => mapLookup("requestHeaders", url);
-const cacheRequestHeaders = (url, headers) =>
-  isCacheable(url) ? mapInsert("requestHeaders", url, headers) : Promise.resolve();
-
-const getUrlTab = (url) => mapLookup("urlTab", url);
-const cacheUrlTab = (url, tabId) =>
-  tabId >= 0 && isCacheable(url)
-    ? mapInsert("urlTab", url, tabId)
-    : Promise.resolve();
-
-/* Bypass set: URLs the user explicitly wants Chrome (not the engine) to handle. */
-const addBypass = (url) => {
-  if (!url) return Promise.resolve();
-  return sessionGet("bypassed", []).then(async (list) => {
-    const set = new Set(list);
-    if (set.has(url)) return;
-    set.add(url);
-    await sessionSet("bypassed", [...set]);
-  });
-};
-
-const isBypassed = async (url) => {
-  const list = await sessionGet("bypassed", []);
-  return list.includes(url);
-};
-
-const removeBypass = (url) =>
-  sessionGet("bypassed", []).then(async (list) => {
-    const next = list.filter((u) => u !== url);
-    if (next.length !== list.length) await sessionSet("bypassed", next);
-  });
-
-/* ── Stream recording ───────────────────────────────────────────────────── */
-
-async function recordStream(tabId, url, { force = false } = {}) {
-  if (tabId < 0) return;
-  if (!force && (!STREAM_REGEX.test(url) || SEGMENT_REGEX.test(url))) return;
-
-  const key = `streams_${tabId}`;
-  const list = await sessionGet(key, []);
-  if (list.includes(url)) return;
-
-  const next = list.length >= MAX_STREAMS_PER_TAB
-    ? [...list.slice(1), url]   // drop oldest, append newest
-    : [...list, url];
-  await sessionSet(key, next);
-  // No per-stream broadcast: content scripts pull the list on demand via
-  // GET_TAB_STREAMS, so a push notification would be dead traffic.
-}
-
-/* ── webRequest observers (read-only; no webRequestBlocking needed) ─────── */
-
-chrome.webRequest.onBeforeRequest.addListener(
-  (details) => {
-    if (details.tabId < 0) return;
-    void cacheUrlTab(details.url, details.tabId);
-    if (STREAM_REGEX.test(details.url)) void recordStream(details.tabId, details.url);
-  },
-  { urls: ["http://*/*", "https://*/*"] },
-);
-
-chrome.webRequest.onBeforeSendHeaders.addListener(
-  (details) => {
-    if (details.tabId < 0 || !details.requestHeaders || !isCacheable(details.url)) return;
-    void cacheUrlTab(details.url, details.tabId);
-
-    const headers = {};
-    for (const h of details.requestHeaders) {
-      switch (h.name.toLowerCase()) {
-        case "cookie":
-        case "referer":
-        case "user-agent":
-        case "origin":
-          headers[h.name] = h.value;
-          break;
-      }
-    }
-    void cacheRequestHeaders(details.url, headers);
-  },
-  { urls: ["http://*/*", "https://*/*"] },
-  ["requestHeaders", "extraHeaders"],
-);
-
-chrome.webRequest.onResponseStarted.addListener(
-  (details) => {
-    if (details.tabId < 0) return;
-    const ct = details.responseHeaders?.find(
-      (h) => h.name.toLowerCase() === "content-type",
-    );
-    const value = ct?.value || "";
-    if (MEDIA_MIME.test(value) || FILE_MIME.test(value)) {
-      void recordStream(details.tabId, details.url, { force: true });
-    }
-  },
-  { urls: ["http://*/*", "https://*/*"] },
-  ["responseHeaders"],
-);
+const errorMessage = (err) =>
+  err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err);
 
 /* ── Backend WebSocket client (lazy connect, auto-reconnect) ────────────── */
 
@@ -216,20 +52,20 @@ class BackendClient {
     ws.addEventListener("message", (event) => this._onMessage(event));
     ws.addEventListener("open", () => {
       const waiters = this.openWaiters.splice(0);
-      for (const w of waiters) w.resolve();
+      for (const waiter of waiters) waiter.resolve();
     });
     const teardown = (reason) => {
       this._rejectAll(reason);
       const waiters = this.openWaiters.splice(0);
-      for (const w of waiters) w.reject(new Error(reason));
+      for (const waiter of waiters) waiter.reject(new Error(reason));
       if (this.socket === ws) this.socket = null;
     };
     ws.addEventListener("close", () => teardown("Backend connection closed"));
     ws.addEventListener("error", () => {
       try {
         ws.close();
-      } catch {
-        /* ignore */
+      } catch (err) {
+        console.debug("[DownloadAnything] Socket close on error ignored:", err);
       }
     });
     return ws;
@@ -247,8 +83,9 @@ class BackendClient {
     let message;
     try {
       message = JSON.parse(event.data);
-    } catch {
-      return; // malformed frame
+    } catch (err) {
+      console.warn("[DownloadAnything] Failed to parse message frame:", err);
+      return;
     }
     if (message?.type !== "response") return; // ignore async task broadcasts here
     const entry = this.pending.get(message.request_id);
@@ -316,7 +153,15 @@ const ROUTERS = {
   GET_HEALTH: async () => backend.request("get_health"),
 
   EXTRACT: async (payload) => {
-    const headers = (await getRequestHeaders(payload.url)) || undefined;
+    let headers = (await getRequestHeaders(payload.url)) || {};
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === "cookie") {
+        delete headers[key];
+      }
+    }
+    if (!headers["User-Agent"]) {
+      headers["User-Agent"] = navigator.userAgent;
+    }
     return backend.request("extract", {
       url: payload.url,
       page_title: payload.page_title,
@@ -325,7 +170,21 @@ const ROUTERS = {
   },
 
   DOWNLOAD: async (payload) => {
-    const headers = payload.headers ?? (await getRequestHeaders(payload.url)) ?? undefined;
+    let headers = payload.headers ?? (await getRequestHeaders(payload.url)) ?? (await getTempHeaders(payload.url)) ?? {};
+    if (Object.keys(headers).length === 0 && payload.referrer) {
+      headers = (await getRequestHeaders(payload.referrer)) ?? (await getTempHeaders(payload.referrer)) ?? {};
+    }
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === "cookie") {
+        delete headers[key];
+      }
+    }
+    if (!headers["User-Agent"]) {
+      headers["User-Agent"] = navigator.userAgent;
+    }
+    if (payload.referrer && !headers.Referer) {
+      headers.Referer = payload.referrer;
+    }
     return backend.request("download", { ...payload, headers });
   },
 
@@ -344,8 +203,8 @@ const ROUTERS = {
           },
           { frameId: 0 },
         )
-        .catch(() => {
-          /* top frame may not have the content script */
+        .catch((err) => {
+          console.debug("[DownloadAnything] Top frame modal relay omitted:", err);
         });
     }
     return { ok: true };
@@ -372,7 +231,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!handler) return; // not one of ours → let another listener handle it
 
   handler(message.payload ?? {}, sender).then(
-    (data) => sendResponse({ ok: true, data }),
+    (result) => sendResponse({ ok: true, data: result }),
     (error) => sendResponse({ ok: false, error: errorMessage(error) }),
   );
   return true; // keep the message channel open for the async response
@@ -380,91 +239,146 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 /* ── Native-download interception ───────────────────────────────────────── */
 
-/** Best-effort human filename from a DownloadItem or URL. Never throws. */
-function extractFilename(source, suggested = "") {
-  let url = "";
-  let filename = suggested;
-  if (source && typeof source === "object") {
-    url = source.url || "";
-    filename = filename || source.filename || "";
-  } else if (typeof source === "string") {
-    url = source;
+let cachedSettings = null;
+let lastSettingsFetch = 0;
+const SETTINGS_CACHE_TTL = 5000; // 5 seconds
+
+async function getBackendSettings() {
+  const now = Date.now();
+  if (cachedSettings && (now - lastSettingsFetch < SETTINGS_CACHE_TTL)) {
+    return cachedSettings;
   }
 
-  const clean = (value) => {
-    if (!value) return "";
-    const base = value.split(/[/\\]/).pop().split("?")[0];
-    return base && base !== "download" && !base.endsWith(".crdownload") && base.includes(".")
-      ? safeDecode(base)
-      : "";
-  };
-
-  if (clean(filename)) return clean(filename);
-
-  if (url) {
-    try {
-      const parsed = new URL(url);
-      for (const value of parsed.searchParams.values()) {
-        if (value && /\.[a-z0-9]{2,5}$/i.test(value)) {
-          const name = clean(value);
-          if (name) return name;
-        }
-      }
-      const segment = parsed.pathname.split("/").pop();
-      if (segment && segment.includes(".")) return safeDecode(segment);
-    } catch {
-      /* not a URL */
-    }
+  try {
+    await Promise.race([
+      backend._onceOpen(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("WS Connection timeout")), 1000))
+    ]);
+    const response = await backend.request("get_settings");
+    cachedSettings = response || {};
+    lastSettingsFetch = now;
+    return cachedSettings;
+  } catch (err) {
+    console.debug("[DownloadAnything] Failed to fetch settings from backend:", err);
+    return null;
   }
-  return "download";
 }
 
-const safeDecode = (value) => {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
+function isMediaDownload(item) {
+  const mime = item.mime || "";
+  if (mime && (mime.startsWith("video/") || mime.startsWith("audio/") || /mpegurl|dash\+xml/i.test(mime))) {
+    return true;
   }
-};
+  const filename = item.filename || "";
+  const ext = filename.split(".").pop().split(/[?#]/)[0].toLowerCase();
+  const mediaExts = new Set(MEDIA_EXTS.split("|"));
+  if (ext && mediaExts.has(ext)) {
+    return true;
+  }
+  try {
+    const pathname = new URL(item.url).pathname;
+    const urlExt = pathname.split(".").pop().toLowerCase();
+    if (urlExt && mediaExts.has(urlExt)) {
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
+
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   (async () => {
-    // Always resolve filename determination first: a download can only be
-    // cancelled once it reaches the IN_PROGRESS state, which requires suggest().
-    suggest();
-
-    if (await isBypassed(item.url)) {
-      await removeBypass(item.url);
-      return; // let Chrome handle it normally
-    }
-
     try {
-      await chrome.downloads.cancel(item.id);
-      await chrome.downloads.erase({ id: item.id });
+      // 1. Check if bypassed by Alt-click or manual selection
+      if (await isBypassed(item.url)) {
+        await removeBypass(item.url);
+        suggest();
+        return;
+      }
+
+      // 2. Fetch settings and check if core engine is online/ready
+      const settings = await getBackendSettings();
+      if (!settings) {
+        console.debug("[DownloadAnything] Engine offline. Bypassing interception.");
+        suggest();
+        return;
+      }
+
+      // 3. Respect user's enable_download_interception setting
+      if (settings.enable_download_interception === false) {
+        console.debug("[DownloadAnything] Interception disabled in settings. Bypassing.");
+        suggest();
+        return;
+      }
+
+      // 4. Respect user's intercept_media_only setting
+      if (settings.intercept_media_only && !isMediaDownload(item)) {
+        console.debug("[DownloadAnything] Bypassing non-media download (media-only mode enabled).");
+        suggest();
+        return;
+      }
+
+      // 5. Find target tab to display prompt
+      let tabId = await getUrlTab(item.url);
+      if (!tabId && item.referrer) tabId = await getUrlTab(item.referrer);
+      if (!tabId) {
+        const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = active?.id;
+      }
+
+      // 6. Ping the tab's content script to make sure it is responsive
+      let canPrompt = false;
+      if (tabId != null) {
+        try {
+          const pingResult = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error("Ping timeout")), 400);
+            chrome.tabs.sendMessage(tabId, { type: "PING" }, (resp) => {
+              clearTimeout(timer);
+              if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+              else resolve(resp);
+            });
+          });
+          if (pingResult && pingResult.ok) {
+            canPrompt = true;
+          }
+        } catch (err) {
+          console.debug("[DownloadAnything] Ping failed for tab", tabId, err);
+        }
+      }
+
+      // 7. Intercept if content script is active; otherwise, let Chrome download natively
+      if (canPrompt) {
+        try {
+          await chrome.downloads.cancel(item.id);
+          await chrome.downloads.erase({ id: item.id });
+        } catch (err) {
+          console.warn("[DownloadAnything] Could not cancel native download:", err);
+        }
+
+        // Always call suggest to complete the event cycle
+        suggest();
+
+        await chrome.tabs
+          .sendMessage(tabId, {
+            type: "SHOW_ADD_DOWNLOAD_POPUP",
+            url: item.url,
+            filename: extractFilename(item),
+            referrer: item.referrer,
+          })
+          .catch((err) => {
+            console.debug("[DownloadAnything] Failed sending SHOW_ADD_DOWNLOAD_POPUP message:", err);
+          });
+      } else {
+        console.debug("[DownloadAnything] Content script unresponsive or not loaded. Letting Chrome handle download.");
+        suggest();
+      }
     } catch (err) {
-      console.warn("[DownloadAnything] Could not cancel native download:", err);
-    }
-
-    let tabId = await getUrlTab(item.url);
-    if (!tabId && item.referrer) tabId = await getUrlTab(item.referrer);
-    if (!tabId) {
-      const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
-      tabId = active?.id;
-    }
-
-    if (tabId != null) {
-      await chrome.tabs
-        .sendMessage(tabId, {
-          type: "SHOW_ADD_DOWNLOAD_POPUP",
-          url: item.url,
-          filename: extractFilename(item),
-        })
-        .catch(() => {
-          /* content script unavailable on this page */
-        });
+      console.error("[DownloadAnything] Error in onDeterminingFilename:", err);
+      suggest();
     }
   })();
-  return true; // we'll call suggest() asynchronously above
+  return true; // We resolve suggest() asynchronously
 });
 
 /* ── Toolbar action: acquire media on the active tab ────────────────────── */
@@ -503,7 +417,9 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
       url,
       filename: extractFilename(url),
     })
-    .catch(() => {});
+    .catch((err) => {
+      console.debug("[DownloadAnything] Context menu message dispatch failed:", err);
+    });
 });
 
 chrome.runtime.onInstalled.addListener(createContextMenus);
@@ -515,6 +431,15 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   void chrome.storage.session.remove(`streams_${tabId}`);
 });
 
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url) {
+    void chrome.storage.session.remove(`streams_${tabId}`);
+    chrome.tabs.sendMessage(tabId, { type: "URL_CHANGED", url: changeInfo.url }).catch((err) => {
+      // Content script may not be loaded/active yet; ignore
+    });
+  }
+});
+
 /* ── Keepalive port: a connected content-script Port keeps the SW alive
    for the duration of a long-running operation (extraction/download). ──── */
 
@@ -523,5 +448,7 @@ chrome.runtime.onConnect.addListener((port) => {
   // The port is held open by the content script while it awaits a result;
   // we simply acknowledge it. When the script disconnects, the SW is free
   // to terminate again — which is exactly what we want.
-  port.onDisconnect.addListener(() => {});
+  port.onDisconnect.addListener(() => {
+    console.debug("[DownloadAnything] Keepalive port disconnected.");
+  });
 });

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useOptimistic, useTransition, useActionState } from "react";
-import type { Task, Settings, Health, BackendState, TaskStatus, CookiesBrowser, MergeFormat } from "../types";
+import type { Task, Settings, Health, TaskStatus } from "../types";
 
 const WS_URL = "ws://127.0.0.1:8000/ws/progress";
 const WS_REQUEST_TIMEOUT_MS = 30_000;
@@ -19,11 +19,12 @@ export function useDownloadEngine() {
     concurrent_fragments: 16,
     rate_limit_bytes_per_sec: 0,
     proxy: "",
-    cookies_from_browser: "none",
     embed_thumbnail: false,
     embed_subtitles: false,
     subtitle_language: "en",
     categories: {},
+    enable_download_interception: true,
+    intercept_media_only: false,
   });
   const [health, setHealth] = useState<Health>({
     active_workers: "—",
@@ -160,6 +161,8 @@ export function useDownloadEngine() {
 
     return () => {
       if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.onerror = null;
         wsRef.current.close();
       }
       if (unlisten) {

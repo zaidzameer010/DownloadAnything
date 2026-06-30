@@ -1,49 +1,28 @@
 import asyncio
 import logging
+import mimetypes
 import os
 import re
 from typing import Any
-from urllib.parse import urlparse, unquote
+from urllib.parse import unquote, urlparse
+
+import aiohttp
+import m3u8
+
 from engine.config import DEFAULT_UA
+from engine.constants import MIME_TO_EXT
 
 logger = logging.getLogger("dma-engine")
 
 
 def guess_extension_from_mime(mime: str) -> str | None:
     mime = mime.split(";")[0].strip().lower()
-    mapping = {
-        "video/mp4": "mp4",
-        "video/webm": "webm",
-        "video/x-matroska": "mkv",
-        "video/quicktime": "mov",
-        "audio/mpeg": "mp3",
-        "audio/mp3": "mp3",
-        "audio/aac": "aac",
-        "audio/wav": "wav",
-        "audio/ogg": "ogg",
-        "audio/flac": "flac",
-        "application/pdf": "pdf",
-        "application/zip": "zip",
-        "application/x-rar-compressed": "rar",
-        "application/x-7z-compressed": "7z",
-        "application/x-tar": "tar",
-        "application/gzip": "gz",
-        "application/x-debian-package": "deb",
-        "application/x-redhat-package-manager": "rpm",
-        "application/x-apple-diskimage": "dmg",
-        "application/x-msdownload": "exe",
-        "application/octet-stream": "bin",
-        "text/plain": "txt",
-        "text/csv": "csv",
-        "image/png": "png",
-        "image/jpeg": "jpg",
-        "image/gif": "gif",
-        "image/webp": "webp",
-        "application/x-mpegurl": "m3u8",
-        "application/vnd.apple.mpegurl": "m3u8",
-        "application/dash+xml": "mpd",
-    }
-    return mapping.get(mime)
+    # Check standard library first
+    ext = mimetypes.guess_extension(mime)
+    if ext:
+        return ext.lstrip(".")
+    # Fallback for custom stream/media mime types not in standard registry
+    return MIME_TO_EXT.get(mime)
 
 
 def parse_content_disposition(header_val: str) -> str | None:
@@ -57,8 +36,7 @@ def parse_content_disposition(header_val: str) -> str | None:
         if len(parts) == 3:
             charset, _, encoded_name = parts
             try:
-                import urllib.parse
-                return urllib.parse.unquote(encoded_name, encoding=charset or "utf-8")
+                return unquote(encoded_name, encoding=charset or "utf-8")
             except Exception:
                 pass
         elif len(parts) == 1:
@@ -82,11 +60,6 @@ async def probe_direct_link(url: str, headers: dict[str, str] | None) -> dict[st
     First tries a HEAD request, falling back to a range-limited GET request
     if HEAD is blocked or returns an error.
     """
-    try:
-        import aiohttp
-    except ImportError:
-        return None
-
     req_headers = {"User-Agent": DEFAULT_UA, **(headers or {})}
     timeout = aiohttp.ClientTimeout(total=10)
 
@@ -122,22 +95,67 @@ async def probe_direct_link(url: str, headers: dict[str, str] | None) -> dict[st
     return None
 
 
+async def probe_url_metadata(url: str, headers: dict[str, str] | None) -> dict[str, Any] | None:
+    """Probes a direct URL link to extract metadata (filename, size, is_stream).
+    
+    Returns None if the URL is an HTML page or probe fails.
+    """
+    probe_res = await probe_direct_link(url, headers)
+    if not probe_res:
+        return None
+
+    resp_url = probe_res["url"]
+    resp_headers = probe_res["headers"]
+    ct = resp_headers.get("Content-Type", "").lower()
+
+    if "text/html" in ct or "application/xhtml+xml" in ct:
+        return None
+
+    # Extract filename from Content-Disposition
+    filename = parse_content_disposition(resp_headers.get("Content-Disposition", ""))
+    if not filename:
+        path = urlparse(resp_url).path.rstrip("/")
+        filename = os.path.basename(path) or "download"
+        filename = unquote(filename)
+
+    filename = os.path.basename(filename).strip()
+    if not os.path.splitext(filename)[1]:
+        ext = guess_extension_from_mime(ct)
+        if ext:
+            filename = f"{filename}.{ext}"
+
+    # Extract filesize
+    filesize = None
+    cr = resp_headers.get("Content-Range", "")
+    if "/" in cr:
+        total_str = cr.split("/")[-1].strip()
+        if total_str.isdigit():
+            filesize = int(total_str)
+    if filesize is None:
+        cl = resp_headers.get("Content-Length", "")
+        if cl.isdigit():
+            filesize = int(cl)
+
+    is_stream = "mpegurl" in ct or "dash+xml" in ct or resp_url.lower().endswith((".m3u8", ".mpd"))
+
+    return {
+        "filename": filename,
+        "filesize": filesize if filesize and filesize > 0 else None,
+        "is_stream": is_stream,
+        "mime_type": ct,
+        "url": resp_url,
+    }
+
+
 async def estimate_stream_size(url: str, headers: dict[str, str] | None) -> int | None:
     """Best-effort total-byte estimate for an HLS stream by sampling segments.
 
-    Returns ``None`` if aiohttp/m3u8 are absent or estimation fails.
+    Returns ``None`` if size estimation fails.
     """
-    try:
-        import aiohttp
-        import m3u8
-    except ImportError:
-        return None
-
     req_headers = {"User-Agent": DEFAULT_UA, **(headers or {})}
-    timeout = aiohttp.ClientTimeout
     try:
         async with aiohttp.ClientSession(headers=req_headers) as session:
-            async with session.get(url, timeout=timeout(total=15)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
                     return None
                 manifest = await resp.text()
@@ -150,7 +168,7 @@ async def estimate_stream_size(url: str, headers: dict[str, str] | None) -> int 
                     default=None,
                 )
                 if best and best.absolute_uri:
-                    async with session.get(best.absolute_uri, timeout=timeout(total=10)) as r:
+                    async with session.get(best.absolute_uri, timeout=aiohttp.ClientTimeout(total=10)) as r:
                         if r.status != 200:
                             return None
                         playlist = m3u8.loads(await r.text(), uri=best.absolute_uri)
@@ -168,9 +186,9 @@ async def estimate_stream_size(url: str, headers: dict[str, str] | None) -> int 
 
             async def head_size(seg_url: str) -> int:
                 try:
-                    async with session.head(seg_url, timeout=timeout(total=5)) as r:
+                    async with session.head(seg_url, timeout=aiohttp.ClientTimeout(total=5)) as r:
                         return int(r.headers.get("Content-Length", 0)) if r.status == 200 else 0
-                except Exception:  # noqa: BLE001
+                except Exception:
                     return 0
 
             sizes = await asyncio.gather(*(head_size(u) for u in sample_urls))
@@ -178,6 +196,6 @@ async def estimate_stream_size(url: str, headers: dict[str, str] | None) -> int 
             if not valid:
                 return None
             return int(sum(valid) / len(valid) * total)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("Stream size estimation failed for %s: %s", url, exc)
         return None
