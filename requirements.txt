@@ -4,6 +4,6 @@ yt-dlp
 pydantic
 pyinstaller
 orjson
-uvloop
+uvloop; sys_platform != 'win32'
 aiohttp
 m3u8
