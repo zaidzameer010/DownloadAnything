@@ -10,32 +10,41 @@ import logging
 import functools
 import platform
 import subprocess
+import ctypes
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Coroutine, cast
 from urllib.parse import urlparse
 
+if platform.system() == "Darwin":
+    try:
+        ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    except Exception:
+        pass
+
 import yt_dlp
-from yt_dlp.downloader.external import Aria2cFD, _BY_NAME
+from yt_dlp.downloader.external import Aria2cFD
+from yt_dlp.downloader import external as ytdlp_external
 from yt_dlp.utils import DownloadError
 
+unsafe_extension_error = getattr(yt_dlp, "_UnsafeExtensionError", None)
+if unsafe_extension_error is not None:
+    unsafe_extension_error.sanitize_extension = classmethod(
+        lambda cls, extension, *args, **kwargs: extension
+    )
+
 from engine.config import AppSettings, APP_DATA_DIR, TMP_DIR, JsonObj
-from engine.constants import GENERIC_STREAM_NAMES, MEDIA_EXTS_SET
-from engine.models import DownloadTask, TaskStatus, _BROADCAST_INTERVAL
+from engine.constants import (
+    GENERIC_STREAM_NAMES,
+    MEDIA_EXTS_SET,
+    PP_STATUS,
+    STREAM_PROTOCOLS as _STREAM_PROTOCOLS,
+    BROADCAST_INTERVAL as _BROADCAST_INTERVAL,
+)
+from engine.models import DownloadTask, TaskStatus
 from engine.title_extractor import sanitise_title
 
 logger = logging.getLogger("dma-engine")
 
-# Storing mapped postprocessor statuses
-PP_STATUS = {
-    "Merger": TaskStatus.STITCHING,
-    "FFmpegMerger": TaskStatus.STITCHING,
-    "FFmpegEmbedSubtitle": TaskStatus.EMBEDDING,
-    "EmbedThumbnail": TaskStatus.EMBEDDING,
-}
-
-_STREAM_PROTOCOLS = frozenset(
-    {"m3u8", "m3u8_native", "dash", "rtmp", "rtmpe", "rtmps", "rtmpt", "rtmpte"}
-)
 
 
 def formats_are_stream(formats: list[JsonObj]) -> bool:
@@ -87,6 +96,16 @@ def find_ffmpeg_location() -> str | None:
 
 
 class DMAAria2cFD(Aria2cFD):
+    def report_error(self, msg: str) -> None:
+        parent_report_error = getattr(super(), "report_error", None)
+        if callable(parent_report_error):
+            parent_report_error(msg)
+
+    def _hook_progress(self, status: JsonObj, info_dict: JsonObj) -> None:
+        parent_hook_progress = getattr(super(), "_hook_progress", None)
+        if callable(parent_hook_progress):
+            parent_hook_progress(status, info_dict)
+
     def _call_process(self, cmd: list[Any], info_dict: dict[str, Any]) -> tuple[str, str, int]:
         progress_re = re.compile(
             r"\[#\w+\s+"
@@ -152,7 +171,7 @@ class DMAAria2cFD(Aria2cFD):
         except StopIteration:
             idx = len(filtered_cmd) - 1
 
-        is_bytes = isinstance(filtered_cmd[0], bytes)
+        is_bytes = bool(filtered_cmd) and isinstance(filtered_cmd[0], bytes)
         def to_cmd_type(val: str) -> bytes | str:
             return val.encode('utf-8') if is_bytes else val
 
@@ -213,7 +232,9 @@ class DMAAria2cFD(Aria2cFD):
         p.wait()
         return "", "", p.returncode
 
-_BY_NAME['aria2c'] = DMAAria2cFD
+external_downloader_registry = getattr(ytdlp_external, "_BY_NAME", None)
+if isinstance(external_downloader_registry, dict):
+    external_downloader_registry["aria2c"] = DMAAria2cFD
 
 
 class YTDownloader:
@@ -221,16 +242,17 @@ class YTDownloader:
         self,
         settings: AppSettings,
         loop: asyncio.AbstractEventLoop,
-        on_update: Callable[[], None],
+        on_update: Callable[[], Coroutine[Any, Any, None]],
     ) -> None:
         self.settings = settings
         self.loop = loop
         self.on_update = on_update
 
     def build_opts(self, task: DownloadTask) -> JsonObj:
+        category_dir = self.settings.categories.get(task.category) if task.category else None
         target_dir = (
             task.custom_path
-            or self.settings.categories.get(task.category)
+            or category_dir
             or self.settings.default_download_path
         )
         if not is_safe_path(target_dir, allowed_roots(self.settings)):
@@ -256,7 +278,8 @@ class YTDownloader:
                 or Path(task.filename).name.lower() in GENERIC_STREAM_NAMES
             )
 
-        prefer_title_for_file = task.is_stream or task.is_video
+        prefer_title_for_file = (task.is_stream or task.is_video) and task.format_id != "direct_stream"
+        outtmpl = "%(title).200B.%(ext)s"
 
         if task.filename and not filename_is_generic and not prefer_title_for_file:
             import yt_dlp.utils
@@ -285,7 +308,7 @@ class YTDownloader:
         frag_dir.mkdir(parents=True, exist_ok=True)
 
         postprocessors: list[JsonObj] = []
-        is_media = task.is_stream or task.is_video
+        is_media = (task.is_stream or task.is_video) and task.format_id != "direct_stream"
         if not is_media:
             ext = ""
             if task.filename:
@@ -295,7 +318,7 @@ class YTDownloader:
                     ext = os.path.splitext(urlparse(task.url).path)[1].lstrip(".").lower()
                 except Exception:
                     pass
-            if ext in MEDIA_EXTS_SET:
+            if ext in MEDIA_EXTS_SET and task.format_id != "direct_stream":
                 is_media = True
 
         if is_media:
@@ -305,6 +328,7 @@ class YTDownloader:
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
+            "ignoreconfig": True,
             "merge_output_format": self.settings.merge_output_format,
             "format": format_spec,
             "format_sort": format_sort,
@@ -333,36 +357,50 @@ class YTDownloader:
             "continuedl": True,
         }
 
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            opts["impersonate"] = ImpersonateTarget.from_str("chrome")
+        except ImportError:
+            pass
+
         if is_media and self.settings.embed_thumbnail:
             opts["writethumbnail"] = True
             postprocessors.append({"key": "EmbedThumbnail"})
 
         if is_media and self.settings.embed_subtitles:
             opts["writesubtitles"] = True
-            opts["writeautomaticsub"] = True
-            opts["subtitleslangs"] = [self.settings.subtitle_language]
+            opts["writeautomaticsub"] = False
+            opts["subtitleslangs"] = ["all"]
             postprocessors.append({"key": "FFmpegEmbedSubtitle"})
 
         ffmpeg_location = find_ffmpeg_location()
         if ffmpeg_location:
             opts["ffmpeg_location"] = ffmpeg_location
 
-        aria2_exe = shutil.which("aria2c")
+        aria2_exe = shutil.which("aria2c") if self.settings.use_external_downloader else None
         if aria2_exe:
             logger.info("aria2c found at '%s', configuring as external downloader.", aria2_exe)
             task.using_aria2c = True
             if isinstance(opts.get("external_downloader"), dict):
                 opts["external_downloader"]["default"] = "aria2c"
+                opts["external_downloader"]["http"] = "aria2c"
+                opts["external_downloader"]["https"] = "aria2c"
             else:
-                opts["external_downloader"] = {"default": "aria2c", "m3u8": "native", "dash": "native"}
+                opts["external_downloader"] = {
+                    "default": "aria2c",
+                    "http": "aria2c",
+                    "https": "aria2c",
+                    "m3u8": "native",
+                    "dash": "native"
+                }
             opts["external_downloader_args"] = {
                 "aria2c": [
-                    "-x16",
-                    "-s16",
-                    "-j16",
-                    "-k1M",
-                    "--min-split-size=1M",
-                    "--check-certificate=false",
+                    f"-x{self.settings.aria2_max_connection_per_server}",
+                    f"-s{self.settings.aria2_split}",
+                    f"-j{self.settings.aria2_max_concurrent_downloads}",
+                    f"-k{self.settings.aria2_min_split_size}",
+                    f"--min-split-size={self.settings.aria2_min_split_size}",
+                    f"--check-certificate={'true' if self.settings.aria2_check_certificate else 'false'}",
                 ]
             }
 
@@ -374,6 +412,17 @@ class YTDownloader:
             opts["proxy"] = proxy
 
         if task.headers:
+            from engine.cookies import extract_cookie_header, generate_netscape_cookies
+            cookie_str = extract_cookie_header(task.headers)
+            if cookie_str:
+                cookie_path = TMP_DIR / f"cookies_{task.task_id}.txt"
+                try:
+                    cookie_content = generate_netscape_cookies(cookie_str, task.url)
+                    cookie_path.write_text(cookie_content, encoding="utf-8")
+                    opts["cookiefile"] = str(cookie_path)
+                except Exception as exc:
+                    logger.error("Failed to write cookies file for task %s: %s", task.task_id, exc)
+
             filtered_headers = {k: v for k, v in task.headers.items() if k.lower() != "cookie"}
             if filtered_headers:
                 opts["http_headers"] = filtered_headers
@@ -387,7 +436,7 @@ class YTDownloader:
 
     def _handle_progress_update(self, task: DownloadTask, d: JsonObj) -> None:
         status = d.get("status")
-        updates = {}
+        updates: dict[str, Any] = {}
         if status == "downloading":
             updates = self._downloading_updates(task, d)
         elif status == "finished":
@@ -494,6 +543,41 @@ class YTDownloader:
                 return
             except DownloadError as exc:
                 msg = str(exc).lower()
+                has_cookie_opts = "cookiesfrombrowser" in current_opts or "cookiefile" in current_opts
+                is_cookie_or_bot_error = any(
+                    x in msg for x in ("cookies", "cookie", "database", "reloaded", "forbidden", "403", "unauthorized", "sign in")
+                )
+
+                if not has_cookie_opts and is_cookie_or_bot_error:
+                    if self.settings.cookies_from_browser:
+                        logger.info(
+                            "Download failed without cookies (%s); retrying with browser cookies.",
+                            exc,
+                        )
+                        current_opts = {
+                            **current_opts,
+                            "cookiesfrombrowser": (self.settings.cookies_from_browser, None, None, None),
+                        }
+                        continue
+                    if self.settings.cookiefile_path:
+                        logger.info(
+                            "Download failed without cookies (%s); retrying with cookie file.",
+                            exc,
+                        )
+                        current_opts = {**current_opts, "cookiefile": self.settings.cookiefile_path}
+                        continue
+
+                if has_cookie_opts and is_cookie_or_bot_error:
+                    logger.info(
+                        "Download failed with cookies (%s); retrying without browser/file cookies.",
+                        exc,
+                    )
+                    current_opts = {
+                        k: v for k, v in current_opts.items()
+                        if k not in ("cookiesfrombrowser", "cookiefile")
+                    }
+                    continue
+
                 has_sub_error = "unable to download video subtitles" in msg or "subtitles" in msg
                 has_sub_opts = any(
                     k in current_opts
@@ -518,9 +602,11 @@ class YTDownloader:
                 raise
 
     def _download_once(self, task: DownloadTask, opts: JsonObj) -> None:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl._ies.pop("KnownPiracy", None)
-            ydl._ies.pop("KnownDRM", None)
+        with yt_dlp.YoutubeDL(cast(Any, opts)) as ydl:
+            ies = getattr(ydl, "_ies", None)
+            if isinstance(ies, dict):
+                ies.pop("KnownPiracy", None)
+                ies.pop("KnownDRM", None)
             info = ydl.extract_info(task.url, download=True)
         if not info:
             raise DownloadError("No info extracted")
@@ -537,7 +623,7 @@ class YTDownloader:
             filepath = requested[0].get("filepath") or requested[0].get("_filename") or ""
             if filepath:
                 task.final_path = filepath
-                task.filename = filepath
+                task.filename = Path(filepath).name
                 return
         if not task.final_path:
             task.final_path = ydl.prepare_filename(info)

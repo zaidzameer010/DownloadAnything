@@ -3,7 +3,7 @@ constants.py — Shared constants for the DownloadAnything backend engine.
 """
 
 MEDIA_EXTS = (
-    "m3u8|mpd|mp4|webm|mkv|avi|mov|wmv|flv|mpg|mpeg|3gp|ts|mp3|aac|m4a|flac|wav|ogg|opus|wma|vid"
+    "m3u8|mpd|mp4|webm|mkv|avi|mov|wmv|flv|mpg|mpeg|3gp|ts|mp3|aac|m4a|flac|wav|ogg|opus|wma"
 )
 
 MEDIA_EXTS_SET = frozenset(MEDIA_EXTS.split("|"))
@@ -51,3 +51,59 @@ MIME_TO_EXT = {
     "application/vnd.apple.mpegurl": "m3u8",
     "application/dash+xml": "mpd",
 }
+
+# The following constants have been relocated from other engine modules
+from engine.models import TaskStatus
+
+DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+TITLE_SUFFIXES = (
+    "YouTube",
+    "Twitch",
+    "Vimeo",
+    "Netflix",
+    "Disney+",
+    "TikTok",
+    "Twitter",
+    "X",
+    "Facebook",
+    "Instagram",
+    "Reddit",
+    "Dailymotion",
+    "Rumble",
+    "Bilibili",
+    "Odysee",
+    "PeerTube",
+    "Niconico",
+    "SoundCloud",
+    "Spotify",
+    "Prime Video",
+    "Apple TV",
+)
+
+ACTIVE_STATES = frozenset(
+    {
+        TaskStatus.DOWNLOADING,
+        TaskStatus.STITCHING,
+        TaskStatus.EMBEDDING,
+        TaskStatus.FINALIZING,
+    }
+)
+
+BROADCAST_INTERVAL = 0.1
+
+PP_STATUS = {
+    "Merger": TaskStatus.STITCHING,
+    "FFmpegMerger": TaskStatus.STITCHING,
+    "FFmpegEmbedSubtitle": TaskStatus.EMBEDDING,
+    "EmbedThumbnail": TaskStatus.EMBEDDING,
+    "MoveFiles": TaskStatus.FINALIZING,
+}
+
+STREAM_PROTOCOLS = frozenset(
+    {"m3u8", "m3u8_native", "dash", "rtmp", "rtmpe", "rtmps", "rtmpt", "rtmpte"}
+)
+

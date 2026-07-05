@@ -3,15 +3,6 @@
  */
 "use strict";
 
-const STREAM_REGEX = new RegExp(`\\.(${MEDIA_EXTS}|${FILE_EXTS})(?:\\?|#|$)`, "i");
-
-// Sequential HLS/DASH segments — filtered so a stream list isn't flooded.
-const SEGMENT_REGEX =
-  /(?:^|[-_])(?:chunk|seg(?:ment)?|fragment|part)[-_0-9]*\.(?:ts|m4s|aac|mp4)|(?:^|[-_])\d+\.(?:ts|m4s)/i;
-
-const CACHE_CAP = 200;        // max entries per cache map
-const MAX_STREAMS_PER_TAB = 50;
-
 const sessionGet = async (key, fallback) => {
   try {
     const result = await chrome.storage.session.get(key);
@@ -72,7 +63,6 @@ const cacheUrlTab = (url, tabId) =>
     : Promise.resolve();
 
 /* Temporary request headers cache in session storage to capture headers for extensionless dynamic streams. */
-const TEMP_HEADERS_CAP = 300;
 
 async function cacheTempHeaders(url, headers) {
   const map = await sessionGet("tempHeaders", {});
@@ -127,6 +117,8 @@ async function recordStream(tabId, url, { force = false } = {}) {
     ? [...list.slice(1), url]   // drop oldest, append newest
     : [...list, url];
   await sessionSet(key, next);
+
+  chrome.tabs.sendMessage(tabId, { type: "STREAM_SNIFFED", url }).catch(() => {});
 }
 
 /* ── webRequest observers (read-only; no webRequestBlocking needed) ─────── */
@@ -153,6 +145,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
         case "referer":
         case "user-agent":
         case "origin":
+        case "cookie":
           headers[header.name] = header.value;
           break;
       }

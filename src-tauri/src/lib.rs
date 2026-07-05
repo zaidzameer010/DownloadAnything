@@ -1,7 +1,26 @@
 use tauri::{Manager, Emitter};
+use tauri::path::BaseDirectory;
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_updater::UpdaterExt;
+
+#[tauri::command]
+fn open_browser_extension_folder(app: tauri::AppHandle) -> Result<(), String> {
+  let extension_path = app
+    .path()
+    .resolve("browser-extension", BaseDirectory::Resource)
+    .map_err(|err| err.to_string())?;
+  let extension_path = extension_path.to_string_lossy().to_string();
+  let command = if cfg!(target_os = "macos") {
+    std::process::Command::new("open").arg(&extension_path).spawn()
+  } else if cfg!(target_os = "windows") {
+    std::process::Command::new("explorer").arg(&extension_path).spawn()
+  } else {
+    std::process::Command::new("xdg-open").arg(&extension_path).spawn()
+  };
+  command.map_err(|err| err.to_string())?;
+  Ok(())
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -9,6 +28,7 @@ pub fn run() {
     .plugin(tauri_plugin_shell::init())
     .plugin(tauri_plugin_updater::Builder::new().build())
     .plugin(tauri_plugin_dialog::init())
+    .invoke_handler(tauri::generate_handler![open_browser_extension_folder])
     .setup(|app| {
       // Build application menu
       let default_menu = tauri::menu::Menu::default(app.handle())?;

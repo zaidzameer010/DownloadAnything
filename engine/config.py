@@ -8,11 +8,6 @@ from pydantic import BaseModel, Field, ValidationError
 
 logger = logging.getLogger("dma-engine")
 
-DEFAULT_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-)
-
 type JsonObj = dict[str, Any]
 
 
@@ -83,6 +78,14 @@ def _default_settings() -> JsonObj:
         "proxy": "",
         "enable_download_interception": True,
         "intercept_media_only": False,
+        "cookies_from_browser": "",
+        "cookiefile_path": "",
+        "use_external_downloader": True,
+        "aria2_max_connection_per_server": 16,
+        "aria2_split": 16,
+        "aria2_max_concurrent_downloads": 16,
+        "aria2_min_split_size": "1M",
+        "aria2_check_certificate": False,
     }
 
 
@@ -95,13 +98,21 @@ class AppSettings(BaseModel):
     categories: dict[str, str]
     rate_limit_bytes_per_sec: int = Field(default=0, ge=0)
     merge_output_format: Literal["mp4", "mkv", "webm"] = "mp4"
-    concurrent_fragments: int = Field(default=16, ge=1)
+    concurrent_fragments: int = Field(default=16, ge=1, le=32)
     embed_thumbnail: bool = False
     embed_subtitles: bool = False
     subtitle_language: str = "en"
     proxy: str = ""
     enable_download_interception: bool = True
     intercept_media_only: bool = False
+    cookies_from_browser: str = ""
+    cookiefile_path: str = ""
+    use_external_downloader: bool = True
+    aria2_max_connection_per_server: int = Field(default=16, ge=1, le=32)
+    aria2_split: int = Field(default=16, ge=1, le=32)
+    aria2_max_concurrent_downloads: int = Field(default=16, ge=1, le=32)
+    aria2_min_split_size: str = "1M"
+    aria2_check_certificate: bool = False
 
 
 class SettingsUpdate(BaseModel):
@@ -111,13 +122,22 @@ class SettingsUpdate(BaseModel):
     categories: dict[str, str] | None = None
     rate_limit_bytes_per_sec: int | None = Field(default=None, ge=0)
     merge_output_format: Literal["mp4", "mkv", "webm"] | None = None
-    concurrent_fragments: int | None = Field(default=None, ge=1)
+    concurrent_fragments: int | None = Field(default=None, ge=1, le=32)
     embed_thumbnail: bool | None = None
     embed_subtitles: bool | None = None
     subtitle_language: str | None = None
     proxy: str | None = None
     enable_download_interception: bool | None = None
     intercept_media_only: bool | None = None
+    cookies_from_browser: str | None = None
+    cookiefile_path: str | None = None
+    use_external_downloader: bool | None = None
+    aria2_max_connection_per_server: int | None = Field(default=None, ge=1, le=32)
+    aria2_split: int | None = Field(default=None, ge=1, le=32)
+    aria2_max_concurrent_downloads: int | None = Field(default=None, ge=1, le=32)
+    aria2_min_split_size: str | None = None
+    aria2_check_certificate: bool | None = None
+
 
 
 def load_settings() -> AppSettings:

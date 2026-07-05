@@ -21,14 +21,12 @@ importScripts("constants.js", "filename_extractor.js", "streams.js");
 
 /* ── Config ─────────────────────────────────────────────────────────────── */
 
-const BACKEND_BASE = "http://127.0.0.1:8000";
-const WS_URL = `${BACKEND_BASE.replace(/^http/, "ws")}/ws/progress`;
-const REQUEST_TIMEOUT_MS = 90_000;
-
 /* ── Tiny helpers ───────────────────────────────────────────────────────── */
 
 const errorMessage = (err) =>
   err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err);
+
+const cloneHeaders = (headers = {}) => ({ ...headers });
 
 /* ── Backend WebSocket client (lazy connect, auto-reconnect) ────────────── */
 
@@ -153,12 +151,9 @@ const ROUTERS = {
   GET_HEALTH: async () => backend.request("get_health"),
 
   EXTRACT: async (payload) => {
-    let headers = (await getRequestHeaders(payload.url)) || {};
-    for (const key of Object.keys(headers)) {
-      if (key.toLowerCase() === "cookie") {
-        delete headers[key];
-      }
-    }
+    let headers = cloneHeaders(
+      payload.headers ?? (await getRequestHeaders(payload.url)) ?? (await getTempHeaders(payload.url)) ?? {},
+    );
     if (!headers["User-Agent"]) {
       headers["User-Agent"] = navigator.userAgent;
     }
@@ -170,14 +165,11 @@ const ROUTERS = {
   },
 
   DOWNLOAD: async (payload) => {
-    let headers = payload.headers ?? (await getRequestHeaders(payload.url)) ?? (await getTempHeaders(payload.url)) ?? {};
+    let headers = cloneHeaders(
+      payload.headers ?? (await getRequestHeaders(payload.url)) ?? (await getTempHeaders(payload.url)) ?? {},
+    );
     if (Object.keys(headers).length === 0 && payload.referrer) {
-      headers = (await getRequestHeaders(payload.referrer)) ?? (await getTempHeaders(payload.referrer)) ?? {};
-    }
-    for (const key of Object.keys(headers)) {
-      if (key.toLowerCase() === "cookie") {
-        delete headers[key];
-      }
+      headers = cloneHeaders((await getRequestHeaders(payload.referrer)) ?? (await getTempHeaders(payload.referrer)) ?? {});
     }
     if (!headers["User-Agent"]) {
       headers["User-Agent"] = navigator.userAgent;
@@ -241,7 +233,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 let cachedSettings = null;
 let lastSettingsFetch = 0;
-const SETTINGS_CACHE_TTL = 5000; // 5 seconds
 
 async function getBackendSettings() {
   const now = Date.now();
@@ -287,6 +278,24 @@ function isMediaDownload(item) {
 
 
 
+
+function shouldBypassEngineForDirectVid(item) {
+  const mime = (item.mime || "").split(";")[0].trim().toLowerCase();
+  if (!mime || /mpegurl|dash\+xml/i.test(mime)) {
+    return false;
+  }
+
+  try {
+    const pathname = new URL(item.url).pathname.toLowerCase();
+    if (!pathname.endsWith(".vid")) {
+      return false;
+    }
+  } catch (err) {
+    return false;
+  }
+
+  return mime.startsWith("video/") || mime.startsWith("audio/");
+}
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   (async () => {
     try {
@@ -315,6 +324,13 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
       // 4. Respect user's intercept_media_only setting
       if (settings.intercept_media_only && !isMediaDownload(item)) {
         console.debug("[DownloadAnything] Bypassing non-media download (media-only mode enabled).");
+        suggest();
+        return;
+      }
+
+      // 4b. Direct .vid links that already resolve to normal media should stay native.
+      if (shouldBypassEngineForDirectVid(item)) {
+        console.debug("[DownloadAnything] Bypassing engine for direct .vid media download.");
         suggest();
         return;
       }
@@ -349,15 +365,25 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 
       // 7. Intercept if content script is active; otherwise, let Chrome download natively
       if (canPrompt) {
+        // Always call suggest first to complete filename determination and transition to "in progress" state
+        suggest();
+
         try {
-          await chrome.downloads.cancel(item.id);
-          await chrome.downloads.erase({ id: item.id });
+          chrome.downloads.cancel(item.id, () => {
+            const err = chrome.runtime.lastError;
+            if (err) {
+              console.debug("[DownloadAnything] cancel error:", err.message);
+            }
+            chrome.downloads.erase({ id: item.id }, () => {
+              const eraseErr = chrome.runtime.lastError;
+              if (eraseErr) {
+                console.debug("[DownloadAnything] erase error:", eraseErr.message);
+              }
+            });
+          });
         } catch (err) {
           console.warn("[DownloadAnything] Could not cancel native download:", err);
         }
-
-        // Always call suggest to complete the event cycle
-        suggest();
 
         await chrome.tabs
           .sendMessage(tabId, {
@@ -385,11 +411,31 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab?.id) return;
-  await chrome.tabs
-    .sendMessage(tab.id, { type: "TRIGGER_EXTRACT" }, { frameId: 0 })
-    .catch(() => {
-      console.warn("[DownloadAnything] Content script not available on this tab.");
-    });
+  const triggerInFrame = async (frameId) => {
+    try {
+      const response = await chrome.tabs.sendMessage(
+        tab.id,
+        { type: "TRIGGER_EXTRACT" },
+        { frameId },
+      );
+      return !!response?.found;
+    } catch {
+      return false;
+    }
+  };
+
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
+    const orderedFrameIds = [0, ...frames.map((frame) => frame.frameId).filter((frameId) => frameId !== 0)];
+    for (const frameId of orderedFrameIds) {
+      if (await triggerInFrame(frameId)) {
+        return;
+      }
+    }
+  } catch (err) {
+    console.warn("[DownloadAnything] Frame enumeration failed; falling back to top frame only.", err);
+    await triggerInFrame(0);
+  }
 });
 
 /* ── Context menus ──────────────────────────────────────────────────────── */

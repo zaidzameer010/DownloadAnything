@@ -18,24 +18,29 @@
   --muted-dark: #3f3f46; /* Zinc-700 */
 
   /* Semantics */
-  --danger: #ef4444; /* Rose-500 */
-  --danger-bg: rgba(239, 68, 68, 0.08);
-  --danger-border: rgba(239, 68, 68, 0.15);
+  --danger: #ff453a; /* Apple System Red */
+  --danger-bg: rgba(255, 69, 58, 0.08);
+  --danger-border: rgba(255, 69, 58, 0.15);
 
-  --success: #10b981; /* Emerald-500 */
-  --success-bg: rgba(16, 185, 129, 0.08);
-  --success-border: rgba(16, 185, 129, 0.15);
+  --success: #30d158; /* Apple System Green */
+  --success-bg: rgba(48, 209, 88, 0.08);
+  --success-border: rgba(48, 209, 88, 0.15);
 
-  --warning: #f59e0b; /* Amber-500 */
-  --warning-bg: rgba(245, 158, 11, 0.08);
-  --warning-border: rgba(245, 158, 11, 0.15);
+  --warning: #ff9f0a; /* Apple System Orange */
+  --warning-bg: rgba(255, 159, 10, 0.08);
+  --warning-border: rgba(255, 159, 10, 0.15);
 
-  --info: #0ea5e9; /* Sky-500 */
-  --info-bg: rgba(14, 165, 233, 0.08);
-  --info-border: rgba(14, 165, 233, 0.15);
+  --info: #4d94ff; /* Apple System Blue */
+  --info-bg: rgba(77, 148, 255, 0.08);
+  --info-border: rgba(77, 148, 255, 0.15);
+
+  --processing: #bf5af2; /* Apple System Purple */
+  --processing-bg: rgba(191, 90, 242, 0.08);
+  --processing-border: rgba(191, 90, 242, 0.15);
 
   --font-display: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: 'Geist Mono', Menlo, Monaco, Consolas, "Courier New", monospace;
 
   /* Custom Design Engineering Easing Curves */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);

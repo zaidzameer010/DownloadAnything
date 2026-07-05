@@ -22,6 +22,7 @@ export interface Task {
   readonly category: string;
   readonly final_path: string | null;
   readonly custom_path: string | null;
+  readonly filename?: string | null;
   readonly format_id?: string | null;
   readonly fragment_index?: number | null;
   readonly fragment_count?: number | null;
@@ -31,6 +32,7 @@ export interface Task {
   readonly error?: string | null;
   readonly started_at?: number;
   readonly finished_at?: number;
+  readonly created_at?: number;
   readonly has_custom_title?: boolean;
   readonly using_aria2c?: boolean;
 }
@@ -50,6 +52,14 @@ export interface Settings {
   categories: Record<string, string>;
   enable_download_interception: boolean;
   intercept_media_only: boolean;
+  cookies_from_browser: string;
+  cookiefile_path: string;
+  use_external_downloader: boolean;
+  aria2_max_connection_per_server: number;
+  aria2_split: number;
+  aria2_max_concurrent_downloads: number;
+  aria2_min_split_size: string;
+  aria2_check_certificate: boolean;
 }
 
 export interface Health {

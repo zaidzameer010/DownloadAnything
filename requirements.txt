@@ -1,6 +1,7 @@
 fastapi[standard]
 uvicorn
 yt-dlp
+curl-cffi
 pydantic
 pyinstaller
 orjson

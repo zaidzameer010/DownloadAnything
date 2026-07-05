@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useOptimistic, useTransition, useActionSta
 import type { Task, Settings, Health, TaskStatus } from "../types";
 
 const WS_URL = "ws://127.0.0.1:8000/ws/progress";
-const WS_REQUEST_TIMEOUT_MS = 30_000;
+const WS_REQUEST_TIMEOUT_MS = 150_000;
 
 interface PendingRequest {
   readonly resolve: (value: any) => void;
@@ -25,6 +25,14 @@ export function useDownloadEngine() {
     categories: {},
     enable_download_interception: true,
     intercept_media_only: false,
+    cookies_from_browser: "",
+    cookiefile_path: "",
+    use_external_downloader: true,
+    aria2_max_connection_per_server: 16,
+    aria2_split: 16,
+    aria2_max_concurrent_downloads: 16,
+    aria2_min_split_size: "1M",
+    aria2_check_certificate: false,
   });
   const [health, setHealth] = useState<Health>({
     active_workers: "—",
@@ -90,13 +98,15 @@ export function useDownloadEngine() {
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "tasks") {
-          setTasks(msg.data || []);
-          if (msg.health) {
-            setHealth(msg.health);
-          }
-          if (msg.settings) {
-            setSettings(msg.settings);
-          }
+          startTransition(() => {
+            setTasks(msg.data || []);
+            if (msg.health) {
+              setHealth(msg.health);
+            }
+            if (msg.settings) {
+              setSettings(msg.settings);
+            }
+          });
           setOnline(true);
         } else if (msg.type === "response") {
           const { request_id, ok, data, error } = msg;
@@ -266,6 +276,17 @@ export function useDownloadEngine() {
     });
   };
 
+  const openBrowserExtensionFolder = async () => {
+    if (!isTauri) {
+      throw new Error("Browser extension bundle is only available in the desktop app");
+    }
+    const tauri = (window as any).__TAURI__;
+    if (!tauri?.core?.invoke) {
+      throw new Error("Tauri invoke bridge is unavailable");
+    }
+    await tauri.core.invoke("open_browser_extension_folder");
+  };
+
   const saveSettings = async (newSettings: Settings): Promise<Settings> => {
     try {
       const saved: Settings = await sendWSRequest("save_settings", newSettings);
@@ -308,6 +329,7 @@ export function useDownloadEngine() {
     revealTask,
     deleteTasks,
     clearCompleted,
+    openBrowserExtensionFolder,
     saveSettingsAction,
     isSaving,
     saveState,

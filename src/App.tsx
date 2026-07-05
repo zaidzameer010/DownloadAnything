@@ -111,6 +111,7 @@ export function App() {
             <ConfigurationView
               settings={engine.settings}
               saveSettingsAction={engine.saveSettingsAction}
+              openBrowserExtensionFolder={engine.openBrowserExtensionFolder}
               isSaving={engine.isSaving}
               saveState={engine.saveState}
               showToast={triggerToast}

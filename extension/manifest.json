@@ -4,18 +4,22 @@
   "version": "0.3.0",
   "description": "Sniff HLS/DASH/MP4 streams and file downloads, overlay acquire buttons, and route them to the local DownloadAnything engine.",
   "minimum_chrome_version": "116",
+  "incognito": "split",
   "permissions": [
     "activeTab",
     "contextMenus",
+    "cookies",
     "downloads",
     "scripting",
     "storage",
     "tabs",
+    "webNavigation",
     "webRequest"
   ],
   "host_permissions": [
     "http://*/*",
-    "https://*/*"
+    "https://*/*",
+    "file:///*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -23,7 +27,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["constants.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": true
     }

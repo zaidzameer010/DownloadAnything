@@ -9,8 +9,7 @@ from urllib.parse import unquote, urlparse
 import aiohttp
 import m3u8
 
-from engine.config import DEFAULT_UA
-from engine.constants import MIME_TO_EXT
+from engine.constants import DEFAULT_UA, MIME_TO_EXT
 
 logger = logging.getLogger("dma-engine")
 

@@ -7,10 +7,17 @@ import shutil
 import subprocess
 import time
 import uuid
+import ctypes
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
+
+if platform.system() == "Darwin":
+    try:
+        ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    except Exception:
+        pass
 
 import orjson
 import yt_dlp
@@ -26,8 +33,6 @@ from engine.config import (
     save_settings,
 )
 from engine.models import (
-    _ACTIVE_STATES,
-    _BROADCAST_INTERVAL,
     DownloadTask,
     TaskStatus,
 )
@@ -35,7 +40,11 @@ from engine.probing import (
     estimate_stream_size,
     probe_url_metadata,
 )
-from engine.constants import GENERIC_STREAM_NAMES as _GENERIC_STREAM_NAMES
+from engine.constants import (
+    GENERIC_STREAM_NAMES as _GENERIC_STREAM_NAMES,
+    ACTIVE_STATES as _ACTIVE_STATES,
+    BROADCAST_INTERVAL as _BROADCAST_INTERVAL,
+)
 from engine.title_extractor import sanitise_title
 from engine.downloader import YTDownloader, formats_are_stream
 
@@ -73,36 +82,88 @@ def build_probe_opts(settings: AppSettings, headers: dict[str, str] | None) -> J
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
+        "ignoreconfig": True,
         "extractor_args": {"generic": {"impersonate": ["chrome"]}},
     }
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        opts["impersonate"] = ImpersonateTarget.from_str("chrome")
+    except ImportError:
+        pass
+
     if headers:
         filtered_headers = {k: v for k, v in headers.items() if k.lower() != "cookie"}
         if filtered_headers:
             opts["http_headers"] = filtered_headers
+
     return opts
 
 
 def _extract_once(url: str, opts: JsonObj) -> Any:
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl._ies.pop("KnownPiracy", None)
-        ydl._ies.pop("KnownDRM", None)
+    with yt_dlp.YoutubeDL(cast(Any, opts)) as ydl:
+        ies = getattr(ydl, "_ies", None)
+        if isinstance(ies, dict):
+            ies.pop("KnownPiracy", None)
+            ies.pop("KnownDRM", None)
         return ydl.extract_info(url, download=False)
 
 
 def extract_with_fallback(url: str, opts: JsonObj) -> Any:
-    """Extract with graceful fallbacks for anti-piracy errors."""
+    """Extract with graceful fallbacks for cookies and anti-piracy errors."""
     try:
         return _extract_once(url, opts)
     except DownloadError as exc:
         msg = str(exc).lower()
+        has_cookies = "cookiesfrombrowser" in opts or "cookiefile" in opts
+        is_cookie_or_bot_error = any(
+            x in msg for x in ("cookies", "cookie", "database", "reloaded", "forbidden", "403", "unauthorized", "sign in")
+        )
+        if has_cookies and is_cookie_or_bot_error:
+            new_opts = {k: v for k, v in opts.items() if k not in ("cookiesfrombrowser", "cookiefile")}
+            logger.info("Extraction failed with cookies (%s); retrying without cookies.", exc)
+            try:
+                return _extract_once(url, new_opts)
+            except DownloadError as sub_exc:
+                exc = sub_exc
+                msg = str(exc).lower()
+
         if "primarily used for piracy" in msg:
-            return _extract_once(url, {**opts, "allowed_extractors": ["generic"]})
+            clean_opts = {k: v for k, v in opts.items() if k not in ("cookiesfrombrowser", "cookiefile")}
+            return _extract_once(url, {**clean_opts, "allowed_extractors": ["generic"]})
+        raise
+
+
+def _cookie_opts_from_settings(settings: AppSettings) -> JsonObj:
+    if settings.cookies_from_browser:
+        return {"cookiesfrombrowser": (settings.cookies_from_browser, None, None, None)}
+    if settings.cookiefile_path:
+        return {"cookiefile": settings.cookiefile_path}
+    return {}
+
+
+def extract_with_cookie_fallback(url: str, opts: JsonObj, settings: AppSettings) -> Any:
+    try:
+        return extract_with_fallback(url, opts)
+    except DownloadError as exc:
+        msg = str(exc).lower()
+        auth_error = any(
+            x in msg for x in ("cookies", "cookie", "database", "reloaded", "forbidden", "403", "unauthorized", "sign in")
+        )
+        cookie_opts = _cookie_opts_from_settings(settings)
+        if cookie_opts and auth_error and not any(k in opts for k in ("cookiesfrombrowser", "cookiefile")):
+            logger.info("Retrying extraction with browser/file cookies after auth-style failure: %s", exc)
+            return extract_with_fallback(url, {**opts, **cookie_opts})
         raise
 
 
 def cleanup_task_files(task: DownloadTask, settings: AppSettings) -> None:
-    if task.status == TaskStatus.PAUSED:
-        return
+
+    cookie_path = TMP_DIR / f"cookies_{task.task_id}.txt"
+    if cookie_path.exists():
+        try:
+            cookie_path.unlink()
+        except OSError as exc:
+            logger.warning("Could not remove cookies file %s: %s", cookie_path, exc)
 
     frag_dir = TMP_DIR / "fragments" / task.task_id
     if frag_dir.is_dir():
@@ -111,50 +172,56 @@ def cleanup_task_files(task: DownloadTask, settings: AppSettings) -> None:
         except OSError as exc:
             logger.warning("Could not remove fragment dir %s: %s", frag_dir, exc)
 
+    category_path = settings.categories.get(task.category) if task.category else None
+    target_dir = Path(
+        task.custom_path
+        or category_path
+        or settings.default_download_path
+    ).resolve()
+
     if task.status == TaskStatus.CANCELLED:
-        for fp in (task.final_path, task.filename):
-            if fp:
+        candidate_paths = []
+        if task.final_path:
+            candidate_paths.append(Path(task.final_path))
+        if task.filename:
+            candidate_paths.append(target_dir / task.filename)
+
+        for fp in candidate_paths:
+            try:
+                p = fp.resolve()
+                if p.is_file():
+                    p.unlink(missing_ok=True)
+                elif p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+            except Exception as exc:
+                logger.warning("Could not clean up partial file %s: %s", fp, exc)
+
+    if target_dir.exists() and target_dir.is_dir():
+        stems = []
+        if task.filename:
+            stems.append(Path(task.filename).stem.lower())
+            stems.append(Path(task.filename).name.lower())
+        if task.title:
+            import yt_dlp.utils
+            stems.append(yt_dlp.utils.sanitize_filename(task.title).lower())
+            stems.append(task.title.lower())
+
+        stems = list({s for s in stems if s})
+
+        for item in target_dir.iterdir():
+            if not item.is_file():
+                continue
+            name = item.name.lower()
+            is_temp_file = (
+                item.suffix.lower() in (".part", ".ytdl", ".aria2", ".temp", ".tmp")
+                or "part-fragment" in name
+                or "-frag" in name
+            )
+            if any(s in name for s in stems) and (is_temp_file or name.endswith(".aria2")):
                 try:
-                    p = Path(fp).resolve()
-                    if p.is_file():
-                        p.unlink(missing_ok=True)
-                    elif p.is_dir():
-                        shutil.rmtree(p, ignore_errors=True)
-                except Exception as exc:
-                    logger.warning("Could not clean up partial file %s: %s", fp, exc)
-
-        target_dir = Path(
-            task.custom_path
-            or settings.categories.get(task.category)
-            or settings.default_download_path
-        ).resolve()
-
-        if target_dir.exists() and target_dir.is_dir():
-            stems = []
-            if task.filename:
-                stems.append(Path(task.filename).stem.lower())
-                stems.append(Path(task.filename).name.lower())
-            if task.title:
-                import yt_dlp.utils
-                stems.append(yt_dlp.utils.sanitize_filename(task.title).lower())
-                stems.append(task.title.lower())
-            
-            stems = list({s for s in stems if s})
-
-            for item in target_dir.iterdir():
-                if not item.is_file():
-                    continue
-                name = item.name.lower()
-                is_temp_file = (
-                    item.suffix.lower() in (".part", ".ytdl", ".aria2", ".temp", ".tmp")
-                    or "part-fragment" in name
-                    or "-frag" in name
-                )
-                if any(s in name for s in stems) and (is_temp_file or name.endswith(".aria2")):
-                    try:
-                        item.unlink(missing_ok=True)
-                    except OSError as exc:
-                        logger.warning("Could not remove temp file %s: %s", item, exc)
+                    item.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("Could not remove temp file %s: %s", item, exc)
 
 
 def reveal_in_file_manager(path: str, select: bool) -> None:
@@ -194,19 +261,13 @@ class Client:
 
 
 class DownloadManager:
-    _PP_STATUS: dict[str, TaskStatus] = {
-        "Merger": TaskStatus.STITCHING,
-        "FFmpegMerger": TaskStatus.STITCHING,
-        "EmbedThumbnail": TaskStatus.EMBEDDING,
-        "FFmpegEmbedSubtitle": TaskStatus.EMBEDDING,
-        "MoveFiles": TaskStatus.FINALIZING,
-    }
-
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
         self._settings_dict = settings.model_dump()
         self._tasks_file = TMP_DIR / "tasks.json"
         self._tasks: dict[str, DownloadTask] = {}
+        self._probe_cache: dict[str, tuple[float, JsonObj]] = {}
+        self._probe_cache_ttl = 300.0
         self._queue: asyncio.Queue[DownloadTask] = asyncio.Queue()
         self._clients: set[Client] = set()
         self._coros: set[asyncio.Task[None]] = set()
@@ -214,6 +275,9 @@ class DownloadManager:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._dispatcher: asyncio.Task[None] | None = None
         self._save_task: asyncio.Task[None] | None = None
+        self._broadcast_task: asyncio.Task[None] | None = None
+        self._broadcast_lock = asyncio.Lock()
+        self._last_broadcast_at = 0.0
         self._shutting_down = False
 
     # ---- lifecycle -------------------------------------------------------
@@ -236,6 +300,12 @@ class DownloadManager:
             # Anything that was in-flight cannot be resumed automatically.
             if status in _ACTIVE_STATES or status == TaskStatus.QUEUED:
                 status = TaskStatus.PAUSED
+            filename = td.get("filename", "") or ""
+            final_path = td.get("final_path", "") or ""
+            if filename and (os.sep in filename or (os.altsep and os.altsep in filename)):
+                if not final_path:
+                    final_path = filename
+                filename = Path(filename).name
             loaded[tid] = DownloadTask(
                 task_id=td["task_id"],
                 url=td["url"],
@@ -247,8 +317,8 @@ class DownloadManager:
                 progress=td.get("progress", 0.0),
                 total_bytes=td.get("total_bytes", 0),
                 downloaded_bytes=td.get("downloaded_bytes", 0),
-                filename=td.get("filename", ""),
-                final_path=td.get("final_path", ""),
+                filename=filename,
+                final_path=final_path,
                 error=td.get("error", ""),
                 started_at=td.get("started_at", 0.0),
                 finished_at=td.get("finished_at", 0.0),
@@ -261,6 +331,7 @@ class DownloadManager:
                 fragment_count=td.get("fragment_count"),
                 using_aria2c=td.get("using_aria2c", False),
                 prev_parts_bytes=td.get("prev_parts_bytes", 0),
+                created_at=td.get("created_at", 0.0),
             )
         self._tasks = loaded
 
@@ -318,6 +389,34 @@ class DownloadManager:
     def _remove_task(self, task_id: str) -> None:
         self._tasks.pop(task_id, None)
 
+    @staticmethod
+    def _probe_cache_key(url: str, headers: dict[str, str] | None) -> str:
+        if not headers:
+            return url
+        relevant = {
+            key.lower(): value
+            for key, value in headers.items()
+            if key.lower() in {"cookie", "origin", "referer", "user-agent"}
+        }
+        if not relevant:
+            return url
+        return f"{url}\0{orjson.dumps(relevant, option=orjson.OPT_SORT_KEYS).decode()}"
+
+    def _get_cached_probe(self, url: str, headers: dict[str, str] | None) -> JsonObj | None:
+        key = self._probe_cache_key(url, headers)
+        cached = self._probe_cache.get(key)
+        if not cached:
+            return None
+        created_at, metadata = cached
+        if time.monotonic() - created_at > self._probe_cache_ttl:
+            self._probe_cache.pop(key, None)
+            return None
+        return dict(metadata)
+
+    def _remember_probe(self, url: str, headers: dict[str, str] | None, metadata: JsonObj) -> None:
+        key = self._probe_cache_key(url, headers)
+        self._probe_cache[key] = (time.monotonic(), dict(metadata))
+
     def _active_count(self) -> int:
         return sum(1 for t in self._tasks.values() if t._is_running)
 
@@ -345,15 +444,16 @@ class DownloadManager:
         self._write_tasks()
 
     def payload(self) -> str:
+        yt_dlp_version = "unknown"
         try:
-            import yt_dlp
-            yt_dlp_version = yt_dlp.version.__version__
+            from yt_dlp.version import __version__ as yt_dlp_version_value
+            yt_dlp_version = yt_dlp_version_value
         except Exception:
-            yt_dlp_version = "unknown"
+            pass
 
         ordered = sorted(
             self._tasks.values(),
-            key=lambda t: t.started_at or 0.0,
+            key=lambda t: t.created_at or t.started_at or 0.0,
             reverse=True,
         )
         serialized = [t.to_dict() for t in ordered]
@@ -369,16 +469,48 @@ class DownloadManager:
             }
         ).decode()
 
-    async def broadcast(self) -> None:
+    async def _send_broadcast(self) -> None:
         if not self._clients:
             return
-        text = self.payload()
-        # Make a copy to prevent mutation during iteration
-        for c in list(self._clients):
-            try:
-                await c.send_text(text)
-            except Exception:  # noqa: BLE001
-                self.remove_client(c)
+        async with self._broadcast_lock:
+            if not self._clients:
+                return
+            self._last_broadcast_at = time.monotonic()
+            text = self.payload()
+            # Make a copy to prevent mutation during iteration
+            for c in list(self._clients):
+                try:
+                    await c.send_text(text)
+                except Exception:  # noqa: BLE001
+                    self.remove_client(c)
+
+    async def _delayed_broadcast(self, delay: float) -> None:
+        try:
+            await asyncio.sleep(max(0.0, delay))
+            await self._send_broadcast()
+        finally:
+            self._broadcast_task = None
+
+    async def broadcast(self, force: bool = False) -> None:
+        if not self._clients:
+            return
+        now = time.monotonic()
+        elapsed = now - self._last_broadcast_at
+        if force:
+            if self._broadcast_task and not self._broadcast_task.done():
+                self._broadcast_task.cancel()
+                self._broadcast_task = None
+            await self._send_broadcast()
+            return
+
+        if elapsed >= _BROADCAST_INTERVAL:
+            await self._send_broadcast()
+            return
+
+        if self._broadcast_task is None or self._broadcast_task.done():
+            self._broadcast_task = asyncio.create_task(
+                self._delayed_broadcast(_BROADCAST_INTERVAL - elapsed)
+            )
 
 
     async def _run_task(self, task: DownloadTask) -> None:
@@ -390,13 +522,13 @@ class DownloadManager:
         assert self._loop is not None
         task._is_running = True
         task.update(status=TaskStatus.DOWNLOADING, started_at=time.time(), speed=0.0)
-        await self.broadcast()
+        await self.broadcast(force=True)
         self.persist_later()
 
         try:
             downloader = YTDownloader(self.settings, self._loop, self.broadcast)
             opts = downloader.build_opts(task)
-            await self.broadcast()
+            await self.broadcast(force=True)
             await self._loop.run_in_executor(None, downloader.run_download, task, opts)
         except PermissionError as exc:
             task.update(status=TaskStatus.ERROR, error=str(exc))
@@ -427,9 +559,17 @@ class DownloadManager:
             else:
                 task.update(status=TaskStatus.ERROR, error=f"Unexpected: {exc}")
         else:
-            task._hold = False
-            task._cancel.clear()
-            task.update(status=TaskStatus.COMPLETED, progress=100.0)
+            if task._hold:
+                task._hold = False
+                task._cancel.clear()
+                task.update(status=TaskStatus.PAUSED, speed=0.0, eta=0.0)
+            elif task._cancel.is_set():
+                task._cancel.clear()
+                task.update(status=TaskStatus.CANCELLED)
+            else:
+                task._hold = False
+                task._cancel.clear()
+                task.update(status=TaskStatus.COMPLETED, progress=100.0)
 
     # ---- client connections ---------------------------------------------
 
@@ -495,7 +635,7 @@ class DownloadManager:
         save_settings(self.settings)
         if updates.get("max_concurrent_downloads", previous) != previous:
             self.set_concurrency(self.settings.max_concurrent_downloads)
-        await self.broadcast()
+        await self.broadcast(force=True)
         return self.settings.model_dump()
 
     async def _a_get_health(self, _client: Client, _payload: JsonObj) -> JsonObj:
@@ -522,7 +662,11 @@ class DownloadManager:
 
         if url.startswith(("http://", "https://")):
             try:
-                metadata = await probe_url_metadata(url, headers)
+                metadata = self._get_cached_probe(url, headers)
+                if metadata is None:
+                    metadata = await probe_url_metadata(url, headers)
+                    if metadata:
+                        self._remember_probe(url, headers, metadata)
                 if metadata:
                     is_stream = metadata["is_stream"]
                     if is_stream:
@@ -532,9 +676,9 @@ class DownloadManager:
                         filesize = metadata["filesize"]
                         extraction_method = "direct"
                         info = {
-                            "title": filename,
+                            "title": sanitise_title(filename, url, page_title, prefer_page=False),
                             "duration": None,
-                            "uploader": "Direct Link",
+                            "uploader": "Direct File",
                             "thumbnail": None,
                             "formats": [
                                 {
@@ -554,9 +698,14 @@ class DownloadManager:
         if info is None:
             extraction_method = "yt-dlp"
             try:
-                info = await loop.run_in_executor(
-                    None, extract_with_fallback, url, build_probe_opts(self.settings, headers)
-                )
+                from engine.cookies import cookies_context
+                with cookies_context(headers, url) as cookie_file:
+                    opts = build_probe_opts(self.settings, headers)
+                    if cookie_file:
+                        opts["cookiefile"] = str(cookie_file)
+                    info = await loop.run_in_executor(
+                        None, extract_with_cookie_fallback, url, opts, self.settings
+                    )
             except Exception:
                 if not url.startswith(("http://", "https://")):
                     raise
@@ -698,7 +847,11 @@ class DownloadManager:
 
         if not is_stream and (not est or est == 0 or not filename) and url.startswith(("http://", "https://")):
             try:
-                metadata = await probe_url_metadata(url, headers)
+                metadata = self._get_cached_probe(url, headers)
+                if metadata is None:
+                    metadata = await probe_url_metadata(url, headers)
+                    if metadata:
+                        self._remember_probe(url, headers, metadata)
                 if metadata:
                     if not filename:
                         filename = metadata["filename"]
@@ -726,7 +879,7 @@ class DownloadManager:
         else:
             prefer_metadata_title = is_stream or payload.get("is_video", True)
             if filename and not prefer_metadata_title:
-                title = Path(filename).stem
+                title = sanitise_title(filename, url, payload_page_title, prefer_page=False)
                 has_custom_title = True
             else:
                 has_custom_title = False
@@ -739,17 +892,23 @@ class DownloadManager:
                 )
 
         # Resolve target directory
+        payload_category = payload.get("category")
+        category_path = (
+            self.settings.categories.get(payload_category)
+            if isinstance(payload_category, str)
+            else None
+        )
         target_dir = Path(
             payload.get("custom_path")
-            or self.settings.categories.get(payload.get("category"))
+            or category_path
             or self.settings.default_download_path
         ).resolve()
 
-        # Collision Check: Same URL, title, or filename on disk (auto-increment name)
+        # Collision Check: Same title, or filename on disk (auto-increment name)
         base_title = title
         title_counter = 1
         collided = False
-        while any(t.url == url or t.title == title for t in self._tasks.values()):
+        while any(t.title == title for t in self._tasks.values()):
             title = f"{base_title} ({title_counter})"
             title_counter += 1
             collided = True
@@ -761,7 +920,7 @@ class DownloadManager:
             stem = Path(filename).stem
             ext = Path(filename).suffix
             file_counter = 1
-            while any(t.url == url or t.filename == filename for t in self._tasks.values()) or (target_dir / filename).exists():
+            while any(t.filename == filename for t in self._tasks.values()) or (target_dir / filename).exists():
                 filename = f"{stem} ({file_counter}){ext}"
                 file_counter += 1
 
@@ -779,16 +938,20 @@ class DownloadManager:
             title=title,
             has_custom_title=has_custom_title,
             total_bytes=int(est) if isinstance(est, (int, float)) else 0,
+            created_at=time.time(),
         )
         task._in_queue = True
         self._add_task(task)
         await self._queue.put(task)
-        await self.broadcast()
+        await self.broadcast(force=True)
         self.persist_later()
         return {"task_id": task.task_id, "status": task.status}
 
     async def _a_cancel(self, _client: Client, payload: JsonObj) -> JsonObj:
-        task = self._require_task(payload.get("task_id"))
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, str):
+            raise ValueError("Task ID is required")
+        task = self._require_task(task_id)
         task._hold = False
         task._cancel.set()
         task.update(status=TaskStatus.CANCELLED, speed=0.0, eta=0.0)
@@ -796,23 +959,29 @@ class DownloadManager:
             await asyncio.get_running_loop().run_in_executor(
                 None, cleanup_task_files, task, self.settings
             )
-        await self.broadcast()
+        await self.broadcast(force=True)
         self.persist_later()
         return {"task_id": task.task_id, "status": task.status}
 
     async def _a_pause(self, _client: Client, payload: JsonObj) -> JsonObj:
-        task = self._require_task(payload.get("task_id"))
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, str):
+            raise ValueError("Task ID is required")
+        task = self._require_task(task_id)
         if task.status == TaskStatus.QUEUED or task.status in _ACTIVE_STATES:
             if task._is_running:
                 task._hold = True
                 task._cancel.set()
             task.update(status=TaskStatus.PAUSED, speed=0.0, eta=0.0)
-        await self.broadcast()
+        await self.broadcast(force=True)
         self.persist_later()
         return {"task_id": task.task_id, "status": task.status}
 
     async def _a_resume(self, _client: Client, payload: JsonObj) -> JsonObj:
-        task = self._require_task(payload.get("task_id"))
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, str):
+            raise ValueError("Task ID is required")
+        task = self._require_task(task_id)
         terminal = task.status in (
             TaskStatus.CANCELLED,
             TaskStatus.ERROR,
@@ -827,23 +996,33 @@ class DownloadManager:
                 downloaded_bytes=0,
                 fragment_index=None,
                 fragment_count=None,
+                prev_parts_bytes=0,
+                final_path="",
             )
         will_run = (task._task is not None and not task._task.done()) or task._in_queue
         if not will_run:
             task._in_queue = True
             await self._queue.put(task)
-        await self.broadcast()
+        await self.broadcast(force=True)
         self.persist_later()
         return {"task_id": task.task_id, "status": task.status}
 
     async def _a_reveal(self, _client: Client, payload: JsonObj) -> JsonObj:
-        task = self._require_task(payload.get("task_id"))
-        path = task.final_path or task.filename
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, str):
+            raise ValueError("Task ID is required")
+        task = self._require_task(task_id)
+        category_path = self.settings.categories.get(task.category) if task.category else None
+        path = task.final_path or (
+            str(Path(task.custom_path or category_path or self.settings.default_download_path).resolve() / task.filename)
+            if task.filename
+            else ""
+        )
         select = bool(path and os.path.exists(path))
         if not select:
             path = (
                 task.custom_path
-                or self.settings.categories.get(task.category)
+                or category_path
                 or self.settings.default_download_path
             )
             if not path or not os.path.exists(path):
@@ -855,6 +1034,8 @@ class DownloadManager:
 
     async def _a_delete(self, _client: Client, payload: JsonObj) -> JsonObj:
         task_id = payload.get("task_id")
+        if not isinstance(task_id, str):
+            raise ValueError("Task ID is required")
         task = self._require_task(task_id)
         delete_file = bool(payload.get("delete_file", False))
 
@@ -867,11 +1048,20 @@ class DownloadManager:
             
             if delete_file:
                 def _delete_files():
-                    for fp in (task.final_path, task.filename):
-                        if not fp:
-                            continue
+                    category_path = self.settings.categories.get(task.category) if task.category else None
+                    target_dir = Path(
+                        task.custom_path
+                        or category_path
+                        or self.settings.default_download_path
+                    ).resolve()
+                    candidate_paths = []
+                    if task.final_path:
+                        candidate_paths.append(Path(task.final_path))
+                    if task.filename:
+                        candidate_paths.append(target_dir / task.filename)
+                    for fp in candidate_paths:
                         try:
-                            p = Path(fp)
+                            p = fp.resolve()
                             if p.is_dir():
                                 shutil.rmtree(p)
                             elif p.exists():
@@ -881,17 +1071,19 @@ class DownloadManager:
                 await loop.run_in_executor(None, _delete_files)
 
         self._remove_task(task_id)
-        await self.broadcast()
+        await self.broadcast(force=True)
         self.persist_later()
         return {"deleted": task_id}
 
     async def _worker_dispatcher(self) -> None:
+        worker_event = self._worker_sem_event
+        assert worker_event is not None
         try:
             while True:
                 try:
                     while self._active_count() >= self.settings.max_concurrent_downloads:
-                        await self._worker_sem_event.wait()
-                        self._worker_sem_event.clear()
+                        await worker_event.wait()
+                        worker_event.clear()
 
                     task = await self._queue.get()
 
@@ -902,8 +1094,8 @@ class DownloadManager:
                         continue
 
                     while self._active_count() >= self.settings.max_concurrent_downloads:
-                        await self._worker_sem_event.wait()
-                        self._worker_sem_event.clear()
+                        await worker_event.wait()
+                        worker_event.clear()
 
                     task._is_running = True
                     task._in_queue = False
@@ -920,6 +1112,8 @@ class DownloadManager:
             pass
 
     async def _run_concurrent_worker(self, task: DownloadTask) -> None:
+        loop = self._loop
+        assert loop is not None
         task._task = asyncio.current_task()
         try:
             await self._run_task(task)
@@ -934,8 +1128,6 @@ class DownloadManager:
             if not self._shutting_down:
                 should_cleanup = task.status not in (TaskStatus.PAUSED,)
                 if should_cleanup:
-                    await self._loop.run_in_executor(
-                        None, cleanup_task_files, task, self.settings
-                    )
-                await self.broadcast()
+                    await loop.run_in_executor(None, cleanup_task_files, task, self.settings)
+                await self.broadcast(force=True)
                 self.persist_later()

@@ -16,20 +16,6 @@ class TaskStatus(StrEnum):
     CANCELLED = "cancelled"
     PAUSED = "paused"
 
-
-_ACTIVE_STATES = frozenset(
-    {
-        TaskStatus.DOWNLOADING,
-        TaskStatus.STITCHING,
-        TaskStatus.EMBEDDING,
-        TaskStatus.FINALIZING,
-    }
-)
-
-# Broadcast throttle interval (seconds).
-_BROADCAST_INTERVAL = 0.1
-
-
 @dataclass
 class DownloadTask:
     task_id: str
@@ -49,6 +35,7 @@ class DownloadTask:
     error: str = ""
     started_at: float = 0.0
     finished_at: float = 0.0
+    created_at: float = 0.0
     is_video: bool = True
     page_title: str | None = None
     is_stream: bool = False

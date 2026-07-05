@@ -8,8 +8,8 @@
  *
  * All backend traffic is routed through the background service worker (avoids
  * mixed-content / CORS issues with the localhost engine). Long-running probes
- * open a "keepalive" Port so the MV3 service worker isn't terminated mid-call.
  */
+
 (() => {
   "use strict";
   if (window.__DOWNLOADANYTHING_INJECTED__) return;
@@ -20,7 +20,7 @@
   const escapeHtml = (value) =>
     String(value ?? "").replace(
       /[&<>"']/g,
-      (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]),
+      (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]),
     );
 
   const el = (tag, attrs = {}, ...children) => {
@@ -71,7 +71,7 @@
     }
   };
 
-  const sendToBackground = (type, payload = {}, timeoutMs = 100_000) =>
+  const sendToBackground = (type, payload = {}, timeoutMs = BACKGROUND_REQUEST_TIMEOUT_MS) =>
     new Promise((resolve) => {
       let done = false;
       const finish = (value) => {
@@ -116,11 +116,19 @@
   /* ── Settings cache ──────────────────────────────────────────────────── */
 
   let cachedSettings = null;
+  let lastSettingsFetchTime = 0;
   const fetchSettings = async () => {
-    if (cachedSettings) return cachedSettings;
+    const now = Date.now();
+    if (cachedSettings && (now - lastSettingsFetchTime < SETTINGS_CACHE_TTL)) {
+      return cachedSettings;
+    }
     const res = await sendToBackground("GET_SETTINGS");
-    cachedSettings = res?.ok ? res.data : { categories: {} };
-    return cachedSettings;
+    if (res?.ok && res.data) {
+      cachedSettings = res.data;
+      lastSettingsFetchTime = now;
+      return cachedSettings;
+    }
+    return cachedSettings || { categories: {} };
   };
 
   /* ── Media scanning (shadow-DOM aware) ───────────────────────────────── */
@@ -128,7 +136,6 @@
   const findAllMedia = (root = document) => {
     if (!root) return [];
     const found = [...(root.querySelectorAll?.("video, audio") || [])];
-    // Restrict Shadow DOM checking to custom components or elements matching player patterns
     const shadowHosts = root.querySelectorAll?.("[class*='player'], [id*='player'], :not(:defined), shaka-video-container, video-js") || [];
     for (const node of shadowHosts) {
       if (node.shadowRoot) {
@@ -144,63 +151,84 @@
 
   /* ── Title extraction ────────────────────────────────────────────────── */
 
-  const TITLE_SUFFIXES = [
-    "YouTube", "Twitch", "Vimeo", "Netflix", "Disney+", "TikTok", "Twitter",
-    "X", "Facebook", "Instagram", "Reddit", "Dailymotion", "Rumble", "Bilibili",
-  ];
-  function getMediaTitle(mediaEl) {
-    const firstAttr = (selector, attr) => document.querySelector(selector)?.getAttribute(attr)?.trim() || "";
-
-    // 1. OpenGraph / Meta title content (usually extremely clean and accurate for media)
-    let title = firstAttr("meta[property='og:title']", "content") ||
-                firstAttr("meta[name='twitter:title']", "content");
-
-    // 2. Main Page Heading (H1) - usually what the user sees on screen
-    if (!title) {
-      const h1s = Array.from(document.querySelectorAll("h1"));
-      for (const h1 of h1s) {
-        const text = h1.textContent?.trim();
-        if (text && h1.offsetWidth > 0 && h1.offsetHeight > 0) {
-          title = text;
-          break;
-        }
-      }
+  const cleanTitleCandidate = (value) => {
+    if (!value) return "";
+    let text = String(value).trim();
+    text = text.split("?")[0].split("#")[0].trim();
+    text = text.split(/[/\\]/).pop().trim();
+    const extMatch = text.match(/^(.*)\.([a-z0-9]{2,5})$/i);
+    if (extMatch && !GENERIC_TITLES.has(extMatch[1].toLowerCase())) {
+      text = extMatch[1].trim();
     }
 
-    // 3. Media Element attributes
-    if (!title && mediaEl) {
-      title = mediaEl.getAttribute("title")?.trim() || mediaEl.getAttribute("aria-label")?.trim();
-    }
-
-    // 4. HTML document title (cleaned)
-    if (!title) {
-      title = (document.title || "").trim();
-    }
-
-    if (!title) {
-      return "Unknown media";
-    }
-
-    // Clean common site suffixes (e.g. " - YouTube", " | Twitch")
-    const lowered = title.toLowerCase();
+    const lowered = text.toLowerCase();
     for (const suffix of TITLE_SUFFIXES) {
-      const token = ` - ${suffix}`.toLowerCase();
-      if (lowered.endsWith(token)) {
-        title = title.slice(0, -token.length).trim();
+      const dashToken = ` - ${suffix}`.toLowerCase();
+      if (lowered.endsWith(dashToken)) {
+        text = text.slice(0, -dashToken.length).trim();
         break;
       }
       const pipeToken = ` | ${suffix}`.toLowerCase();
       if (lowered.endsWith(pipeToken)) {
-        title = title.slice(0, -pipeToken.length).trim();
+        text = text.slice(0, -pipeToken.length).trim();
         break;
       }
     }
-    title = title
-      .replace(/\s*[-|·•–—]\s*(YouTube|Vimeo|Twitch|Dailymotion|Twitter|X|Facebook|Instagram|TikTok|Reddit|Bilibili|Rumble|Odysee|PeerTube|Niconico|SoundCloud|Spotify|Netflix|Prime Video|Disney\+|Apple TV)\s*$/i, "")
-      .trim();
 
-    return title || "Unknown media";
-  }
+    return text.replace(/\s*[-|·•–—]\s*(YouTube|Vimeo|Twitch|Dailymotion|Twitter|X|Facebook|Instagram|TikTok|Reddit|Bilibili|Rumble|Odysee|PeerTube|Niconico|SoundCloud|Spotify|Netflix|Prime Video|Disney\+|Apple TV)\s*$/i, "").trim();
+  };
+
+  const isGenericTitleCandidate = (value) => {
+    const candidate = cleanTitleCandidate(value).toLowerCase();
+    if (!candidate) return true;
+    const bare = candidate.replace(/\.[a-z0-9]{2,5}$/i, "").trim();
+    return GENERIC_TITLES.has(candidate) || GENERIC_TITLES.has(bare);
+  };
+
+  const getFirstText = (...values) => {
+    for (const value of values) {
+      const cleaned = cleanTitleCandidate(value);
+      if (cleaned && !isGenericTitleCandidate(cleaned)) {
+        return cleaned;
+      }
+    }
+    return "";
+  };
+
+  const getMediaTitle = (mediaEl) => {
+    const metaTitle = getFirstText(
+      document.querySelector("meta[property='og:title']")?.getAttribute("content"),
+      document.querySelector("meta[name='twitter:title']")?.getAttribute("content"),
+    );
+    if (metaTitle) return metaTitle;
+
+    const h1s = Array.from(document.querySelectorAll("h1"));
+    for (const h1 of h1s) {
+      const text = h1.textContent?.trim();
+      if (text && h1.offsetWidth > 0 && h1.offsetHeight > 0) {
+        const cleaned = cleanTitleCandidate(text);
+        if (cleaned && !isGenericTitleCandidate(cleaned)) {
+          return cleaned;
+        }
+      }
+    }
+
+    if (mediaEl) {
+      const attrTitle = getFirstText(
+        mediaEl.getAttribute("title"),
+        mediaEl.getAttribute("aria-label"),
+        mediaEl.getAttribute("data-title"),
+      );
+      if (attrTitle) return attrTitle;
+    }
+
+    const documentTitle = cleanTitleCandidate(document.title || "");
+    if (documentTitle && !isGenericTitleCandidate(documentTitle)) {
+      return documentTitle;
+    }
+
+    return window.location.hostname || "Unknown media";
+  };
 
   /* ── Overlay buttons ─────────────────────────────────────────────────── */
 
@@ -250,11 +278,24 @@
       overlays.forEach((overlay) => overlay.updateVisibility()),
     );
 
+    let viewportFrame = 0;
+    const scheduleViewportUpdate = () => {
+      if (viewportFrame) return;
+      viewportFrame = requestAnimationFrame(() => {
+        viewportFrame = 0;
+        overlays.forEach((overlay) => overlay.updatePosition());
+      });
+    };
+
+    window.addEventListener("scroll", scheduleViewportUpdate, { passive: true, capture: true });
+    window.addEventListener("resize", scheduleViewportUpdate, { passive: true });
+    document.addEventListener("transitionend", scheduleViewportUpdate, true);
+
     // Drives detached overlay cleanup (instantly) and debounced rescanning (only when elements are added)
     let scanTimer = null;
     new MutationObserver((mutations) => {
       for (const overlay of overlays.values()) {
-        if (!overlay.mediaEl.isConnected || !overlay.container.isConnected) {
+        if (!overlay.mediaEl.isConnected || !overlay.host || !overlay.host.isConnected) {
           overlay.unmount();
           overlays.delete(overlay.mediaEl);
         }
@@ -294,14 +335,65 @@
       });
     }
 
-    const container = findPlayerContainer(mediaEl);
     const state = {
       mediaEl,
-      container,
       host: null,
-      destroyTimeout: null,
-      isMouseOverContainer: false,
       isMouseOverHost: false,
+      isIntersecting: false,
+      intersectionObserver: null,
+      resizeObserver: null,
+      mediaObserver: null,
+
+      getAnchorRect() {
+        if (!this.mediaEl.isConnected) return null;
+        const rect = this.mediaEl.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        return rect;
+      },
+
+      updatePosition() {
+        if (!this.host) return;
+        const rect = this.getAnchorRect();
+        if (!rect) {
+          this.host.style.opacity = "0";
+          this.host.style.transform = "translate3d(-9999px, -9999px, 0)";
+          return;
+        }
+
+        const buttonWidth = 112;
+        const buttonHeight = 34;
+        const inset = 10;
+        const gap = 10;
+
+        const scrollX = window.scrollX || window.pageXOffset || 0;
+        const scrollY = window.scrollY || window.pageYOffset || 0;
+        const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+
+        const videoLeft = scrollX + rect.left;
+        const videoTop = scrollY + rect.top;
+        const videoRight = scrollX + rect.right;
+        const videoBottom = scrollY + rect.bottom;
+
+        // Position relative to the visible area of the video inside viewport
+        const visibleTop = Math.max(videoTop, scrollY);
+        const visibleBottom = Math.min(videoBottom, scrollY + viewportHeight);
+        const visibleRight = Math.min(videoRight, scrollX + viewportWidth);
+
+        let left = visibleRight - buttonWidth - inset;
+        if (left < videoLeft + inset) {
+          left = Math.max(videoLeft + inset, videoLeft);
+        }
+
+        let top = visibleTop + inset;
+        if (top + buttonHeight > videoBottom - inset) {
+          top = Math.max(videoTop + inset, videoBottom - buttonHeight - inset);
+        }
+
+        this.host.style.transform = `translate3d(${Math.round(left)}px, ${Math.round(top)}px, 0)`;
+        this.host.style.setProperty("--da-overlay-width", `${buttonWidth}px`);
+        this.host.style.setProperty("--da-overlay-gap", `${gap}px`);
+      },
 
       async mount() {
         if (this.host) return;
@@ -312,16 +404,11 @@
         }
 
         bindSharedListeners();
-        if (this.container !== document.body && this.container !== document.documentElement) {
-          if (window.getComputedStyle(this.container).position === "static") {
-            this.container.style.position = "relative";
-          }
-        }
-
+        const mountRoot = document.body || document.documentElement;
         const host = el("div", {
           style: [
-            "position:absolute", "top:10px", "left:10px", "z-index:2147483647",
-            "pointer-events:auto", "opacity:0",
+            "position:absolute", "top:0", "left:0", "z-index:2147483647",
+            "pointer-events:none", "opacity:0",
             "font-family:Inter,Segoe UI,-apple-system,sans-serif",
             "transition:opacity .2s ease-in-out",
           ].join(";"),
@@ -330,31 +417,29 @@
         const shadow = host.attachShadow({ mode: "closed" });
         shadow.innerHTML = `
           <style>
-            :host { all:initial; display:block; }
-            .wrap { position:relative; display:inline-block; }
+            :host { all:initial; display:block; pointer-events:none; }
+            .wrap { position:relative; display:inline-block; pointer-events:auto; }
             .btn {
-              display:flex; align-items:center; justify-content:center; gap:6px; width:108px; height:32px;
+              display:flex; align-items:center; justify-content:center; gap:6px; width:112px; height:34px;
               cursor:pointer; box-sizing:border-box;
               background:rgba(10,10,10,.85); color:#fff; font-size:12px; font-weight:600;
               border:1px solid rgba(255,255,255,.15); border-radius:8px;
               backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
-              box-shadow:0 4px 16px rgba(0,0,0,.6), inset 0 0 0 1px rgba(255,255,255,.05);
-              transition:transform .2s cubic-bezier(.16,1,.3,1), background .2s, border-color .2s, box-shadow .2s;
+              transition:transform .2s cubic-bezier(.16,1,.3,1), background .2s, border-color .2s;
             }
             .btn:hover {
               transform:translateY(-1.5px);
               background:rgba(30,30,30,.95);
               border-color:rgba(255,255,255,.45);
-              box-shadow:0 8px 24px rgba(0,0,0,.8), inset 0 0 0 1px rgba(255,255,255,.15);
             }
             .btn:active { transform:scale(.96); }
             .btn svg { flex-shrink:0; }
             .tip {
-              position:absolute; top:calc(100% + 8px); left:0; transform:translateY(4px);
+              position:absolute; top:calc(100% + 8px); right:0; transform:translateY(4px);
               background:rgba(10,10,10,.95); color:#f0f0f0; font-size:11px; font-weight:500;
               line-height:1.5; padding:7px 11px; border-radius:7px;
               border:1px solid rgba(255,255,255,.15); max-width:300px; min-width:120px;
-              box-shadow:0 8px 24px rgba(0,0,0,.7); backdrop-filter:blur(12px);
+              backdrop-filter:blur(12px);
               pointer-events:none; opacity:0; transition:opacity .18s, transform .18s;
               word-break:break-word; overflow-wrap:break-word;
             }
@@ -369,57 +454,57 @@
           </div>`;
 
         const tooltip = shadow.querySelector(".tip");
+        const wrap = shadow.querySelector(".wrap");
         tooltip.textContent = getMediaTitle(this.mediaEl);
-        shadow.querySelector(".btn").addEventListener("click", (event) => {
+        const button = shadow.querySelector(".btn");
+        button.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
           openExtractor(this.mediaEl);
         });
-        shadow.querySelector(".wrap").addEventListener("mouseenter", () => {
+        wrap.addEventListener("mouseenter", () => {
           tooltip.textContent = getMediaTitle(this.mediaEl);
-        });
-
-        host.addEventListener("mouseenter", () => {
           this.isMouseOverHost = true;
           this.updateVisibility();
         });
-        host.addEventListener("mouseleave", () => {
+        wrap.addEventListener("mouseleave", () => {
           this.isMouseOverHost = false;
-          this.queueDestroy();
+          this.updateVisibility();
         });
+
+        this.intersectionObserver = new IntersectionObserver(
+          ([entry]) => {
+            this.isIntersecting = !!entry?.isIntersecting;
+            this.updatePosition();
+            this.updateVisibility();
+          },
+          { threshold: 0.01 },
+        );
+        this.intersectionObserver.observe(this.mediaEl);
+
+        this.resizeObserver = new ResizeObserver(() => {
+          this.updatePosition();
+        });
+        this.resizeObserver.observe(this.mediaEl);
 
         this.host = host;
-        const targetContainer = this.container === document.body ? (this.mediaEl.parentElement || document.body) : this.container;
-        if (targetContainer !== document.body && targetContainer !== document.documentElement) {
-          if (window.getComputedStyle(targetContainer).position === "static") {
-            targetContainer.style.position = "relative";
-          }
-        }
-        targetContainer.appendChild(host);
+        mountRoot.appendChild(host);
 
-        requestAnimationFrame(() => {
-          if (this.host) this.updateVisibility();
-        });
+        this.updatePosition();
+        this.updateVisibility();
       },
 
       updateVisibility() {
         if (!this.host) return;
-        const visible = !isFullscreen() && (this.isMouseOverContainer || this.isMouseOverHost);
+        const visible = !isFullscreen() && this.isIntersecting && this.isMouseOverHost;
         this.host.style.opacity = visible ? "1" : "0";
         this.host.style.pointerEvents = visible ? "auto" : "none";
       },
 
-      queueDestroy() {
-        if (this.destroyTimeout) clearTimeout(this.destroyTimeout);
-        this.destroyTimeout = setTimeout(() => {
-          if (!this.isMouseOverContainer && !this.isMouseOverHost) {
-            this.unmount();
-          }
-        }, 300);
-      },
-
       unmount() {
-        if (this.destroyTimeout) clearTimeout(this.destroyTimeout);
+        if (this.intersectionObserver) this.intersectionObserver.disconnect();
+        if (this.resizeObserver) this.resizeObserver.disconnect();
+        if (this.mediaObserver) this.mediaObserver.disconnect();
         if (this.host) {
           this.host.remove();
           this.host = null;
@@ -427,15 +512,59 @@
       }
     };
 
-    container.addEventListener("mouseenter", () => {
-      state.isMouseOverContainer = true;
-      if (state.destroyTimeout) clearTimeout(state.destroyTimeout);
-      state.mount();
+    // Watch attributes and bind state actions immediately
+    state.mediaObserver = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.attributeName === "src") {
+          if (!state.host) {
+            state.mount();
+          } else {
+            state.updatePosition();
+          }
+        }
+      }
     });
-    container.addEventListener("mouseleave", () => {
-      state.isMouseOverContainer = false;
-      state.queueDestroy();
-    });
+    state.mediaObserver.observe(mediaEl, { attributes: true, attributeFilter: ["src"] });
+
+    const triggerMount = () => {
+      if (!state.host) {
+        state.mount();
+      } else {
+        state.updatePosition();
+      }
+    };
+
+    mediaEl.addEventListener("pointerenter", () => {
+      state.isMouseOverHost = true;
+      if (!state.host) {
+        state.mount();
+      } else {
+        state.updateVisibility();
+      }
+    }, { passive: true });
+
+    mediaEl.addEventListener("pointerleave", () => {
+      state.isMouseOverHost = false;
+      state.updateVisibility();
+    }, { passive: true });
+
+    mediaEl.addEventListener("pointermove", () => {
+      state.isMouseOverHost = true;
+      if (!state.host) {
+        state.mount();
+      } else {
+        state.updateVisibility();
+        state.updatePosition();
+      }
+    }, { passive: true });
+
+    mediaEl.addEventListener("play", triggerMount, { passive: true });
+    mediaEl.addEventListener("playing", triggerMount, { passive: true });
+    mediaEl.addEventListener("loadedmetadata", triggerMount, { passive: true });
+    mediaEl.addEventListener("loadeddata", triggerMount, { passive: true });
+
+    // Initial mount check (in case it is already downloadable)
+    state.mount();
 
     overlays.set(mediaEl, state);
   }
@@ -450,7 +579,7 @@
       font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; box-sizing:border-box;
     }
     .da-dialog {
-      width:480px; max-width:92vw; background:rgba(10,10,10,.95);
+      width:max-content; min-width:480px; max-width:min(640px, 92vw); background:rgba(10,10,10,.95);
       border:1px solid rgba(255,255,255,.1); border-radius:16px;
       box-shadow:0 24px 64px rgba(0,0,0,.9), inset 0 0 0 1px rgba(255,255,255,.05);
       color:#f5f5f7; padding:24px; display:flex; flex-direction:column; gap:16px;
@@ -486,11 +615,13 @@
       border-radius:8px; cursor:pointer; font-size:13px; display:flex; align-items:center;
       justify-content:space-between; color:#e2e2ec; font-variant-numeric:tabular-nums;
       transition:transform .2s, background-color .2s, border-color .2s, color .2s;
+      white-space:nowrap; gap:24px;
     }
     .da-row:hover { background:rgba(255,255,255,.05); border-color:rgba(255,255,255,.2); color:#fff; }
     .da-row:active { transform:scale(.98); }
     .da-row.selected { border-color:#fff !important; background:rgba(255,255,255,.08) !important; }
-    .da-row small { color:#8e8e9c; font-size:11px; margin-left:6px; }
+    .da-row strong { white-space:nowrap; flex-shrink:0; }
+    .da-row small { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex-shrink:1; margin-left:auto; color:#8e8e9c; font-size:11px; }
     .da-sep { font-size:9.5px; color:#8e8e9c; text-transform:uppercase; letter-spacing:1px; padding:12px 0 4px; font-weight:600; }
     .da-field { display:flex; flex-direction:column; gap:6px; }
     .da-field label { font-size:10px; color:#8e8e9c; text-transform:uppercase; letter-spacing:.8px; font-weight:600; }
@@ -499,7 +630,7 @@
       padding:11px 16px; border-radius:8px; font-size:13px; outline:none; font-family:inherit;
       width:100%; box-sizing:border-box; transition:border-color .2s, background-color .2s, box-shadow .2s;
     }
-    .da-input:focus, .da-select:focus { border-color:rgba(255,255,255,.3); background:rgba(255,255,255,.08); box-shadow:0 0 0 3px rgba(255,255,255,.12); }
+    .da-input:focus, .da-select:focus { border-color:rgba(255,255,255,.3); background:rgba(255,255,255,.08); box-shadow:0 0 0 1px rgba(255,255,255,.4); }
     .da-actions { display:flex; justify-content:flex-end; gap:8px; }
     .da-btn {
       font-family:inherit; font-size:12.5px; font-weight:600; padding:11px 18px; border-radius:8px;
@@ -513,7 +644,7 @@
     .da-btn-soft { background:rgba(255,255,255,.08); color:#f5f5f7; border:1px solid rgba(255,255,255,.15); }
     .da-btn-soft:hover { background:rgba(255,255,255,.15); color:#fff; }
     .da-btn-solid { background:#fff; color:#000; border:1px solid #fff; }
-    .da-btn-solid:hover { background:#e5e5e7; border-color:#e5e5e7; box-shadow:0 6px 18px rgba(255,255,255,.15); }
+    .da-btn-solid:hover { background:#e5e5e7; border-color:#e5e5e7; }
   `;
 
   function mountDialog({ titleText }) {
@@ -590,8 +721,6 @@
 
   /* ── Tiered probe ────────────────────────────────────────────────────── */
 
-  const STREAM_PRIORITY = /\.(m3u8|mpd)(?:\?|#|$)/i;
-
   async function runProbe({ mediaEl, overrideUrl, overrideTitle, setStatus }) {
     return withKeepalive(async () => {
       const sniffed = (
@@ -649,12 +778,6 @@
 
   /* ── Extractor modal ─────────────────────────────────────────────────── */
 
-  const TIER_STYLES = {
-    native: { bg: "rgba(255,255,255,.08)", color: "#ffffff", label: "⚡ yt-dlp Native" },
-    stream: { bg: "rgba(48,209,88,.15)", color: "#30d158", label: "📡 Stream (HLS/DASH)" },
-    direct: { bg: "rgba(255,159,10,.15)", color: "#ff9f0a", label: "⬇ Direct Download" },
-  };
-
   let statusEl = null;
   const setStatus = (message) => {
     if (statusEl) statusEl.textContent = message;
@@ -668,7 +791,7 @@
     }
     if (window !== window.top) {
       sendToBackground("SHOW_EXTRACTOR_MODAL_ON_TOP", {
-        url: window.location.href,
+        url: elementSrc || window.location.href,
         mediaSrc: elementSrc,
         mediaTitle: getMediaTitle(mediaEl),
       });
@@ -1067,6 +1190,13 @@
     { capture: true, passive: true },
   );
 
+  const handleToolbarTrigger = () => {
+    const first = findAllMedia(document)[0];
+    if (!first) return { ok: true, found: false };
+    openExtractor(first);
+    return { ok: true, found: true };
+  };
+
   /* ── Inbound messages ────────────────────────────────────────────────── */
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -1079,6 +1209,19 @@
         handleUrlChange();
         sendResponse({ ok: true });
         break;
+      case "STREAM_SNIFFED": {
+        const sniffUrl = message.url;
+        if (sniffUrl && !cachedSniffedStreams.includes(sniffUrl)) {
+          cachedSniffedStreams.push(sniffUrl);
+        }
+        overlays.forEach((overlay) => {
+          if (!overlay.host) {
+            overlay.mount();
+          }
+        });
+        sendResponse({ ok: true });
+        break;
+      }
       case "SHOW_ADD_DOWNLOAD_POPUP":
         openRoutePopup(message.url, message.filename, message.referrer);
         sendResponse({ ok: true });
@@ -1096,9 +1239,7 @@
         break;
       }
       case "TRIGGER_EXTRACT": {
-        const first = findAllMedia(document)[0];
-        openExtractor(first || null);
-        sendResponse({ ok: true });
+        sendResponse(handleToolbarTrigger());
         break;
       }
       default:

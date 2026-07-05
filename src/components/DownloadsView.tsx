@@ -29,6 +29,7 @@ import {
 import type { RowSelectionState, Row } from "@tanstack/react-table";
 import type { Task, Settings } from "../types";
 import { fmtBytes, fmtSpeed, fmtETA } from "../utils/format";
+import { displayTaskFileName, displayTaskTitle, taskSearchText } from "../utils/naming";
 
 interface DownloadsViewProps {
   readonly tasks: readonly Task[];
@@ -96,6 +97,7 @@ export function DownloadsView({
 
   const [, startTransition] = useTransition();
   const contextMenuRef = useRef<HTMLDivElement>(null);
+  const deferredTasks = React.useDeferredValue(tasks);
 
   // Close context menu on click outside
   useEffect(() => {
@@ -128,16 +130,21 @@ export function DownloadsView({
     }
   }, [tasks, rowSelection]);
 
-  // Filtering logic
-  let filteredTasks = tasks;
-  if (searchQuery.trim()) {
-    const query = searchQuery.toLowerCase().trim();
-    filteredTasks = filteredTasks.filter((t) => {
-      const title = (t.title || "").toLowerCase();
-      const url = (t.url || "").toLowerCase();
-      return title.includes(query) || url.includes(query);
+  // Filtering & Sorting logic
+  const filteredTasks = React.useMemo(() => {
+    let list = deferredTasks;
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase().trim();
+      list = deferredTasks.filter((t) => {
+        return taskSearchText(t).includes(query);
+      });
+    }
+    return [...list].sort((a, b) => {
+      const aTime = a.created_at || a.started_at || 0;
+      const bTime = b.created_at || b.started_at || 0;
+      return bTime - aTime;
     });
-  }
+  }, [deferredTasks, searchQuery]);
 
   // Column definitions for TanStack Table
   const columns = React.useMemo(() => [
@@ -181,15 +188,16 @@ export function DownloadsView({
         );
       },
     }),
-    columnHelper.accessor((row) => row.title || row.url, {
+    columnHelper.accessor((row) => displayTaskTitle(row), {
       id: "title",
       header: "Title",
       cell: ({ row }) => {
         const t = row.original;
+        const title = displayTaskTitle(t);
         return (
           <div className="title-cell-container">
             <span className="title-cell-text">
-              {t.title || t.url}
+              {title}
             </span>
           </div>
         );
@@ -385,16 +393,24 @@ export function DownloadsView({
   };
 
   // Bulk actions toolbar display logic
-  const showBulkActions = Object.keys(rowSelection).length > 0;
-  const selectedTasksList = tasks.filter((t) => rowSelection[t.task_id]);
-  const hasActiveSelected = selectedTasksList.some(
-    (t) => t.status === "downloading" || t.status === "queued"
+  const selectedTasksList = React.useMemo(
+    () => deferredTasks.filter((t) => rowSelection[t.task_id]),
+    [deferredTasks, rowSelection]
   );
-  const hasPausedSelected = selectedTasksList.some(
-    (t) =>
-      t.status === "paused" ||
-      t.status === "cancelled" ||
-      t.status === "error"
+  const showBulkActions = selectedTasksList.length > 0;
+  const hasActiveSelected = React.useMemo(
+    () => selectedTasksList.some((t) => t.status === "downloading" || t.status === "queued"),
+    [selectedTasksList]
+  );
+  const hasPausedSelected = React.useMemo(
+    () =>
+      selectedTasksList.some(
+        (t) =>
+          t.status === "paused" ||
+          t.status === "cancelled" ||
+          t.status === "error"
+      ),
+    [selectedTasksList]
   );
   const renderSegments = (t: Task, progressVal: number) => {
     let N = 0;
@@ -451,7 +467,7 @@ export function DownloadsView({
             <input
               type="text"
               id="task-search"
-              placeholder="Search downloads by title or URL..."
+              placeholder="Search downloads by title, file name, or URL..."
               autoComplete="off"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -681,7 +697,7 @@ export function DownloadsView({
             <div className="delete-files-list">
               {deleteModal.taskIds.map((id) => {
                 const task = tasks.find((t) => t.task_id === id);
-                const title = task ? task.title : "Unknown File";
+                  const title = task ? displayTaskTitle(task) : "Unknown File";
                 return (
                   <div key={id} className="delete-files-list-item">
                     <File size={14} />
@@ -726,47 +742,42 @@ export function DownloadsView({
                 navigator.clipboard.writeText(text);
                 showToast(`${label} copied to clipboard`);
               };
+              const displayTitle = displayTaskTitle(task);
+              const fileName = displayTaskFileName(task);
+
+              const statusClass =
+                task.status === "completed"
+                  ? "completed"
+                  : task.status === "error"
+                  ? "error"
+                  : task.status === "paused" || task.status === "cancelled"
+                  ? "paused"
+                  : ["stitching", "embedding", "finalizing"].includes(task.status)
+                  ? "processing"
+                  : "active";
 
               return (
                 <>
                   <div className="properties-header">
                     <h2>
-                      <Info size={18} style={{ color: "var(--info)" }} /> Task Properties
+                      <Info size={20} style={{ color: "var(--white)" }} /> Task Properties
                     </h2>
+                    <p className="properties-subtitle">Detailed transfer metadata and file configuration</p>
                   </div>
 
                   <div className="properties-content">
-                    <div className="title-row">
-                      <span className="property-label">Title</span>
-                      <div className="property-value title-value">
-                        {task.title || "Untitled Download"}
+                    <div className="properties-section-title">Overview</div>
+                    <div className="properties-group highlight-group">
+                      <div className="property-item full-width">
+                        <span className="property-label">filename</span>
+                        <div className="property-value title-value">
+                          {displayTitle}
+                        </div>
                       </div>
                     </div>
 
-                    <div className="properties-grid">
-                      <div className="property-item">
-                        <span className="property-label">Task ID</span>
-                        <div className="property-value">
-                          <code>{task.task_id}</code>
-                          <button
-                            className="ghost-icon-btn"
-                            title="Copy Task ID"
-                            onClick={() => handleCopy(task.task_id, "Task ID")}
-                          >
-                            <Copy size={12} />
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="property-item">
-                        <span className="property-label">Status</span>
-                        <div className="property-value">
-                          <span className={`badge ${task.status.replace(/\s+/g, "-")}`}>
-                            {task.status}
-                          </span>
-                        </div>
-                      </div>
-
+                    <div className="properties-section-title">File & Paths</div>
+                    <div className="properties-group">
                       <div className="property-item full-width">
                         <span className="property-label">Source URL</span>
                         <div className="property-value url-val">
@@ -780,95 +791,6 @@ export function DownloadsView({
                           >
                             <Copy size={12} />
                           </button>
-                        </div>
-                      </div>
-
-                      <div className="property-item">
-                        <span className="property-label">Category</span>
-                        <div className="property-value">{task.category || "Default"}</div>
-                      </div>
-
-                      <div className="property-item">
-                        <span className="property-label">Format ID</span>
-                        <div className="property-value">
-                          <code>{task.format_id || "default"}</code>
-                        </div>
-                      </div>
-
-                      <div className="property-item">
-                        <span className="property-label">Media Type</span>
-                        <div className="property-value">
-                          {task.is_stream ? "Segmented Stream" : task.is_video ? "Video" : "Audio / File"}
-                        </div>
-                      </div>
-
-                      {task.page_title && task.page_title !== task.title && (
-                        <div className="property-item full-width">
-                          <span className="property-label">Original Page Title</span>
-                          <div className="property-value page-title-value">{task.page_title}</div>
-                        </div>
-                      )}
-
-                      {task.started_at && task.started_at > 0 && (
-                        <div className="property-item">
-                          <span className="property-label">Started At</span>
-                          <div className="property-value">
-                            {new Date(task.started_at * 1000).toLocaleString()}
-                          </div>
-                        </div>
-                      )}
-
-                      {task.finished_at && task.finished_at > 0 && (
-                        <div className="property-item">
-                          <span className="property-label">Finished At</span>
-                          <div className="property-value">
-                            {new Date(task.finished_at * 1000).toLocaleString()}
-                          </div>
-                        </div>
-                      )}
-
-                      {task.status === "error" && task.error && (
-                        <div className="property-item full-width error-val">
-                          <span className="property-label">Error Message</span>
-                          <div className="property-value error-message-value">
-                            {task.error}
-                          </div>
-                        </div>
-                      )}
-
-                      {task.status !== "completed" && (
-                        <>
-                          <div className="property-item full-width">
-                            <span className="property-label">Progress</span>
-                            <div className="property-value progress-value-container">
-                              <div className="properties-progress-bar-bg">
-                                <div
-                                  className="properties-progress-bar-fg"
-                                  style={{ width: `${task.progress || 0}%` }}
-                                />
-                              </div>
-                              <span className="progress-percentage">{Math.round(task.progress || 0)}%</span>
-                            </div>
-                          </div>
-
-                          <div className="property-item">
-                            <span className="property-label">Speed</span>
-                            <div className="property-value">{fmtSpeed(task.speed)}</div>
-                          </div>
-
-                          <div className="property-item">
-                            <span className="property-label">ETA</span>
-                            <div className="property-value">{fmtETA(task.eta)}</div>
-                          </div>
-                        </>
-                      )}
-
-                      <div className="property-item">
-                        <span className="property-label">File Size</span>
-                        <div className="property-value">
-                          {task.status === "completed"
-                            ? fmtBytes(task.total_bytes || task.downloaded_bytes)
-                            : `${fmtBytes(task.downloaded_bytes)} of ${fmtBytes(task.total_bytes || 0)}`}
                         </div>
                       </div>
 
@@ -890,6 +812,66 @@ export function DownloadsView({
                         </div>
                       </div>
 
+                      <div className="property-item">
+                        <span className="property-label">Category</span>
+                        <div className="property-value">{task.category || "Default"}</div>
+                      </div>
+
+                      <div className="property-item">
+                        <span className="property-label">Format ID</span>
+                        <div className="property-value">
+                          <code>{task.format_id || "default"}</code>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="properties-section-title">Transfer Metrics</div>
+                    <div className="properties-group">
+                      <div className="property-item">
+                        <span className="property-label">Status</span>
+                        <div className="property-value">
+                          <span className={`badge ${task.status.replace(/\s+/g, "-")}`}>
+                            {task.status}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="property-item">
+                        <span className="property-label">File Size</span>
+                        <div className="property-value">
+                          {task.status === "completed"
+                            ? fmtBytes(task.total_bytes || task.downloaded_bytes)
+                            : `${fmtBytes(task.downloaded_bytes)} of ${fmtBytes(task.total_bytes || 0)}`}
+                        </div>
+                      </div>
+
+                      {task.status !== "completed" && (
+                        <>
+                          <div className="property-item">
+                            <span className="property-label">Speed</span>
+                            <div className="property-value">{fmtSpeed(task.speed)}</div>
+                          </div>
+
+                          <div className="property-item">
+                            <span className="property-label">ETA</span>
+                            <div className="property-value">{fmtETA(task.eta)}</div>
+                          </div>
+
+                          <div className="property-item full-width">
+                            <span className="property-label">Progress</span>
+                            <div className="property-value progress-value-container">
+                              <div className="properties-progress-bar-bg">
+                                <div
+                                  className={`properties-progress-bar-fg ${statusClass}`}
+                                  style={{ width: `${task.progress || 0}%` }}
+                                />
+                              </div>
+                              <span className="progress-percentage">{Math.round(task.progress || 0)}%</span>
+                            </div>
+                          </div>
+                        </>
+                      )}
+
                       {task.fragment_index !== undefined && task.fragment_index !== null && (
                         <div className="property-item">
                           <span className="property-label">Fragments</span>
@@ -897,6 +879,64 @@ export function DownloadsView({
                             {task.fragment_count
                               ? `${task.fragment_index} / ${task.fragment_count}`
                               : `Fragment ${task.fragment_index}`}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="properties-section-title">Metadata</div>
+                    <div className="properties-group">
+                      <div className="property-item">
+                        <span className="property-label">Task ID</span>
+                        <div className="property-value">
+                          <code>{task.task_id}</code>
+                          <button
+                            className="ghost-icon-btn"
+                            title="Copy Task ID"
+                            onClick={() => handleCopy(task.task_id, "Task ID")}
+                          >
+                            <Copy size={12} />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="property-item">
+                        <span className="property-label">Media Type</span>
+                        <div className="property-value">
+                          {task.is_stream ? "Segmented Stream" : task.is_video ? "Video" : "Audio / File"}
+                        </div>
+                      </div>
+
+                      {task.started_at && task.started_at > 0 && (
+                        <div className="property-item">
+                          <span className="property-label">Started At</span>
+                          <div className="property-value">
+                            {new Date(task.started_at * 1000).toLocaleString()}
+                          </div>
+                        </div>
+                      )}
+
+                      {task.finished_at && task.finished_at > 0 && (
+                        <div className="property-item">
+                          <span className="property-label">Finished At</span>
+                          <div className="property-value">
+                            {new Date(task.finished_at * 1000).toLocaleString()}
+                          </div>
+                        </div>
+                      )}
+
+                      {task.page_title && task.page_title !== displayTitle && (
+                        <div className="property-item full-width">
+                          <span className="property-label">Original Page Title</span>
+                          <div className="property-value page-title-value">{task.page_title}</div>
+                        </div>
+                      )}
+
+                      {task.status === "error" && task.error && (
+                        <div className="property-item full-width error-val">
+                          <span className="property-label">Error Message</span>
+                          <div className="property-value error-message-value">
+                            {task.error}
                           </div>
                         </div>
                       )}
