@@ -8,16 +8,6 @@
   "permissions": [
     "core:default",
     "updater:default",
-    "dialog:default",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "args": true,
-          "name": "binaries/main",
-          "sidecar": true
-        }
-      ]
-    }
+    "dialog:default"
   ]
 }

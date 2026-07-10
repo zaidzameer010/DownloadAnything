@@ -1,38 +1,51 @@
 {
   "manifest_version": 3,
-  "name": "DownloadAnything — Media Acquisition Helper",
-  "version": "0.3.0",
-  "description": "Sniff HLS/DASH/MP4 streams and file downloads, overlay acquire buttons, and route them to the local DownloadAnything engine.",
+  "name": "DownloadAnything Media Downloader",
+  "version": "0.4.0",
+  "description": "yt-dlp powered browser integrated media downloader with high-quality codec sorting.",
   "minimum_chrome_version": "116",
-  "incognito": "split",
   "permissions": [
     "activeTab",
-    "contextMenus",
-    "cookies",
-    "downloads",
     "scripting",
     "storage",
     "tabs",
+    "alarms",
+    "webRequest",
     "webNavigation",
-    "webRequest"
+    "downloads",
+    "offscreen"
   ],
   "host_permissions": [
+    "http://localhost/*",
+    "ws://localhost/*",
+    "wss://localhost/*",
+    "http://127.0.0.1/*",
     "http://*/*",
-    "https://*/*",
-    "file:///*"
+    "https://*/*"
   ],
-  "background": {
-    "service_worker": "background.js"
-  },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["constants.js", "content.js"],
-      "run_at": "document_idle",
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "css": ["content/styles.css"],
+      "js": ["content/modal.js", "content/overlay.js"],
+      "run_at": "document_end",
       "all_frames": true
     }
   ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
   "action": {
-    "default_title": "DownloadAnything — acquire media on this page"
-  }
+    "default_title": "DownloadAnything Downloader"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["content/styles.css"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

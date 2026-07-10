@@ -1,12 +1,12 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "DownloadAnything",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "identifier": "com.DownloadAnything.dev",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "uv run main.py && bun run dev",
+    "beforeDevCommand": "uv run server/app/main.py & bun run dev",
     "beforeBuildCommand": "bun run build-backend.js && bun run build"
   },
   "app": {
@@ -21,14 +21,15 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' http://127.0.0.1:8000 ws://127.0.0.1:8000; img-src 'self' data:;"
+      "csp": "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' http://127.0.0.1:8765 ws://127.0.0.1:8765; img-src 'self' data: https: http: asset: https://asset.localhost;"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["nsis", "dmg"],
     "resources": {
-      "../extension/": "browser-extension/"
+      "../extension/": "browser-extension/",
+      "binaries/backend/": "backend/"
     },
     "icon": [
       "icons/32x32.png",
@@ -37,14 +38,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": [
-      "binaries/main"
-    ],
+    "externalBin": [],
     "createUpdaterArtifacts": true
   },
   "plugins": {
     "updater": {
-      "pubkey": "TAURI_SIGNING_PUBLIC_KEY", 
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIxOTU1MEIxQjFFRDdCMTkKUldRWmUrMnhzVkNWc1hpVkpYM0NCZHRjZUcxSkJDeEFHQjlnS2x1NkJ1VkZ0eG5vcWFVN1JFWUUK",
       "endpoints": [
         "https://github.com/zaidzameer010/DownloadAnything/releases/latest/download/latest.json"
       ]

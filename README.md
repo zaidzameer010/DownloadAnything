@@ -1,88 +1,78 @@
-# DownloadAnything — Enterprise Media Acquisition Engine
+# DownloadAnything 🚀
 
-A high-performance media downloading ecosystem powered by **FastAPI**, **yt-dlp**, **asyncio**, and **WebSockets**, complete with a beautiful modern dark-mode dashboard and a Chrome extension helper for seamless stream capturing.
+A premium, high-performance media downloader client and browser extension ecosystem powered by **FastAPI**, **yt-dlp**, **Tauri**, and **React**. 
 
----
-
-## 🌟 Key Features
-
-- **Real-Time Stream Updates**: Powered by WebSockets to broadcast download progress, speeds, ETAs, file sizes, and status events instantly to the client.
-- **Concurrent Download Queue**: Managed via `asyncio.Queue` with a configurable pool of concurrent download workers.
-- **Stream Snatcher Chrome Extension**: Silently sniffs HLS (`.m3u8`), DASH (`.mpd`), and direct video streams (`.mp4`, etc.) from webpages, overlaying quick-action download buttons or routing streams directly to the local backend.
-- **Robust yt-dlp Options**: Auto-prioritizes modern codecs (like AV1, VP9, AVC) and automatically resolves and merges streams (using `ffmpeg`).
-- **Disk Persistence**: Tasks state is continuously persisted to `tmp/tasks.json` so you never lose your queue after restarts.
-- **Bulk Actions**: Control several downloads simultaneously with options to pause, resume, cancel, clean up from queue, or fully delete associated files from disk.
-- **Directory Routing**: Map categories (e.g., *Videos*, *Courses*, *Music*, *Cinematic*) to specific filesystem destinations or define custom paths.
+DownloadAnything allows you to seamlessly intercept, analyze, and download high-resolution streams (including 1080p, 1440p, and 4K) from YouTube, Twitter, Vimeo, and hundreds of other platforms directly to custom directory presets.
 
 ---
 
-## 🛠️ Tech Stack
+## 🏗️ Project Architecture
 
-- **Backend**: FastAPI, Python 3.10+, `yt-dlp`, `pydantic`, `websockets`, `asyncio`
-- **Frontend**: React 19.2, TypeScript 5.9, Vite 8, Custom CSS Variables, Lucide Icons
-- **Browser Extension**: Chrome Extension Manifest V3, Content scripts (Stream sniffer), Background Service Worker
+```mermaid
+graph TD
+    Browser[Chrome MV3 Extension] <-->|JSON WebSocket Handshake| Backend[FastAPI Python Server]
+    TauriApp[Tauri Desktop Client] <-->|JSON WebSocket Handshake| Backend
+    Backend <-->|Tuning Options / Engine Selection| ytdlp[yt-dlp Core Engine]
+    Backend <-->|Multi-threaded Chunks| ari2[ari2-next Downloader]
+```
+
+### 1. The Desktop Client (Tauri + React + Vite + TypeScript)
+- **Dashboard**: Track active, paused, completed, and failed downloads with high-frequency speed and ETA ticks.
+- **Unified Settings Hub**: A single, structured tab with dedicated panels for **General Preferences**, **Preset Paths**, **Downloader Engines**, and **Browser Extensions**.
+- **Interactive Prober**: Analyze pasted media URLs to select precise format container options before queuing downloads.
+
+### 3. The Backend Server (FastAPI + Python)
+- **High-Performance Metadata Parsing**: Resolves format metadata in 1-2 seconds by leveraging `check_formats: "cached"`, client targeting (`android`/`web`), and updating directly without remote GitHub scraping overhead.
+- **Resilient Multi-Phase Progress Manager**: Performs live stream-phase tracking for split video/audio feeds, merging progress cleanly without status jumps.
+- **Ari2-Next Integration**: Configurable multi-threaded downloading with aggressive split connection rules.
+
+### 4. The Browser Extension (Manifest V3)
+- **Persistent Socket Life**: Uses a hidden `chrome.offscreen` document to host the WebSocket connection, ensuring Chrome doesn't interrupt active tracking when the Service Worker suspends.
+- **Direct HTML Injector**: Renders native overlay buttons above detected video frames to send media targets directly to the local server.
+- **Sanitized DOM Insertion**: Fully protected against DOM XSS vectors via native sanitization helpers.
 
 ---
 
-## 🚀 Getting Started
+## ⚡ Getting Started
 
-### 1. Backend Installation & Startup
-Clone the repository and install the Python dependencies:
+### Prerequisites
+You need the following installed on your machine:
+- **Node.js** (v18+)
+- **Python** (v3.10+)
+- **FFmpeg** (registered in System PATH or configured via Custom Settings)
+- **aria2c** (Optional, for multi-threaded chunk downloads)
 
+### 1. Running the Backend Service
+From the workspace root, navigate to the server and boot the FastAPI gateway:
 ```bash
-uv pip install fastapi uvicorn yt-dlp pydantic
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the backend (defaults to http://127.0.0.1:8765)
+python server/app/main.py
 ```
 
-Start the FastAPI backend server on port 8000:
-
+### 2. Launching the Desktop Client
+In a new terminal window, boot the Tauri app dev environment:
 ```bash
-fastapi run
-```
-The dashboard will be accessible at [http://127.0.0.1:8000](http://127.0.0.1:8000).
+# Install node dependencies
+npm install
 
-### 2. Frontend Development & Build
-The frontend is built using React 19.2, TypeScript, and Vite 8. It compiles into the `dist/` directory, which is served by the FastAPI backend and Tauri webview.
-
-Install frontend dependencies:
-```bash
-bun install
+# Run tauri in development mode
+npm run tauri:dev
 ```
 
-Run the frontend in development mode:
-```bash
-bun run dev
-```
-
-Build the frontend for production (compiles directly into `dist/`):
-```bash
-bun run build
-```
-
-### 3. Load the Chrome Extension ("Stream Snatcher")
-1. Open the app and go to **Settings**.
-2. In the new **Browser Extension** section, click **Open bundled browser extension folder**.
-3. In Chrome, Edge, or Brave, open the browser extension page, enable **Developer mode**, and choose **Load unpacked**.
-4. Select the bundled `browser-extension` folder that opens from the app.
-5. In the extension details page, enable the extension in private/incognito windows and turn on access to file URLs if you need local-file capture.
-6. Stream Snatcher will now run in the background, sniffing network traffic for stream links and showing helpful download overlays on stream-capable pages.
+### 3. Installing the Chrome Extension
+1. Open Google Chrome and go to `chrome://extensions/`.
+2. Toggle **Developer mode** in the top-right corner.
+3. Click **Load unpacked** and select the `/extension` directory inside this project workspace.
 
 ---
 
-## ⚙️ Configuration & Settings
+## ⚙️ Configuration & Tuning
 
-All settings are configured through the backend dashboard or stored in `settings.json`:
-- **Max Concurrent Downloads**: Control CPU/network utilization by limiting active parallel worker tasks.
-- **Merge Container**: Format option (`mp4`, `mkv`, `webm`) to automatically stitch downloaded audio/video streams together.
-- **Categories**: Map specific folders on your system to download categories so files are automatically sorted upon download.
-
----
-
-## 📂 Project Structure
-
-- `main.py`: FastAPI server containing worker queues, WebSocket publishers, API routes, and yt-dlp configurations.
-- `src/`: React 19.2 + TypeScript 5.9 source code (components, hooks, state, utilities).
-- `dist/`: Built production static assets generated by Vite 8 (including `index.html` and the `static/` asset subdirectory).
-- `extension/`: Chrome Extension implementation files (`manifest.json`, background sniffer, page content injector).
-- `src-tauri/resources/browser-extension/`: Bundled browser-extension assets copied into the desktop app package.
-- `settings.json`: Local project configuration settings.
-- `tmp/`: Stores fragment temp download cache files and the persistent queue list (`tasks.json`).
+Under the **Settings** menu in the desktop application, you can fully adjust down-stream behaviors:
+- **Output Preferences**: Specify default container merges (`MKV` or `MP4`) and enable automated cookie loading from active browser profiles (Chrome, Brave, Safari, Edge, Firefox).
+- **Core Downloader Tuning**: Manage concurrent fragment downloads, network retries, and rate limits.
+- **Ari2-Next Connection Rules**: Toggle the `ari2-next` downloader to enable parallel chunk splits (up to 32 connections) for maximum throughput.
+- **Preset Folders**: Map custom folders (e.g. `Movies`, `Music`) to automatically route downloads on selection.
