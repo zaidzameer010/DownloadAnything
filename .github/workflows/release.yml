@@ -90,3 +90,65 @@ jobs:
           gh cache delete --all --ref "${{ github.ref }}" || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  updater-json:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all release assets
+        run: |
+          TAG=${{ github.event.inputs.version || github.ref_name }}
+          echo "RELEASE_TAG=$TAG" >> $GITHUB_ENV
+          gh release download "$TAG" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate combined latest.json
+        run: |
+          python3 -c '
+          import os, json, glob, datetime
+          tag = os.getenv("RELEASE_TAG")
+          owner_repo = os.getenv("GITHUB_REPOSITORY")
+          latest = {
+              "version": tag.lstrip("v"),
+              "notes": f"Release {tag}",
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "platforms": {}
+          }
+          sig_files = glob.glob("*.sig")
+          for sig_file in sig_files:
+              archive_file = sig_file[:-4]
+              if os.path.exists(archive_file):
+                  with open(sig_file, "r") as f:
+                      sig = f.read().strip()
+                  archive_lower = archive_file.lower()
+                  platform_key = None
+                  if "aarch64" in archive_lower or "arm64" in archive_lower:
+                      platform_key = "darwin-aarch64"
+                  elif "x64" in archive_lower or "x86_64" in archive_lower:
+                      if "setup" in archive_lower or "nsis" in archive_lower or "msi" in archive_lower:
+                          platform_key = "windows-x86_64"
+                  if platform_key:
+                      latest["platforms"][platform_key] = {
+                          "signature": sig,
+                          "url": f"https://github.com/{owner_repo}/releases/download/{tag}/{archive_file}"
+                      }
+          with open("latest.json", "w") as f:
+              json.dump(latest, f, indent=2)
+          print("Generated latest.json:")
+          print(json.dumps(latest, indent=2))
+          '
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
+
+      - name: Upload latest.json back to release
+        run: |
+          TAG=${{ github.event.inputs.version || github.ref_name }}
+          gh release upload "$TAG" latest.json --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
