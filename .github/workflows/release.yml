@@ -29,6 +29,20 @@ jobs:
           # Forces the workflow to fetch the absolute latest commit that triggered the run
           ref: ${{ github.sha }}
 
+      - name: Download aria2-next binary (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: gh release download -R AnInsomniacy/aria2-next --pattern "*macos-arm64*" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download aria2-next binary (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          gh release download -R AnInsomniacy/aria2-next --pattern "*windows-x86_64.exe*" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
