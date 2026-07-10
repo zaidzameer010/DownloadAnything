@@ -31,7 +31,7 @@ jobs:
 
       - name: Download aria2-next binary (macOS)
         if: matrix.platform == 'macos-latest'
-        run: gh release download -R AnInsomniacy/aria2-next --pattern "*macos-arm64*" --clobber
+        run: gh release download -R AnInsomniacy/aria2-next --pattern "aria2-next-*-macos-arm64" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -39,7 +39,7 @@ jobs:
         if: matrix.platform == 'windows-latest'
         shell: bash
         run: |
-          gh release download -R AnInsomniacy/aria2-next --pattern "*windows-x86_64.exe*" --clobber
+          gh release download -R AnInsomniacy/aria2-next --pattern "aria2-next-*-windows-x86_64.exe" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
