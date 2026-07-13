@@ -12,12 +12,13 @@ def get_system_icon_base64(path_or_ext: str) -> str | None:
     """
     if sys.platform == "darwin":
         # macOS implementation using JavaScript for Automation (JFA) Cocoa access
+        escaped_target = path_or_ext.replace('"', '\\"')
         js_code = f"""
         ObjC.import('AppKit');
         ObjC.import('Foundation');
         var ws = $.NSWorkspace.sharedWorkspace;
         var icon = null;
-        var target = "{path_or_ext.replace('"', '\\"')}";
+        var target = "{escaped_target}";
         
         if (target === "folder" || target === "directory" || target === "public.folder") {{
             icon = ws.iconForFileType('public.folder');

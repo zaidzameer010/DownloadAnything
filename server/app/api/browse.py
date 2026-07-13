@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -22,6 +23,22 @@ class BrowseResponse(BaseModel):
 
 def get_home_dir() -> Path:
     return Path.home()
+
+def _list_subdirectories(target_path: Path) -> list["DirectoryItem"]:
+    subdirs: list[DirectoryItem] = []
+    for entry in os.scandir(target_path):
+        try:
+            if entry.is_dir() and not entry.name.startswith("."):
+                subdirs.append(
+                    DirectoryItem(
+                        name=entry.name,
+                        absolutePath=str(Path(entry.path).resolve())
+                    )
+                )
+        except OSError:
+            continue
+    subdirs.sort(key=lambda x: x.name.lower())
+    return subdirs
 
 @router.post("/browse", response_model=BrowseResponse)
 async def browse_directory(req: BrowseRequest):
@@ -65,21 +82,8 @@ async def browse_directory(req: BrowseRequest):
             detail="The requested path is a file, not a directory."
         )
 
-    subdirs: List[DirectoryItem] = []
     try:
-        # Scan directory contents
-        for entry in os.scandir(target_path):
-            try:
-                if entry.is_dir() and not entry.name.startswith("."):
-                    subdirs.append(
-                        DirectoryItem(
-                            name=entry.name,
-                            absolutePath=str(Path(entry.path).resolve())
-                        )
-                    )
-            except OSError:
-                # Skip directories we can't access
-                continue
+        subdirs = await asyncio.to_thread(_list_subdirectories, target_path)
     except PermissionError as e:
         logger.error(f"Permission denied reading directory {target_path}: {e}")
         raise HTTPException(
@@ -92,9 +96,6 @@ async def browse_directory(req: BrowseRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to list directory: {e}"
         )
-
-    # Sort directories alphabetically by name
-    subdirs.sort(key=lambda x: x.name.lower())
 
     # Resolve parent directory
     parent_path = target_path.parent

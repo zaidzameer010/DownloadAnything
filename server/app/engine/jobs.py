@@ -1,3 +1,4 @@
+import os
 import json
 import threading
 from pathlib import Path
@@ -72,9 +73,13 @@ class JobRegistry:
 
     def _save_jobs(self):
         try:
-            with open(JOBS_FILE, "w") as f:
-                data = {k: v.model_dump() for k, v in self._jobs.items()}
+            data = {k: v.model_dump() for k, v in self._jobs.items()}
+            tmp_path = JOBS_FILE.with_name(f"{JOBS_FILE.name}.tmp")
+            with open(tmp_path, "w") as f:
                 json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            tmp_path.replace(JOBS_FILE)
         except Exception as e:
             from app.utils.logger import logger
             logger.error(f"Failed to save jobs to file: {e}")

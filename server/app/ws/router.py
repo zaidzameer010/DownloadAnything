@@ -658,7 +658,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif isinstance(msg, ClientGetSettingsMessage):
                 from app.api.settings import load_settings
-                settings_data = load_settings()
+                settings_data = await asyncio.to_thread(load_settings)
                 await ws_manager.send_message(tab_id, {
                     "type": "settings_data",
                     "settings": settings_data.model_dump()
@@ -666,7 +666,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif isinstance(msg, ClientSaveSettingsMessage):
                 from app.api.settings import save_settings_to_file
-                save_settings_to_file(msg.settings)
+                await asyncio.to_thread(save_settings_to_file, msg.settings)
                 await ws_manager.broadcast({
                     "type": "settings_data",
                     "settings": msg.settings.model_dump()
@@ -679,5 +679,4 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         if tab_id is not None:
             ws_manager.disconnect(tab_id)
-
 

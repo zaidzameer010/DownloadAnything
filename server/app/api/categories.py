@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 from pathlib import Path
@@ -24,8 +25,7 @@ def load_categories() -> List[Category]:
             {"name": "Default", "path": settings.DEFAULT_OUTPUT_DIR}
         ]
         try:
-            with open(CATEGORIES_FILE, "w") as f:
-                json.dump(default_cats, f, indent=2)
+            _write_json_atomic(CATEGORIES_FILE, default_cats)
         except Exception as e:
             logger.error(f"Failed to create default categories.json: {e}")
         return [Category(**c) for c in default_cats]
@@ -38,11 +38,18 @@ def load_categories() -> List[Category]:
         logger.error(f"Failed to read categories.json: {e}")
         return [Category(name="Default", path=settings.DEFAULT_OUTPUT_DIR)]
 
+def _write_json_atomic(path: Path, payload: list[dict[str, str]]):
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp_path.replace(path)
+
 def save_categories_to_file(categories: List[Category]):
     try:
         data = [c.model_dump() for c in categories]
-        with open(CATEGORIES_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+        _write_json_atomic(CATEGORIES_FILE, data)
     except Exception as e:
         logger.error(f"Failed to save categories.json: {e}")
         raise HTTPException(
@@ -52,9 +59,9 @@ def save_categories_to_file(categories: List[Category]):
 
 @router.get("/categories", response_model=List[Category])
 async def get_categories():
-    return load_categories()
+    return await asyncio.to_thread(load_categories)
 
 @router.post("/categories", response_model=List[Category])
 async def save_categories(categories: List[Category]):
-    save_categories_to_file(categories)
+    await asyncio.to_thread(save_categories_to_file, categories)
     return categories
