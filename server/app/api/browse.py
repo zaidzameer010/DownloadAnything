@@ -3,28 +3,20 @@ import os
 import sys
 from pathlib import Path
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from app.utils.logger import logger
 
-router = APIRouter(prefix="/api")
-
-class BrowseRequest(BaseModel):
-    path: Optional[str] = None
 
 class DirectoryItem(BaseModel):
     name: str
     absolutePath: str
 
-class BrowseResponse(BaseModel):
-    currentDir: str
-    parentDir: Optional[str] = None
-    subdirs: List[DirectoryItem]
 
 def get_home_dir() -> Path:
     return Path.home()
 
-def _list_subdirectories(target_path: Path) -> list["DirectoryItem"]:
+
+def _list_subdirectories(target_path: Path) -> list[DirectoryItem]:
     subdirs: list[DirectoryItem] = []
     for entry in os.scandir(target_path):
         try:
@@ -40,76 +32,6 @@ def _list_subdirectories(target_path: Path) -> list["DirectoryItem"]:
     subdirs.sort(key=lambda x: x.name.lower())
     return subdirs
 
-@router.post("/browse", response_model=BrowseResponse)
-async def browse_directory(req: BrowseRequest):
-    """
-    Lists subdirectories of the requested path.
-    Defaults to the user's home directory if no path is provided.
-    """
-    path_str = req.path
-    if not path_str or path_str.strip() == "":
-        target_path = get_home_dir()
-    else:
-        target_path = Path(path_str)
-
-    try:
-        # Resolve to absolute path
-        target_path = target_path.resolve()
-        home = get_home_dir().resolve()
-        if not (target_path == home or home in target_path.parents):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access restricted to home directory and its subdirectories."
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to resolve path {path_str}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid path representation: {e}"
-        )
-
-    if not target_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="The requested path does not exist on the server."
-        )
-
-    if not target_path.is_dir():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The requested path is a file, not a directory."
-        )
-
-    try:
-        subdirs = await asyncio.to_thread(_list_subdirectories, target_path)
-    except PermissionError as e:
-        logger.error(f"Permission denied reading directory {target_path}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Permission denied accessing this directory."
-        )
-    except Exception as e:
-        logger.error(f"Failed to read directory {target_path}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list directory: {e}"
-        )
-
-    # Resolve parent directory
-    parent_path = target_path.parent
-    home = get_home_dir().resolve()
-    if parent_path == target_path or not (parent_path == home or home in parent_path.parents):
-        parent_dir_str = None
-    else:
-        parent_dir_str = str(parent_path)
-
-    return BrowseResponse(
-        currentDir=str(target_path),
-        parentDir=parent_dir_str,
-        subdirs=subdirs
-    )
 
 async def pick_directory_system(initial_dir: Optional[str] = None) -> Optional[str]:
     """
@@ -117,9 +39,7 @@ async def pick_directory_system(initial_dir: Optional[str] = None) -> Optional[s
     Tries AppleScript on macOS first, falls back to Tkinter.
     Runs in a threadpool to prevent blocking the async loop.
     """
-    import asyncio
     import subprocess
-    import sys
 
     def _sync_pick():
         # Try AppleScript on macOS first for native look and focus

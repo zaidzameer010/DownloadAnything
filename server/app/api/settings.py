@@ -1,29 +1,27 @@
-import asyncio
 import json
 import os
 import threading
 from pathlib import Path
-from pydantic import BaseModel
 from typing import Optional
-from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel
+from app.config import settings, get_config_file_path
 from app.utils.logger import logger
 
-router = APIRouter(prefix="/api")
 
 class AppSettings(BaseModel):
     mergeFormat: str = "mkv"
     embedThumbnail: bool = True
     embedSubs: bool = False
-    cookiesFromBrowser: Optional[str] = None # e.g. "chrome", "firefox", "safari", "none" or null
-    
+    cookiesFromBrowser: Optional[str] = None  # e.g. "chrome", "firefox", "safari", "none" or null
+
     # yt-dlp configs
     concurrentFragmentDownloads: int = 4
     downloadRetries: int = 10
     fragmentRetries: int = 10
-    rateLimit: Optional[str] = None # e.g. "50K", "1M", "5M" or null (unlimited)
-    subtitlesLangs: str = "all" # comma separated list of language tags or "all"
-    ffmpegLocation: Optional[str] = None # custom path to ffmpeg
-    
+    rateLimit: Optional[str] = None  # e.g. "50K", "1M", "5M" or null (unlimited)
+    subtitlesLangs: str = "all"  # comma separated list of language tags or "all"
+    ffmpegLocation: Optional[str] = None  # custom path to ffmpeg
+
     # aria2 configs
     useAria2: bool = True
     aria2MaxConnections: int = 16
@@ -33,17 +31,17 @@ class AppSettings(BaseModel):
     aria2Preallocate: bool = True
     aria2CheckCertificate: bool = True
     aria2AlwaysResume: bool = True
-    
+
     # General queue limit
     maxConcurrentDownloads: int = 2
 
-from app.config import settings, get_config_file_path
 
 # Persisted configurations file
 SETTINGS_FILE = get_config_file_path("settings.json")
 
 _settings_cache: Optional[AppSettings] = None
 _settings_lock = threading.Lock()
+
 
 def load_settings() -> AppSettings:
     global _settings_cache
@@ -59,7 +57,7 @@ def load_settings() -> AppSettings:
                 logger.error(f"Failed to write default settings.json: {e}")
             _settings_cache = defaults
             return defaults
-            
+
         try:
             with open(SETTINGS_FILE, "r") as f:
                 data = json.load(f)
@@ -72,6 +70,7 @@ def load_settings() -> AppSettings:
             _settings_cache = fallback
             return fallback
 
+
 def _write_json_atomic(path: Path, payload: dict):
     tmp_path = path.with_name(f"{path.name}.tmp")
     with open(tmp_path, "w") as f:
@@ -79,6 +78,7 @@ def _write_json_atomic(path: Path, payload: dict):
         f.flush()
         os.fsync(f.fileno())
     tmp_path.replace(path)
+
 
 def save_settings_to_file(settings_data: AppSettings):
     global _settings_cache
@@ -88,16 +88,4 @@ def save_settings_to_file(settings_data: AppSettings):
             _settings_cache = settings_data
         except Exception as e:
             logger.error(f"Failed to save settings.json: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to save configurations: {e}"
-            )
-
-@router.get("/settings", response_model=AppSettings)
-async def get_settings():
-    return await asyncio.to_thread(load_settings)
-
-@router.post("/settings", response_model=AppSettings)
-async def save_settings(settings_data: AppSettings):
-    await asyncio.to_thread(save_settings_to_file, settings_data)
-    return settings_data
+            raise RuntimeError(f"Failed to save configurations: {e}")

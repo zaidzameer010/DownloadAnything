@@ -464,7 +464,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     run_downloader_task(
                         tab_id=tab_id,
                         job_id=job_id,
-                        url=metadata["url"],
+                        url=metadata_url,
                         format_id=msg.formatId,
                         output_dir=msg.outputDir,
                         conflict_resolution=conflict_res,
