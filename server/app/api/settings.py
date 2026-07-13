@@ -1,4 +1,6 @@
+import asyncio
 import json
+import os
 import threading
 from pathlib import Path
 from pydantic import BaseModel
@@ -52,8 +54,7 @@ def load_settings() -> AppSettings:
         if not SETTINGS_FILE.exists():
             defaults = AppSettings()
             try:
-                with open(SETTINGS_FILE, "w") as f:
-                    json.dump(defaults.model_dump(), f, indent=2)
+                _write_json_atomic(SETTINGS_FILE, defaults.model_dump())
             except Exception as e:
                 logger.error(f"Failed to write default settings.json: {e}")
             _settings_cache = defaults
@@ -71,12 +72,19 @@ def load_settings() -> AppSettings:
             _settings_cache = fallback
             return fallback
 
+def _write_json_atomic(path: Path, payload: dict):
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp_path.replace(path)
+
 def save_settings_to_file(settings_data: AppSettings):
     global _settings_cache
     with _settings_lock:
         try:
-            with open(SETTINGS_FILE, "w") as f:
-                json.dump(settings_data.model_dump(), f, indent=2)
+            _write_json_atomic(SETTINGS_FILE, settings_data.model_dump())
             _settings_cache = settings_data
         except Exception as e:
             logger.error(f"Failed to save settings.json: {e}")
@@ -87,9 +95,9 @@ def save_settings_to_file(settings_data: AppSettings):
 
 @router.get("/settings", response_model=AppSettings)
 async def get_settings():
-    return load_settings()
+    return await asyncio.to_thread(load_settings)
 
 @router.post("/settings", response_model=AppSettings)
 async def save_settings(settings_data: AppSettings):
-    save_settings_to_file(settings_data)
+    await asyncio.to_thread(save_settings_to_file, settings_data)
     return settings_data

@@ -17,6 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings, get_app_version
 from app.utils.logger import logger
+from app.api.browse import router as browse_router
+from app.api.categories import router as categories_router
+from app.api.health import router as health_router
+from app.api.settings import router as settings_router
 from app.ws.manager import ws_manager
 from app.ws.router import router as ws_router
 
@@ -58,6 +62,10 @@ app.add_middleware(
 )
 
 # Wire Routes
+app.include_router(health_router)
+app.include_router(browse_router)
+app.include_router(categories_router)
+app.include_router(settings_router)
 app.include_router(ws_router)
 
 # Serve Frontend static files if the dist folder is built
