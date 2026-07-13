@@ -1,10 +1,11 @@
 import asyncio
 import os
 import shutil
-from typing import Any, Dict, Optional
+import orjson
+from typing import cast
 import yt_dlp
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, TypeAdapter
+from pydantic import TypeAdapter
 from app.config import settings, get_app_version
 from app.utils.logger import logger
 from app.ws.manager import ws_manager
@@ -20,20 +21,44 @@ from app.schemas.messages import (
     ClientPauseMessage, ClientResumeMessage, ClientRemoveJobMessage, ClientDeleteFileMessage,
     ClientCheckFileExistsMessage, ClientCancelProbeMessage
 )
+from app.api.settings import load_settings
+from app.api.categories import load_categories, save_categories_to_file
 
 router = APIRouter()
 
 # Setup Pydantic TypeAdapter for dynamic parsing
-message_adapter = TypeAdapter(ClientMessage)
+message_adapter: TypeAdapter[ClientMessage] = TypeAdapter(ClientMessage)
 
 # Memory store for temporary probes before they are queued as jobs
-pending_probes: Dict[str, Any] = {}
+pending_probes: dict[str, dict[str, object]] = {}
 
 # Active probe tasks that can be cancelled
-active_probe_tasks: Dict[str, asyncio.Task] = {}
+active_probe_tasks: dict[str, asyncio.Task[None]] = {}
 
 # Active downloader tasks that can be cancelled/aborted
-active_downloader_tasks: Dict[str, asyncio.Task] = {}
+active_downloader_tasks: dict[str, asyncio.Task[None]] = {}
+
+# Dynamic Download Concurrency Manager
+active_downloads = 0
+active_downloads_cond = asyncio.Condition()
+
+async def acquire_download_slot():
+    global active_downloads
+    async with active_downloads_cond:
+        while True:
+            # load_settings handles cache and locks internally
+            settings_data = load_settings()
+            limit = getattr(settings_data, "maxConcurrentDownloads", 2)
+            if active_downloads < limit:
+                break
+            _ = await active_downloads_cond.wait()
+        active_downloads += 1
+
+async def release_download_slot():
+    global active_downloads
+    async with active_downloads_cond:
+        active_downloads = max(0, active_downloads - 1)
+        active_downloads_cond.notify_all()
 
 async def run_downloader_task(
     tab_id: int,
@@ -42,18 +67,20 @@ async def run_downloader_task(
     format_id: str,
     output_dir: str,
     conflict_resolution: str = "replace",
-    referer: Optional[str] = None
+    referer: str | None = None
 ):
+    _ = tab_id
     task = asyncio.current_task()
-    active_downloader_tasks[job_id] = task
-    event_queue = asyncio.Queue()
+    if task is not None:
+        active_downloader_tasks[job_id] = cast(asyncio.Task[None], task)
+    event_queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
     loop = asyncio.get_running_loop()
     
-    # Update status to downloading immediately to prevent "Waiting in queue" UI flicker
-    jobs_registry.update_job(job_id, status="downloading")
+    # Update status to queued initially to support concurrency queueing
+    _ = await asyncio.to_thread(jobs_registry.update_job, job_id, status="queued")
     
     # Broadcast updated jobs list to clients
-    jobs = list(jobs_registry.list_jobs().values())
+    jobs = list((await asyncio.to_thread(jobs_registry.list_jobs)).values())
     await ws_manager.broadcast({
         "type": "jobs_list",
         "jobs": [j.model_dump() for j in jobs]
@@ -61,7 +88,7 @@ async def run_downloader_task(
     
     # Send download_queued message
     out_dir = output_dir if output_dir else settings.DEFAULT_OUTPUT_DIR
-    job = jobs_registry.get_job(job_id)
+    job = await asyncio.to_thread(jobs_registry.get_job, job_id)
     await ws_manager.broadcast({
         "type": "download_queued",
         "jobId": job_id,
@@ -86,7 +113,20 @@ async def run_downloader_task(
 
     consumer_task = asyncio.create_task(consumer())
     
+    slot_acquired = False
     try:
+        # Acquire concurrency slot (holds task execution until slot is free)
+        await acquire_download_slot()
+        slot_acquired = True
+
+        # Now update status to downloading
+        _ = await asyncio.to_thread(jobs_registry.update_job, job_id, status="downloading")
+        jobs = list((await asyncio.to_thread(jobs_registry.list_jobs)).values())
+        await ws_manager.broadcast({
+            "type": "jobs_list",
+            "jobs": [j.model_dump() for j in jobs]
+        })
+
         # Run blocking download in worker thread
         filepath = await asyncio.to_thread(
             download_video,
@@ -99,9 +139,8 @@ async def run_downloader_task(
             conflict_resolution=conflict_resolution,
             referer=referer
         )
-        
-        job = jobs_registry.get_job(job_id)
-        size_bytes = (job.combined_total_bytes if job else None) or (job.total_bytes if job else None)
+        job = await asyncio.to_thread(jobs_registry.get_job, job_id)
+        size_bytes = job.total_bytes if job else None
         
         await ws_manager.broadcast({
             "type": "download_completed",
@@ -112,28 +151,29 @@ async def run_downloader_task(
         })
     except DownloadPaused:
         logger.info(f"Download job {job_id} paused cleanly.")
-        jobs = list(jobs_registry.list_jobs().values())
+        jobs = list((await asyncio.to_thread(jobs_registry.list_jobs)).values())
         await ws_manager.broadcast({
             "type": "jobs_list",
             "jobs": [j.model_dump() for j in jobs]
         })
-    except yt_dlp.utils.DownloadCancelled:
-        await ws_manager.broadcast({
-            "type": "download_canceled",
-            "jobId": job_id
-        })
     except Exception as e:
-        stage = "downloading"
-        job = jobs_registry.get_job(job_id)
-        if job and job.status == "postprocessing":
-            stage = "postprocessing"
-            
-        await ws_manager.broadcast({
-            "type": "download_failed",
-            "jobId": job_id,
-            "error": str(e),
-            "stage": stage
-        })
+        if type(e).__name__ == "DownloadCancelled":
+            await ws_manager.broadcast({
+                "type": "download_canceled",
+                "jobId": job_id
+            })
+        else:
+            stage = "downloading"
+            job = await asyncio.to_thread(jobs_registry.get_job, job_id)
+            if job and job.status == "postprocessing":
+                stage = "postprocessing"
+                
+            await ws_manager.broadcast({
+                "type": "download_failed",
+                "jobId": job_id,
+                "error": str(e),
+                "stage": stage
+            })
     finally:
         active_downloader_tasks.pop(job_id, None)
         consumer_task.cancel()
@@ -180,9 +220,10 @@ def extract_fallback_title_from_url(url: str) -> str:
     except Exception:
         return "video"
 
-async def run_probe_task(tab_id: int, job_id: str, url_to_probe: str, page_title: Optional[str] = None):
+async def run_probe_task(tab_id: int, job_id: str, url_to_probe: str, page_title: str | None = None):
     task = asyncio.current_task()
-    active_probe_tasks[job_id] = task
+    if task is not None:
+        active_probe_tasks[job_id] = cast(asyncio.Task[None], task)
     try:
         # Probe in threadpool
         info = await asyncio.to_thread(
@@ -193,12 +234,14 @@ async def run_probe_task(tab_id: int, job_id: str, url_to_probe: str, page_title
         
         # Override generic stream title with page_title or URL path segment if needed
         import re
-        extracted_title = info.get("title") or ""
+        extracted_title_val = info.get("title")
+        extracted_title = str(extracted_title_val) if extracted_title_val is not None else ""
         title_to_check = extracted_title
         if "." in title_to_check:
             title_to_check = title_to_check.rsplit('.', 1)[0]
             
-        media_type = info.get("mediaType") or "video"
+        media_type_val = info.get("mediaType")
+        media_type = str(media_type_val) if media_type_val is not None else "video"
         generic_names = ["index", "master", "playlist", "manifest", "video", "chunk", "stream"]
         
         is_generic = (
@@ -217,9 +260,15 @@ async def run_probe_task(tab_id: int, job_id: str, url_to_probe: str, page_title
                 info["title"] = extract_fallback_title_from_url(url_to_probe)
         
         # Process formats
+        formats_val = info.get("formats", [])
+        duration_val = info.get("duration")
+        formats_list_arg: list[dict[str, object]] = (
+            cast(list[dict[str, object]], formats_val) if isinstance(formats_val, list) else []
+        )
+        duration_arg = cast(float | None, duration_val)
         formats_list = filter_and_summarize_formats(
-            info.get("formats", []), 
-            info.get("duration")
+            formats_list_arg,
+            duration_arg
         )
         
         formats_json = [f.model_dump() for f in formats_list]
@@ -248,7 +297,7 @@ async def run_probe_task(tab_id: int, job_id: str, url_to_probe: str, page_title
         })
     except asyncio.CancelledError:
         logger.info(f"Probe task for job {job_id} was cancelled.")
-        pending_probes.pop(job_id, None)
+        _ = pending_probes.pop(job_id, None)
     except Exception as err:
         logger.error(f"Probe failed for {url_to_probe}: {err}")
         
@@ -264,7 +313,8 @@ async def run_probe_task(tab_id: int, job_id: str, url_to_probe: str, page_title
             "isUnsupportedUrl": is_unsupported
         })
     finally:
-        active_probe_tasks.pop(job_id, None)
+        # Remove task from registry
+        _ = active_probe_tasks.pop(job_id, None)
 
 @router.websocket("/ws")
 @router.websocket("/ws/progress")
@@ -274,7 +324,7 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.accept()
         
         # 1. Handshake
-        initial_data = await websocket.receive_json()
+        initial_data = cast(object, orjson.loads(await websocket.receive_text()))
         try:
             handshake = message_adapter.validate_python(initial_data)
             if not isinstance(handshake, ClientHelloMessage):
@@ -308,7 +358,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
         # 2. Main message loop
         while True:
-            data = await websocket.receive_json()
+            data = cast(object, orjson.loads(await websocket.receive_text()))
             try:
                 msg = message_adapter.validate_python(data)
             except Exception as e:
@@ -322,10 +372,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 import uuid
                 job_id = f"job_{uuid.uuid4().hex[:8]}"
                 
+                # ── Standard HTTP/media URL/Torrent probe flow ──
                 # Check duplicate job (any status)
-                existing_jobs = jobs_registry.list_jobs()
+                existing_jobs = await asyncio.to_thread(jobs_registry.list_jobs)
                 duplicate_job = None
-                for j_id, j_info in existing_jobs.items():
+                for j_info in existing_jobs.values():
                     if j_info.url == msg.url:
                         duplicate_job = j_info
                         break
@@ -349,24 +400,25 @@ async def websocket_endpoint(websocket: WebSocket):
                     "url": url_to_probe
                 })
                 
-                asyncio.create_task(run_probe_task(tab_id, job_id, url_to_probe, page_title=msg.title))
+                _ = asyncio.create_task(run_probe_task(tab_id, job_id, url_to_probe, page_title=msg.title))
 
             elif isinstance(msg, ClientCancelProbeMessage):
                 job_id = msg.jobId
                 logger.info(f"Cancel probe requested for jobId: {job_id}")
                 task = active_probe_tasks.get(job_id)
                 if task:
-                    task.cancel()
+                    _ = task.cancel()
                     logger.info(f"Successfully cancelled probe task for jobId: {job_id}")
 
             elif isinstance(msg, ClientChooseMessage):
                 job_id = msg.jobId
                 
+
                 # Retrieve from pending_probes memory cache
-                metadata = pending_probes.pop(job_id, None)
-                if not metadata:
+                metadata_raw = pending_probes.pop(job_id, None)
+                if metadata_raw is None:
                     if msg.url:
-                        metadata = {
+                        metadata_dict: dict[str, object] = {
                             "url": msg.url,
                             "title": msg.title or extract_fallback_title_from_url(msg.url),
                             "duration": None,
@@ -378,22 +430,32 @@ async def websocket_endpoint(websocket: WebSocket):
                     else:
                         logger.warning(f"Choose requested for untracked/missing probed job {job_id}")
                         continue
+                else:
+                    metadata_dict = metadata_raw
                 
+                metadata_url = cast(str, metadata_dict["url"])
+                metadata_title = cast(str | None, metadata_dict.get("title"))
+                metadata_duration = cast(float | None, metadata_dict.get("duration"))
+                metadata_thumbnail = cast(str | None, metadata_dict.get("thumbnail"))
+                metadata_uploader = cast(str | None, metadata_dict.get("uploader"))
+                metadata_formats = cast(list[object], metadata_dict.get("formats"))
+                metadata_media_type = cast(str | None, metadata_dict.get("mediaType"))
+
                 # Now create the actual job in the registry
-                jobs_registry.create_job(job_id, metadata["url"], status="downloading")
-                jobs_registry.update_job(
+                _ = await asyncio.to_thread(jobs_registry.create_job, job_id, metadata_url, status="downloading")
+                _ = await asyncio.to_thread(
+                    jobs_registry.update_job,
                     job_id,
-                    title=metadata["title"],
-                    duration=metadata["duration"],
-                    thumbnail=metadata["thumbnail"],
-                    uploader=metadata["uploader"],
-                    formats=metadata["formats"],
+                    title=metadata_title,
+                    duration=metadata_duration,
+                    thumbnail=metadata_thumbnail,
+                    uploader=metadata_uploader,
+                    formats=metadata_formats,
                     format_id=msg.formatId,
                     output_dir=msg.outputDir,
-                    combined_total_bytes=msg.fileSize or 0.0,
                     total_bytes=msg.fileSize or 0.0,
                     referer=msg.referer,
-                    media_type=metadata.get("mediaType")
+                    media_type=metadata_media_type
                 )
                 
                 conflict_res = getattr(msg, "conflictResolution", "replace") or "replace"
@@ -414,7 +476,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 exists = False
                 try:
                     full_path = os.path.join(msg.path, msg.filename)
-                    exists = os.path.exists(full_path)
+                    exists = await asyncio.to_thread(os.path.exists, full_path)
                 except Exception as e:
                     logger.error(f"Failed to check file existence: {e}")
                 
@@ -429,9 +491,9 @@ async def websocket_endpoint(websocket: WebSocket):
             elif isinstance(msg, ClientPauseMessage):
                 job_id = msg.jobId
                 logger.info(f"Pause request received for job {job_id}")
-                success = jobs_registry.trigger_pause(job_id)
+                success = await asyncio.to_thread(jobs_registry.trigger_pause, job_id)
                 if success:
-                    jobs = list(jobs_registry.list_jobs().values())
+                    jobs = list((await asyncio.to_thread(jobs_registry.list_jobs)).values())
                     await ws_manager.broadcast({
                         "type": "jobs_list",
                         "jobs": [j.model_dump() for j in jobs]
@@ -442,12 +504,12 @@ async def websocket_endpoint(websocket: WebSocket):
             elif isinstance(msg, ClientResumeMessage):
                 job_id = msg.jobId
                 logger.info(f"Resume request received for job {job_id}")
-                success = jobs_registry.trigger_resume(job_id)
+                success = await asyncio.to_thread(jobs_registry.trigger_resume, job_id)
                 if success:
-                    job = jobs_registry.get_job(job_id)
+                    job = await asyncio.to_thread(jobs_registry.get_job, job_id)
                     if job:
                         # Broadcast queued status first
-                        jobs = list(jobs_registry.list_jobs().values())
+                        jobs = list((await asyncio.to_thread(jobs_registry.list_jobs)).values())
                         await ws_manager.broadcast({
                             "type": "jobs_list",
                             "jobs": [j.model_dump() for j in jobs]
@@ -471,25 +533,31 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.info(f"Remove request received for job {job_id}")
                 
                 # Remove from registry so progress hook triggers abort
-                jobs_registry.remove_job(job_id)
+                _ = await asyncio.to_thread(jobs_registry.remove_job, job_id)
                 
                 # Cancel task and wait for it to stop cleanly
                 task = active_downloader_tasks.get(job_id)
                 if task:
-                    task.cancel()
+                    _ = task.cancel()
                     try:
-                        await asyncio.wait_for(task, timeout=1.5)
+                        _ = await asyncio.wait_for(task, timeout=1.5)
                     except Exception:
                         pass
-                # Safe temp cleanup
+                
+                # Safe temp cleanup offloaded to thread
                 app_temp_dir = get_app_support_dir() / "temp" / job_id
+                from pathlib import Path
+                def cleanup_temp_dir(path: str | Path):
+                    if os.path.exists(path):
+                        shutil.rmtree(path)
+                
                 try:
-                    if os.path.exists(app_temp_dir):
-                        shutil.rmtree(app_temp_dir)
-                        logger.info(f"Cleaned up temp folder on job removal: {app_temp_dir}")
+                    _ = await asyncio.to_thread(cleanup_temp_dir, app_temp_dir)
+                    logger.info(f"Cleaned up temp folder on job removal: {app_temp_dir}")
                 except Exception as e:
                     logger.error(f"Failed to remove temp folder {app_temp_dir}: {e}")
-                jobs = list(jobs_registry.list_jobs().values())
+                    
+                jobs = list((await asyncio.to_thread(jobs_registry.list_jobs)).values())
                 await ws_manager.broadcast({
                     "type": "jobs_list",
                     "jobs": [j.model_dump() for j in jobs]
@@ -498,65 +566,75 @@ async def websocket_endpoint(websocket: WebSocket):
             elif isinstance(msg, ClientRevealFileMessage):
                 job_id = msg.jobId
                 logger.info(f"Reveal file request received for job {job_id}")
-                job = jobs_registry.get_job(job_id)
-                if job and job.file_path:
-                    if os.path.exists(job.file_path):
+                job = await asyncio.to_thread(jobs_registry.get_job, job_id)
+                
+                def reveal_file_sync(file_path: str):
+                    if os.path.exists(file_path):
                         import subprocess
                         import sys
-                        try:
-                            if sys.platform == "darwin":
-                                subprocess.run(["open", "-R", job.file_path], check=True)
-                            elif sys.platform == "win32":
-                                subprocess.run(["explorer", "/select,", os.path.normpath(job.file_path)], check=True)
-                            else:
-                                subprocess.run(["xdg-open", os.path.dirname(job.file_path)], check=True)
+                        if sys.platform == "darwin":
+                            _ = subprocess.run(["open", "-R", file_path], check=True)
+                        elif sys.platform == "win32":
+                            _ = subprocess.run(["explorer", "/select,", os.path.normpath(file_path)], check=True)
+                        else:
+                            _ = subprocess.run(["xdg-open", os.path.dirname(file_path)], check=True)
+                        return True
+                    return False
+                
+                if job and job.file_path:
+                    try:
+                        success = await asyncio.to_thread(reveal_file_sync, job.file_path)
+                        if success:
                             logger.info(f"Successfully revealed file {job.file_path}")
-                        except Exception as e:
-                            logger.error(f"Failed to reveal file {job.file_path}: {e}")
-                    else:
-                        logger.warning(f"Cannot reveal file, path does not exist: {job.file_path}")
+                        else:
+                            logger.warning(f"Cannot reveal file, path does not exist: {job.file_path}")
+                    except Exception as e:
+                        logger.error(f"Failed to reveal file {job.file_path}: {e}")
 
             elif isinstance(msg, ClientDeleteFileMessage):
                 job_id = msg.jobId
                 logger.info(f"Delete file request received for job {job_id}")
-                job = jobs_registry.get_job(job_id)
+                job = await asyncio.to_thread(jobs_registry.get_job, job_id)
+                
+                def delete_file_sync(file_path: str):
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        logger.info(f"Deleted file: {file_path}")
+                    else:
+                        part_path = f"{file_path}.part"
+                        if os.path.exists(part_path):
+                            os.remove(part_path)
+                            logger.info(f"Deleted partial file: {part_path}")
+                
                 if job and job.file_path:
                     try:
-                        if os.path.exists(job.file_path):
-                            os.remove(job.file_path)
-                            logger.info(f"Deleted file: {job.file_path}")
-                        else:
-                            part_path = f"{job.file_path}.part"
-                            if os.path.exists(part_path):
-                                os.remove(part_path)
-                                logger.info(f"Deleted partial file: {part_path}")
+                        _ = await asyncio.to_thread(delete_file_sync, job.file_path)
                     except Exception as e:
                         logger.error(f"Failed to delete file {job.file_path}: {e}")
-                jobs_registry.remove_job(job_id)
-                jobs = list(jobs_registry.list_jobs().values())
+                        
+                await asyncio.to_thread(jobs_registry.remove_job, job_id)
+                jobs = list((await asyncio.to_thread(jobs_registry.list_jobs)).values())
                 await ws_manager.broadcast({
                     "type": "jobs_list",
                     "jobs": [j.model_dump() for j in jobs]
                 })
 
             elif isinstance(msg, ClientGetJobsMessage):
-                jobs = list(jobs_registry.list_jobs().values())
+                jobs = list((await asyncio.to_thread(jobs_registry.list_jobs)).values())
                 await ws_manager.send_message(tab_id, {
                     "type": "jobs_list",
                     "jobs": [j.model_dump() for j in jobs]
                 })
 
             elif isinstance(msg, ClientGetCategoriesMessage):
-                from app.api.categories import load_categories
-                categories = load_categories()
+                categories = await asyncio.to_thread(load_categories)
                 await ws_manager.send_message(tab_id, {
                     "type": "categories_list",
                     "categories": [c.model_dump() for c in categories]
                 })
 
             elif isinstance(msg, ClientSaveCategoriesMessage):
-                from app.api.categories import save_categories_to_file
-                save_categories_to_file(msg.categories)
+                await asyncio.to_thread(save_categories_to_file, msg.categories)
                 await ws_manager.broadcast({
                     "type": "categories_list",
                     "categories": [c.model_dump() for c in msg.categories]

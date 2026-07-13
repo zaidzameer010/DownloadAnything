@@ -254,7 +254,13 @@
       console.log("Direct activation triggered via toolbar button.");
       let targetUrl = window.location.href;
       if (activeMedia) {
-        const src = activeMedia.src;
+        let src = activeMedia.currentSrc || activeMedia.src;
+        if (!src && activeMedia.getElementsByTagName) {
+          const sources = activeMedia.getElementsByTagName("source");
+          if (sources.length > 0) {
+            src = sources[0].src;
+          }
+        }
         if (src && !src.startsWith("blob:") && src.startsWith("http")) {
           targetUrl = src;
         }

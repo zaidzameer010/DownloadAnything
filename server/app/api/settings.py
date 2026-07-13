@@ -31,6 +31,9 @@ class AppSettings(BaseModel):
     aria2Preallocate: bool = True
     aria2CheckCertificate: bool = True
     aria2AlwaysResume: bool = True
+    
+    # General queue limit
+    maxConcurrentDownloads: int = 2
 
 from app.config import settings, get_config_file_path
 

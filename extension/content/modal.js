@@ -342,7 +342,7 @@
       content.innerHTML = `
         <div class="progress-container">
           <div class="progress-label-row">
-            <span>Analyzing Media Formats...<span class="tui-cursor"></span></span>
+            <span>Analyzing Media Formats...</span>
           </div>
           <div class="progress-track">
             <div class="progress-fill indeterminate"></div>

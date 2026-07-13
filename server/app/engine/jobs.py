@@ -44,6 +44,7 @@ class JobInfo(BaseModel):
     fragment_count: Optional[int] = None
     referer: Optional[str] = None
     media_type: Optional[str] = None
+    added_at: float = 0.0
 
 class JobRegistry:
     def __init__(self):
@@ -79,8 +80,9 @@ class JobRegistry:
             logger.error(f"Failed to save jobs to file: {e}")
 
     def create_job(self, job_id: str, url: str, status: str = "queued") -> JobInfo:
+        import time
         with self._lock:
-            job = JobInfo(job_id=job_id, url=url, status=status)
+            job = JobInfo(job_id=job_id, url=url, status=status, added_at=time.time())
             self._jobs[job_id] = job
             self._pause_events[job_id] = threading.Event()
             self._save_jobs()
