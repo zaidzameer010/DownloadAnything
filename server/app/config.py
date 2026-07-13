@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 import tempfile
-from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -19,16 +18,6 @@ class Settings(BaseSettings):
     MAX_CONCURRENT_DOWNLOADS: int = 2
     FFMPEG_PATH: str = "ffmpeg"  # Will rely on PATH unless overridden
     LOG_LEVEL: str = "INFO"
-    
-    # List of allowed origins for CORS. 
-    # Since chrome extensions have dynamic IDs, we will handle origin checking dynamically or allow '*'
-    ALLOWED_ORIGINS: List[str] = [
-        "chrome-extension://*",
-        "moz-extension://*",
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://localhost:8765"
-    ]
     
     # Directory to store temp Netscape cookies
     COOKIE_JAR_DIR: str = os.path.join(tempfile.gettempdir(), "md_cookies")

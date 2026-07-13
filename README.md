@@ -48,7 +48,7 @@ From the workspace root, navigate to the server and boot the FastAPI gateway:
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the backend (defaults to http://127.0.0.1:8765)
+# Run the backend (defaults to ws://127.0.0.1:8765/ws)
 python server/app/main.py
 ```
 

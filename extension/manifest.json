@@ -1,51 +1,46 @@
 {
-  "manifest_version": 3,
-  "name": "DownloadAnything Media Downloader",
-  "version": "0.4.0",
-  "description": "yt-dlp powered browser integrated media downloader with high-quality codec sorting.",
-  "minimum_chrome_version": "116",
-  "permissions": [
-    "activeTab",
-    "scripting",
-    "storage",
-    "tabs",
-    "alarms",
-    "webRequest",
-    "webNavigation",
-    "downloads",
-    "offscreen"
-  ],
-  "host_permissions": [
-    "http://localhost/*",
-    "ws://localhost/*",
-    "wss://localhost/*",
-    "http://127.0.0.1/*",
-    "http://*/*",
-    "https://*/*"
-  ],
-  "content_scripts": [
-    {
-      "matches": [
-        "http://*/*",
-        "https://*/*"
-      ],
-      "css": ["content/styles.css"],
-      "js": ["content/modal.js", "content/overlay.js"],
-      "run_at": "document_end",
-      "all_frames": true
-    }
-  ],
-  "background": {
-    "service_worker": "background/service-worker.js",
-    "type": "module"
-  },
-  "action": {
-    "default_title": "DownloadAnything Downloader"
-  },
-  "web_accessible_resources": [
-    {
-      "resources": ["content/styles.css"],
-      "matches": ["<all_urls>"]
-    }
-  ]
+	"manifest_version": 3,
+	"name": "DownloadAnything Media Downloader",
+	"version": "0.4.0",
+	"description": "yt-dlp powered browser integrated media downloader with high-quality codec sorting.",
+	"minimum_chrome_version": "116",
+	"permissions": [
+		"activeTab",
+		"scripting",
+		"storage",
+		"tabs",
+		"alarms",
+		"webRequest",
+		"webNavigation",
+		"downloads",
+		"offscreen"
+	],
+	"host_permissions": [
+		"ws://localhost/*",
+		"wss://localhost/*",
+		"http://*/*",
+		"https://*/*"
+	],
+	"content_scripts": [
+		{
+			"matches": ["http://*/*", "https://*/*"],
+			"css": ["content/styles.css"],
+			"js": ["content/modal.js", "content/overlay.js"],
+			"run_at": "document_end",
+			"all_frames": true
+		}
+	],
+	"background": {
+		"service_worker": "background/service-worker.js",
+		"type": "module"
+	},
+	"action": {
+		"default_title": "DownloadAnything Downloader"
+	},
+	"web_accessible_resources": [
+		{
+			"resources": ["content/styles.css"],
+			"matches": ["<all_urls>"]
+		}
+	]
 }
