@@ -1,16 +1,21 @@
-import os
 import json
 import threading
-from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
 from pydantic import BaseModel
-from app.config import get_config_file_path
+
+from app.config import get_config_file_path, write_json_atomic
+from app.utils.logger import logger
 
 JOBS_FILE = get_config_file_path("jobs.json")
 
+
 class DownloadPaused(Exception):
     """Exception raised when a download is paused."""
+
     pass
+
 
 class JobInfo(BaseModel):
     model_config = {"arbitrary_types_allowed": True, "frozen": False}
@@ -29,7 +34,7 @@ class JobInfo(BaseModel):
     combined_downloaded_bytes: float = 0.0
     combined_total_bytes: float = 0.0
     # Which stream phase: 'video', 'audio', or 'single'
-    stream_phase: str = 'single'
+    stream_phase: str = "single"
     speed: float = 0.0
     eta: float = 0.0
     format_id: Optional[str] = None
@@ -44,8 +49,22 @@ class JobInfo(BaseModel):
     fragment_index: Optional[int] = None
     fragment_count: Optional[int] = None
     referer: Optional[str] = None
+    probe_format_ids: Optional[List[str]] = None
+    probe_timestamp: Optional[float] = None
+    probe_referer: Optional[str] = None
     media_type: Optional[str] = None
+    mime: Optional[str] = None
+    filename: Optional[str] = None
+    torrent_files: Optional[List[Dict[str, Any]]] = None
+    torrent_info_hash: Optional[str] = None
+    torrent_piece_length: Optional[int] = None
+    torrent_piece_count: Optional[int] = None
+    torrent_peers: int = 0
+    torrent_seeds: int = 0
+    torrent_availability: float = 0.0
+    torrent_completed_pieces: int = 0
     added_at: float = 0.0
+
 
 class JobRegistry:
     def __init__(self):
@@ -60,7 +79,12 @@ class JobRegistry:
                 with open(JOBS_FILE, "r") as f:
                     data = json.load(f)
                     for k, v in data.items():
-                        if v.get("status") in ["queued", "probing", "downloading", "postprocessing"]:
+                        if v.get("status") in [
+                            "queued",
+                            "probing",
+                            "downloading",
+                            "postprocessing",
+                        ]:
                             v["status"] = "paused"
                             v["speed"] = 0.0
                             v["eta"] = 0.0
@@ -68,24 +92,16 @@ class JobRegistry:
                         self._jobs[k] = job
                         self._pause_events[k] = threading.Event()
             except Exception as e:
-                from app.utils.logger import logger
                 logger.error(f"Failed to load jobs from file: {e}")
 
     def _save_jobs(self):
         try:
             data = {k: v.model_dump() for k, v in self._jobs.items()}
-            tmp_path = JOBS_FILE.with_name(f"{JOBS_FILE.name}.tmp")
-            with open(tmp_path, "w") as f:
-                json.dump(data, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            tmp_path.replace(JOBS_FILE)
+            write_json_atomic(JOBS_FILE, data)
         except Exception as e:
-            from app.utils.logger import logger
             logger.error(f"Failed to save jobs to file: {e}")
 
     def create_job(self, job_id: str, url: str, status: str = "queued") -> JobInfo:
-        import time
         with self._lock:
             job = JobInfo(job_id=job_id, url=url, status=status, added_at=time.time())
             self._jobs[job_id] = job
@@ -95,7 +111,8 @@ class JobRegistry:
 
     def get_job(self, job_id: str) -> Optional[JobInfo]:
         with self._lock:
-            return self._jobs.get(job_id)
+            job = self._jobs.get(job_id)
+            return job.model_copy() if job else None
 
     def get_job_snapshot(self, job_id: str) -> Optional[Tuple[str, Optional[str]]]:
         with self._lock:
@@ -104,7 +121,9 @@ class JobRegistry:
                 return job.status, job.file_path
             return None
 
-    def update_job(self, job_id: str, persist: bool = True, **kwargs) -> Optional[JobInfo]:
+    def update_job(
+        self, job_id: str, persist: bool = True, **kwargs: object
+    ) -> Optional[JobInfo]:
         """
         Update a job's fields.
         persist=False skips the filesystem write — use this for high-frequency
@@ -164,6 +183,7 @@ class JobRegistry:
     def list_jobs(self) -> Dict[str, JobInfo]:
         with self._lock:
             return {k: v.model_copy() for k, v in self._jobs.items()}
+
 
 # Global singleton
 jobs_registry = JobRegistry()

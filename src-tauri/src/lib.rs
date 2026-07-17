@@ -16,10 +16,8 @@ fn open_browser_extension_folder(app: tauri::AppHandle) -> Result<(), String> {
   let extension_path = extension_path.to_string_lossy().to_string();
   let command = if cfg!(target_os = "macos") {
     std::process::Command::new("open").arg(&extension_path).spawn()
-  } else if cfg!(target_os = "windows") {
-    std::process::Command::new("explorer").arg(&extension_path).spawn()
   } else {
-    std::process::Command::new("xdg-open").arg(&extension_path).spawn()
+    std::process::Command::new("explorer").arg(&extension_path).spawn()
   };
   command.map_err(|err| err.to_string())?;
   Ok(())
@@ -53,7 +51,7 @@ pub fn run() {
                   added = true;
               }
           } else {
-              // On Windows/Linux, look for a submenu titled "Help"
+              // On Windows, look for a submenu titled "Help"
               for item in &items {
                   if let tauri::menu::MenuItemKind::Submenu(submenu) = item {
                       if let Ok(title) = submenu.text() {
@@ -293,6 +291,69 @@ pub struct BrowserInfo {
   extensions_url: String,
 }
 
+struct BrowserDef {
+  name: &'static str,
+  key: &'static str,
+  macos_app_names: &'static [&'static str],
+  windows_exe_paths: &'static [&'static str],
+  extensions_url: &'static str,
+}
+
+const BROWSERS: [BrowserDef; 4] = [
+  BrowserDef {
+    name: "Google Chrome",
+    key: "chrome",
+    macos_app_names: &["Google Chrome"],
+    windows_exe_paths: &[
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    ],
+    extensions_url: "chrome://extensions",
+  },
+  BrowserDef {
+    name: "Brave Browser",
+    key: "brave",
+    macos_app_names: &["Brave Browser"],
+    windows_exe_paths: &[
+      "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+      "C:\\Program Files (x86)\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+    ],
+    extensions_url: "brave://extensions",
+  },
+  BrowserDef {
+    name: "Mozilla Firefox",
+    key: "firefox",
+    macos_app_names: &["Firefox"],
+    windows_exe_paths: &[
+      "C:\\Program Files\\Mozilla Firefox\\firefox.exe",
+      "C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe",
+    ],
+    extensions_url: "about:debugging",
+  },
+  BrowserDef {
+    name: "Ark",
+    key: "ark",
+    macos_app_names: &["Ark", "Ark Browser", "Arc", "Arc Browser"],
+    windows_exe_paths: &[
+      "C:\\Program Files\\Ark\\Application\\ark.exe",
+      "C:\\Program Files (x86)\\Ark\\Application\\ark.exe",
+      "C:\\Program Files\\Arc\\Application\\arc.exe",
+      "C:\\Program Files (x86)\\Arc\\Application\\arc.exe",
+    ],
+    extensions_url: "chrome://extensions",
+  },
+];
+
+fn find_macos_browser_name<'a>(names: &'a [&'a str]) -> Option<&'a str> {
+  names.iter().find(|name| {
+    std::path::PathBuf::from(format!("/Applications/{}.app", name)).exists()
+  }).copied()
+}
+
+fn find_windows_browser_path<'a>(paths: &'a [&'a str]) -> Option<&'a str> {
+  paths.iter().find(|path| std::path::Path::new(path).exists()).copied()
+}
+
 fn get_extension_persistent_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
   let app_dir = app
     .path()
@@ -347,22 +408,6 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     child.wait().map_err(|err| err.to_string())?;
   }
 
-  #[cfg(target_os = "linux")]
-  {
-    use std::io::Write;
-    if let Ok(mut child) = std::process::Command::new("xclip")
-      .arg("-selection")
-      .arg("clipboard")
-      .stdin(std::process::Stdio::piped())
-      .spawn()
-    {
-      if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(text.as_bytes());
-      }
-      let _ = child.wait();
-    }
-  }
-
   Ok(())
 }
 
@@ -370,54 +415,22 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 fn detect_installed_browsers() -> Result<Vec<BrowserInfo>, String> {
   let mut browsers = Vec::new();
 
-  // Chrome
-  let chrome_installed = if cfg!(target_os = "macos") {
-    std::path::Path::new("/Applications/Google Chrome.app").exists()
-  } else if cfg!(target_os = "windows") {
-    std::path::Path::new("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe").exists()
-      || std::path::Path::new("C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe").exists()
-  } else {
-    std::process::Command::new("which").arg("google-chrome").output().is_ok()
-  };
+  for def in &BROWSERS {
+    let installed = if cfg!(target_os = "macos") {
+      find_macos_browser_name(def.macos_app_names).is_some()
+    } else if cfg!(target_os = "windows") {
+      find_windows_browser_path(def.windows_exe_paths).is_some()
+    } else {
+      false
+    };
 
-  browsers.push(BrowserInfo {
-    name: "Google Chrome".to_string(),
-    key: "chrome".to_string(),
-    installed: chrome_installed,
-    extensions_url: "chrome://extensions".to_string(),
-  });
-
-  // Edge
-  let edge_installed = if cfg!(target_os = "macos") {
-    std::path::Path::new("/Applications/Microsoft Edge.app").exists()
-  } else if cfg!(target_os = "windows") {
-    std::path::Path::new("C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe").exists()
-  } else {
-    std::process::Command::new("which").arg("microsoft-edge").output().is_ok()
-  };
-
-  browsers.push(BrowserInfo {
-    name: "Microsoft Edge".to_string(),
-    key: "edge".to_string(),
-    installed: edge_installed,
-    extensions_url: "edge://extensions".to_string(),
-  });
-
-  // Brave
-  let brave_installed = if cfg!(target_os = "macos") {
-    std::path::Path::new("/Applications/Brave Browser.app").exists()
-  } else if cfg!(target_os = "windows") {
-    std::path::Path::new("C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe").exists()
-  } else {
-    std::process::Command::new("which").arg("brave-browser").output().is_ok()
-  };
-
-  browsers.push(BrowserInfo {
-    name: "Brave Browser".to_string(),
-    key: "brave".to_string(),
-    installed: brave_installed,
-    extensions_url: "brave://extensions".to_string(),
-  });
+    browsers.push(BrowserInfo {
+      name: def.name.to_string(),
+      key: def.key.to_string(),
+      installed,
+      extensions_url: def.extensions_url.to_string(),
+    });
+  }
 
   Ok(browsers)
 }
@@ -437,84 +450,30 @@ fn install_extension_for_browser(app: tauri::AppHandle, browser_key: String) -> 
 
   copy_to_clipboard(&dst_path_str)?;
 
+  let def = BROWSERS.iter().find(|d| d.key == browser_key).ok_or("Unknown browser")?;
+
   #[cfg(target_os = "macos")]
   {
-    let app_name = match browser_key.as_str() {
-      "chrome" => "Google Chrome",
-      "edge" => "Microsoft Edge",
-      "brave" => "Brave Browser",
-      _ => "Google Chrome",
-    };
-    let extensions_url = match browser_key.as_str() {
-      "chrome" => "chrome://extensions",
-      "edge" => "edge://extensions",
-      "brave" => "brave://extensions",
-      _ => "chrome://extensions",
-    };
-    let _ = std::process::Command::new("open")
-      .arg("-a")
-      .arg(app_name)
-      .arg(extensions_url)
-      .arg("--args")
-      .arg(format!("--load-extension={}", dst_path_str))
-      .spawn();
+    if let Some(app_name) = find_macos_browser_name(def.macos_app_names) {
+      let mut cmd = std::process::Command::new("open");
+      cmd.arg("-a").arg(app_name).arg("--args").arg(def.extensions_url);
+      if def.key != "firefox" {
+        cmd.arg(format!("--load-extension={}", dst_path_str));
+      }
+      let _ = cmd.spawn();
+    }
   }
 
   #[cfg(target_os = "windows")]
   {
-    let exec_path = match browser_key.as_str() {
-      "chrome" => vec![
-        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-      ],
-      "edge" => vec!["C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"],
-      "brave" => vec!["C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"],
-      _ => vec!["C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"],
-    };
-    let extensions_url = match browser_key.as_str() {
-      "chrome" => "chrome://extensions",
-      "edge" => "edge://extensions",
-      "brave" => "brave://extensions",
-      _ => "chrome://extensions",
-    };
-    
-    let mut launched = false;
-    for path in exec_path {
-      if std::path::Path::new(path).exists() {
-        let _ = std::process::Command::new(path)
-          .arg(extensions_url)
-          .arg(format!("--load-extension={}", dst_path_str))
-          .spawn();
-        launched = true;
-        break;
+    if let Some(exe_path) = find_windows_browser_path(def.windows_exe_paths) {
+      let mut cmd = std::process::Command::new(exe_path);
+      cmd.arg(def.extensions_url);
+      if def.key != "firefox" {
+        cmd.arg(format!("--load-extension={}", dst_path_str));
       }
+      let _ = cmd.spawn();
     }
-    
-    if !launched {
-      let _ = std::process::Command::new("cmd")
-        .args(&["/C", "start", extensions_url])
-        .spawn();
-    }
-  }
-
-  #[cfg(target_os = "linux")]
-  {
-    let exec_name = match browser_key.as_str() {
-      "chrome" => "google-chrome",
-      "edge" => "microsoft-edge",
-      "brave" => "brave-browser",
-      _ => "google-chrome",
-    };
-    let extensions_url = match browser_key.as_str() {
-      "chrome" => "chrome://extensions",
-      "edge" => "edge://extensions",
-      "brave" => "brave://extensions",
-      _ => "chrome://extensions",
-    };
-    let _ = std::process::Command::new(exec_name)
-      .arg(extensions_url)
-      .arg(format!("--load-extension={}", dst_path_str))
-      .spawn();
   }
 
   Ok(dst_path_str)

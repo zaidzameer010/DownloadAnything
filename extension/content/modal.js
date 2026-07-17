@@ -1,180 +1,169 @@
-(function() {
-  if (window.DownloadAnythingModalInjected) return;
-  window.DownloadAnythingModalInjected = true;
+(() => {
+	if (window.DownloadAnythingModalInjected) return;
+	window.DownloadAnythingModalInjected = true;
 
-  console.log("DownloadAnything Modal Injected.");
+	console.log("DownloadAnything Modal Injected.");
 
-  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-  }[c]));
+	const escapeHtml = (s) =>
+		String(s == null ? "" : s).replace(
+			/[&<>"']/g,
+			(c) =>
+				({
+					"&": "&amp;",
+					"<": "&lt;",
+					">": "&gt;",
+					'"': "&quot;",
+					"'": "&#39;",
+				})[c],
+		);
 
-  const generateJobId = (prefix = "job") => {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      return `${prefix}_${crypto.randomUUID()}`;
-    }
-    return `${prefix}_${Math.random().toString(36).slice(2, 11)}`;
-  };
+	const DEFAULT_THUMBNAIL =
+		"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='80' viewBox='0 0 120 80'><rect width='120' height='80' fill='%232a2a2a'/><path d='M50,30 L75,40 L50,50 Z' fill='%23666666'/></svg>";
 
-  let modalElement = null;
-  let shadowRoot = null;
-  let currentJobId = null;
-  let mediaUrl = null;
-  let lastOutputDir = "";
-  const initiatedJobIds = new Set();
+	const sanitizeUrl = (url, allowedSchemes = ["http:", "https:", "data:"]) => {
+		if (!url) return null;
+		try {
+			const u = new URL(url, window.location.href);
+			if (!allowedSchemes.includes(u.protocol)) return null;
+			if (u.protocol === "data:") {
+				if (!u.pathname.toLowerCase().startsWith("image/")) return null;
+				const hrefLower = u.href.toLowerCase();
+				if (
+					hrefLower.includes("<script") ||
+					hrefLower.includes("onerror") ||
+					hrefLower.includes("onload") ||
+					hrefLower.includes("javascript:")
+				) {
+					return null;
+				}
+			}
+			return u.href;
+		} catch {
+			return null;
+		}
+	};
 
-  let currentTitle = "";
-  let selectedFormatId = "";
-  let selectedOutputDir = "";
-  let currentSniffedStreams = [];
-  let interceptedData = null;
+	const formatBytes = (bytes) => {
+		if (!bytes) return "0 B";
+		const units = ["B", "KB", "MB", "GB", "TB"];
+		const index = Math.min(
+			Math.floor(Math.log(bytes) / Math.log(1024)),
+			units.length - 1,
+		);
+		return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+	};
 
-  function getPageVideoTitle() {
-    // 1. Try Open Graph title
-    const ogTitle = document.querySelector('meta[property="og:title"]');
-    if (ogTitle && ogTitle.content) {
-      const val = ogTitle.content.trim();
-      if (val && val.length > 2) return val;
-    }
+	const getEngineBadge = (mediaType) => {
+		switch (mediaType) {
+			case "stream":
+				return { label: "Stream", cls: "stream" };
+			case "torrent":
+				return { label: "Torrent", cls: "torrent" };
+			default:
+				return { label: "yt-dlp", cls: "ytdlp" };
+		}
+	};
 
-    // 2. Try Twitter title
-    const twTitle = document.querySelector('meta[name="twitter:title"]');
-    if (twTitle && twTitle.content) {
-      const val = twTitle.content.trim();
-      if (val && val.length > 2) return val;
-    }
+	const generateJobId = (prefix = "job") => {
+		if (
+			typeof crypto !== "undefined" &&
+			typeof crypto.randomUUID === "function"
+		) {
+			return `${prefix}_${crypto.randomUUID()}`;
+		}
+		if (
+			typeof crypto !== "undefined" &&
+			typeof crypto.getRandomValues === "function"
+		) {
+			const bytes = new Uint8Array(16);
+			crypto.getRandomValues(bytes);
+			return `${prefix}_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+		}
+		return `${prefix}_${Date.now().toString(36)}`;
+	};
 
-    // 3. Try to find the main H1 heading on the page
-    const h1 = document.querySelector('h1');
-    if (h1) {
-      const val = h1.textContent.trim();
-      if (val && val.length > 2 && val.length < 150) return val;
-    }
+	let modalElement = null;
+	let shadowRoot = null;
+	let currentJobId = null;
+	let currentMediaType = null;
+	let mediaUrl = null;
+	let lastOutputDir = "";
+	let customOutputDir = "";
+	const initiatedJobIds = new Set();
 
-    // 4. Fallback to standard document title
-    let docTitle = (document.title || "").trim();
-    return docTitle || "video";
-  }
+	let currentTitle = "";
+	let selectedFormatId = "";
+	let currentSniffedStreams = [];
+	let interceptedData = null;
+	let currentFormats = [];
+	let fallbackStage = "native"; // "native" | "stream" | "direct" | "done"
+	let fallbackQueue = [];
+	const fallbackUrlsTried = new Set();
 
-  function extractMediaTitle(el) {
-    if (!el) return null;
+	// Load last output dir from storage
+	chrome.storage.local.get(["lastOutputDir"], (res) => {
+		if (res.lastOutputDir) lastOutputDir = res.lastOutputDir;
+	});
 
-    // 1. Check direct attributes of the media element
-    for (const attr of ["title", "aria-label", "alt", "name", "id"]) {
-      const val = el.getAttribute(attr);
-      if (val && val.trim().length > 2 && val.trim().length < 150) {
-        return val.trim();
-      }
-    }
+	const Modal = {
+		show(targetUrl) {
+			this.create();
+			this.setProbingState();
 
-    // 2. Traversal up to check siblings/headings in the parent player container
-    let parent = el.parentElement;
-    for (let depth = 0; depth < 5 && parent; depth++) {
-      if (parent === document.body || parent === document.documentElement) break;
+			// Initialize fallback state
+			fallbackStage = "native";
+			fallbackQueue = [];
+			fallbackUrlsTried.clear();
 
-      const heading = parent.querySelector("h1, h2, h3, h4, h5, h6");
-      if (heading) {
-        const val = heading.textContent.trim();
-        if (val && val.length > 2 && val.length < 150) return val;
-      }
+			// Get sniffed streams first (just to keep our registry current)
+			chrome.runtime.sendMessage({ type: "GET_SNIFFED_STREAMS" }, (res) => {
+				if (!modalElement) return;
+				currentSniffedStreams = Array.isArray(res?.streams) ? res.streams : [];
 
-      const titleClasses = [
-        "[class*='title']", "[class*='name']", "[class*='caption']", "[class*='heading']",
-        "[id*='title']", "[id*='name']", "[id*='caption']"
-      ];
-      for (const selector of titleClasses) {
-        const titleEl = parent.querySelector(selector);
-        if (titleEl && titleEl !== el) {
-          const val = titleEl.textContent.trim();
-          if (val && val.length > 2 && val.length < 150 && !val.includes("\n")) {
-            return val;
-          }
-        }
-      }
-      
-      parent = parent.parentElement;
-    }
+				const initialUrl = targetUrl || window.location.href;
+				mediaUrl = initialUrl;
+				fallbackUrlsTried.add(initialUrl);
 
-    return null;
-  }
+				currentJobId = generateJobId("job_probe");
 
-  function getActiveMediaTitle() {
-    const activeMedia = window.DownloadAnythingActiveMedia;
-    return extractMediaTitle(activeMedia);
-  }
+				// Start probing; pass the page title so the backend can use it as a filename hint.
+				chrome.runtime.sendMessage({
+					type: "PROBE_MEDIA",
+					jobId: currentJobId,
+					url: initialUrl,
+					title: document.title || "",
+					referer: window.location.href,
+				});
+			});
+		},
 
-  function resolveBestTitleForUrl(url) {
-    const matchedStream = currentSniffedStreams.find(s => s.url === url);
-    if (matchedStream && matchedStream.title) {
-      return matchedStream.title;
-    }
-    
-    const activeMedia = window.DownloadAnythingActiveMedia;
-    if (activeMedia) {
-      const src = activeMedia.src;
-      if (src === url || (src && url.includes(src)) || (src && src.includes(url))) {
-        const activeTitle = getActiveMediaTitle();
-        if (activeTitle) return activeTitle;
-      }
-    }
-    
-    return getPageVideoTitle();
-  }
+		showIntercepted(download) {
+			this.create();
 
-  
+			interceptedData = download;
+			currentJobId = generateJobId("job_intercept");
 
+			currentTitle = download.filename || "downloaded_file";
+			mediaUrl = download.url;
 
-  // Load last output dir from storage
-  chrome.storage.local.get(["lastOutputDir"], (res) => {
-    if (res.lastOutputDir) lastOutputDir = res.lastOutputDir;
-  });
+			const content = shadowRoot.getElementById("modalContent");
+			if (!content) return;
 
-  const Modal = {
-    show(targetUrl) {
-      this.create();
-      this.setProbingState();
-      
-      // Get sniffed streams first (just to keep our registry current)
-      chrome.runtime.sendMessage({ type: "GET_SNIFFED_STREAMS" }, (res) => {
-        currentSniffedStreams = res?.streams || [];
-        
-        const initialUrl = targetUrl || window.location.href;
-        mediaUrl = initialUrl;
-        
-        // Start probing
-        chrome.runtime.sendMessage({
-          type: "PROBE_MEDIA",
-          url: initialUrl,
-          title: resolveBestTitleForUrl(initialUrl)
-        });
-      });
-    },
+			let sizeStr = "Unknown Size";
+			if (download.fileSize && download.fileSize > 0) {
+				const sizeBytes = download.fileSize;
+				if (sizeBytes >= 1024 * 1024 * 1024) {
+					sizeStr = `${(sizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+				} else if (sizeBytes >= 1024 * 1024) {
+					sizeStr = `${(sizeBytes / 1024 / 1024).toFixed(2)} MB`;
+				} else if (sizeBytes >= 1024) {
+					sizeStr = `${(sizeBytes / 1024).toFixed(2)} KB`;
+				} else {
+					sizeStr = `${sizeBytes} B`;
+				}
+			}
 
-    showIntercepted(download) {
-      this.create();
-
-      interceptedData = download;
-      currentJobId = generateJobId("job_intercept");
-      currentTitle = download.filename || "downloaded_file";
-      mediaUrl = download.url;
-
-      const content = shadowRoot.getElementById("modalContent");
-      if (!content) return;
-
-      let sizeStr = "Unknown Size";
-      if (download.fileSize && download.fileSize > 0) {
-        const sizeBytes = download.fileSize;
-        if (sizeBytes >= 1024 * 1024 * 1024) {
-          sizeStr = `${(sizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-        } else if (sizeBytes >= 1024 * 1024) {
-          sizeStr = `${(sizeBytes / 1024 / 1024).toFixed(2)} MB`;
-        } else if (sizeBytes >= 1024) {
-          sizeStr = `${(sizeBytes / 1024).toFixed(2)} KB`;
-        } else {
-          sizeStr = `${sizeBytes} B`;
-        }
-      }
-
-      const mediaHtml = `
+			const mediaHtml = `
         <div class="media-info">
           <img class="media-thumb" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='88' height='50' viewBox='0 0 88 50'><rect width='88' height='50' fill='%231f2937' rx='4'/><g transform='translate(32, 13)' fill='none' stroke='%23a855f7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/><polyline points='14 2 14 8 20 8'/><line x1='16' y1='13' x2='8' y2='13'/><line x1='16' y1='17' x2='8' y2='17'/><polyline points='10 9 9 9 8 9'/></g></svg>" alt="" />
           <div class="media-details">
@@ -182,7 +171,7 @@
             <div class="media-meta">
               <span>Size: ${sizeStr}</span>
               <span>•</span>
-              <span>Type: ${escapeHtml(download.mime || 'Unknown')}</span>
+              <span>Type: ${escapeHtml(download.mime || "Unknown")}</span>
               <span>•</span>
               <span class="badge engine browser-engine" style="border-color: #a855f7; color: #a855f7;">Browser Intercept</span>
             </div>
@@ -190,7 +179,7 @@
         </div>
       `;
 
-      const formatsHtml = `
+			const formatsHtml = `
         <div class="format-list">
           <label class="format-item">
             <input type="radio" name="videoFormat" value="best" checked>
@@ -204,7 +193,7 @@
         </div>
       `;
 
-      const outputHtml = `
+			const outputHtml = `
         <div class="output-row">
           <label>Save Destination</label>
           <div class="output-input-group">
@@ -215,53 +204,57 @@
         </div>
       `;
 
-      content.innerHTML = `
+			content.innerHTML = `
         ${mediaHtml}
         <div style="font-size: 10px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;">Download Info</div>
         ${formatsHtml}
         ${outputHtml}
       `;
 
-      // Enable Download button
-      shadowRoot.getElementById("btnFooterDownload").disabled = false;
+			// Enable Download button
+			shadowRoot.getElementById("btnFooterDownload").disabled = false;
 
-      // Load categories list and populate
-      chrome.runtime.sendMessage({ type: "GET_CATEGORIES" });
-    },
+			// Load categories list and populate
+			chrome.runtime.sendMessage({ type: "GET_CATEGORIES" });
+		},
 
-    create() {
-      if (modalElement) return;
+		create() {
+			if (modalElement) return;
 
-      modalElement = document.createElement("div");
-      modalElement.id = "download-anything-modal-root";
-      document.body.appendChild(modalElement);
+			modalElement = document.createElement("div");
+			modalElement.id = "download-anything-modal-root";
+			document.body.appendChild(modalElement);
 
-      shadowRoot = modalElement.attachShadow({ mode: "open" });
+			shadowRoot = modalElement.attachShadow({ mode: "open" });
 
-      // Injected Stylesheet
-      const styleLink = document.createElement("link");
-      styleLink.rel = "stylesheet";
-      styleLink.href = chrome.runtime.getURL("content/styles.css");
-      shadowRoot.appendChild(styleLink);
+			// Injected Stylesheet
+			const styleLink = document.createElement("link");
+			styleLink.rel = "stylesheet";
+			try {
+				styleLink.href = chrome.runtime.getURL("content/styles.css");
+			} catch {
+				return;
+			}
+			shadowRoot.appendChild(styleLink);
 
-      // Backdrop
-      const backdrop = document.createElement("div");
-      backdrop.className = "modal-backdrop";
-      backdrop.addEventListener("click", (e) => {
-        // Only dismiss if not downloading
-        const isDownloading = shadowRoot?.querySelector(".progress-container");
-        if (e.target === backdrop && !isDownloading) {
-          this.close();
-        }
-      });
+			// Backdrop
+			const backdrop = document.createElement("div");
+			backdrop.className = "modal-backdrop";
+			backdrop.addEventListener("click", (e) => {
+				// Only dismiss if not downloading
+				const isDownloading = shadowRoot?.querySelector(".progress-container");
+				if (e.target === backdrop && !isDownloading) {
+					this.close();
+				}
+			});
 
-      // Escape key to close
-      document.addEventListener("keydown", this.handleEsc);
+			// Escape key to close
+			document.addEventListener("keydown", this.handleEsc);
 
-      // Modal Box
-      const box = document.createElement("div");
-      box.className = "modal-box";
-      box.innerHTML = `
+			// Modal Box
+			const box = document.createElement("div");
+			box.className = "modal-box";
+			box.innerHTML = `
         <div class="modal-header">
           <h2>Download Settings</h2>
           <button class="close-btn" id="btnClose">
@@ -280,66 +273,75 @@
         </div>
       `;
 
-      backdrop.appendChild(box);
-      shadowRoot.appendChild(backdrop);
+			backdrop.appendChild(box);
+			shadowRoot.appendChild(backdrop);
 
-      shadowRoot.getElementById("btnClose").addEventListener("click", () => this.close());
-      shadowRoot.getElementById("btnFooterCancel").addEventListener("click", () => this.close());
-      shadowRoot.getElementById("btnFooterDownload").addEventListener("click", () => this.startDownload());
-    },
+			shadowRoot
+				.getElementById("btnClose")
+				.addEventListener("click", () => this.close());
+			shadowRoot
+				.getElementById("btnFooterCancel")
+				.addEventListener("click", () => this.close());
+			shadowRoot
+				.getElementById("btnFooterDownload")
+				.addEventListener("click", () => this.startDownload());
+		},
 
-    close() {
-      document.removeEventListener("keydown", this.handleEsc);
-      
-      if (currentJobId && !initiatedJobIds.has(currentJobId)) {
-        chrome.runtime.sendMessage({
-          type: "CANCEL_PROBE",
-          jobId: currentJobId
-        });
-      }
+		close() {
+			document.removeEventListener("keydown", this.handleEsc);
 
-      if (modalElement) {
-        modalElement.remove();
-        modalElement = null;
-        shadowRoot = null;
-      }
-      currentJobId = null;
-      interceptedData = null;
-    },
+			if (currentJobId && !initiatedJobIds.has(currentJobId)) {
+				chrome.runtime.sendMessage({
+					type: "CANCEL_PROBE",
+					jobId: currentJobId,
+				});
+			}
 
-    handleEsc(e) {
-      if (e.key === "Escape") {
-        const isDownloading = shadowRoot?.querySelector(".progress-container");
-        if (!isDownloading) {
-          Modal.close();
-        }
-      }
-    },
+			if (modalElement) {
+				modalElement.remove();
+				modalElement = null;
+				shadowRoot = null;
+			}
+			currentJobId = null;
+			interceptedData = null;
+		},
 
-    changeSource(newUrl) {
-      if (mediaUrl === newUrl) return;
+		handleEsc(e) {
+			if (e.key === "Escape") {
+				const isDownloading = shadowRoot?.querySelector(".progress-container");
+				if (!isDownloading) {
+					Modal.close();
+				}
+			}
+		},
 
-      if (currentJobId) {
-        chrome.runtime.sendMessage({
-          type: "CANCEL_PROBE",
-          jobId: currentJobId
-        });
-      }
+		changeSource(newUrl, refererUrl = null) {
+			if (mediaUrl === newUrl) return;
 
-      mediaUrl = newUrl;
-      this.setProbingState();
-      chrome.runtime.sendMessage({
-        type: "PROBE_MEDIA",
-        url: newUrl,
-        title: resolveBestTitleForUrl(newUrl)
-      });
-    },
+			if (currentJobId) {
+				chrome.runtime.sendMessage({
+					type: "CANCEL_PROBE",
+					jobId: currentJobId,
+				});
+			}
 
-    setProbingState() {
-      const content = shadowRoot.getElementById("modalContent");
-      if (!content) return;
-      
-      content.innerHTML = `
+			currentJobId = generateJobId("job_probe");
+			mediaUrl = newUrl;
+			this.setProbingState();
+			chrome.runtime.sendMessage({
+				type: "PROBE_MEDIA",
+				jobId: currentJobId,
+				url: newUrl,
+				title: document.title || "",
+				referer: refererUrl || window.location.href,
+			});
+		},
+
+		setProbingState() {
+			const content = shadowRoot.getElementById("modalContent");
+			if (!content) return;
+
+			content.innerHTML = `
         <div class="progress-container">
           <div class="progress-label-row">
             <span>Analyzing Media Formats...</span>
@@ -352,36 +354,36 @@
           </div>
         </div>
       `;
-      shadowRoot.getElementById("btnFooterDownload").disabled = true;
-    },
+			shadowRoot.getElementById("btnFooterDownload").disabled = true;
+		},
 
-    showError(errorText, suggestion = null) {
-      const content = shadowRoot.getElementById("modalContent");
-      if (!content) return;
+		showError(errorText, suggestion = null) {
+			const content = shadowRoot.getElementById("modalContent");
+			if (!content) return;
 
-      let suggestionHtml = "";
-      if (suggestion === "cookies_required") {
-        suggestionHtml = `
+			let suggestionHtml = "";
+			if (suggestion === "cookies_required") {
+				suggestionHtml = `
           <div class="warning-message">
             YouTube requested authentication. Clicking below will automatically share your current browser tab cookies to authenticate the backend server.
           </div>
           <button class="suggestion-btn" id="btnRetryCookies">Retry with Browser Cookies</button>
         `;
-      } else if (suggestion === "po_token_required") {
-        suggestionHtml = `
+			} else if (suggestion === "po_token_required") {
+				suggestionHtml = `
           <div class="warning-message">
             YouTube requires a proof-of-work (PO) token. Make sure you have installed and loaded a PO Token Provider plugin on your yt-dlp backend.
           </div>
         `;
-      } else if (suggestion === "geo_blocked") {
-        suggestionHtml = `
+			} else if (suggestion === "geo_blocked") {
+				suggestionHtml = `
           <div class="warning-message">
             This content is geo-blocked by the publisher. Setup a proxy or a VPN on your server host to bypass.
           </div>
         `;
-      }
+			}
 
-      content.innerHTML = `
+			content.innerHTML = `
         <div style="display: flex; flex-direction: column; gap: 8px;">
           <div style="font-weight: 700; color: #ffffff; text-transform: uppercase;">Format Probing Failed</div>
           <div class="error-message">${escapeHtml(errorText)}</div>
@@ -389,197 +391,405 @@
         </div>
       `;
 
-      if (suggestion === "cookies_required") {
-        shadowRoot.getElementById("btnRetryCookies").addEventListener("click", () => {
-          this.setProbingState();
-          chrome.runtime.sendMessage({
-            type: "PROBE_MEDIA",
-            url: mediaUrl
-          });
-        });
-      }
-    },
+			if (suggestion === "cookies_required") {
+				shadowRoot
+					.getElementById("btnRetryCookies")
+					.addEventListener("click", () => {
+						this.setProbingState();
+						currentJobId = generateJobId("job_probe");
+						chrome.runtime.sendMessage({
+							type: "PROBE_MEDIA",
+							jobId: currentJobId,
+							url: mediaUrl,
+							title: document.title || "",
+							referer: window.location.href,
+						});
+					});
+			}
+		},
 
-    populateFormats(data) {
-      currentJobId = data.jobId;
-      currentTitle = data.title || "video";
-      const content = shadowRoot.getElementById("modalContent");
-      if (!content) return;
+		renderFormatList(formatsList, activeTab) {
+			const formatListContainer = shadowRoot.getElementById(
+				"formatListContainer",
+			);
+			if (!formatListContainer) return;
 
-      // Format duration (seconds to HH:MM:SS)
-      let durationStr = "N/A";
-      if (data.duration) {
-        const d = Math.round(data.duration);
-        const hrs = Math.floor(d / 3600);
-        const mins = Math.floor((d % 3600) / 60);
-        const secs = d % 60;
-        durationStr = hrs > 0 
-          ? `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}` 
-          : `${mins}:${secs.toString().padStart(2, '0')}`;
-      }
+			let formatsHtml = `
+				<div class="format-list-header">
+					<div class="format-list-radio-col"></div>
+					<div class="format-list-label-col">Stream Name</div>
+					<div class="format-list-ext-col">Ext</div>
+					<div class="format-list-size-col">Est. Size</div>
+				</div>
+			`;
 
-      // Title & Thumbnail
-      const mediaHtml = `
+			const filtered = formatsList.filter((f) => {
+				const isVideo = (f.height && f.height > 0) || f.formatId === "best";
+				return activeTab === "video" ? isVideo : !isVideo;
+			});
+
+			if (filtered.length === 0) {
+				formatsHtml += `
+					<div style="padding: 24px; text-align: center; color: var(--text-muted); font-size: 13px;">
+						No formats discovered for this tab.
+					</div>
+				`;
+			} else {
+				filtered.forEach((f, idx) => {
+					const checkedAttr = idx === 0 ? "checked" : "";
+					const sizeStr = f.estSizeBytes ? formatBytes(f.estSizeBytes) : "—";
+					const isSelectedClass = idx === 0 ? "selected" : "";
+
+					formatsHtml += `
+						<div class="format-list-row ${isSelectedClass}" data-format-id="${escapeHtml(f.formatId)}">
+							<div class="format-list-radio-col">
+								<input type="radio" name="videoFormat" value="${escapeHtml(f.formatId || "")}" data-ext="${escapeHtml(f.ext || "")}" ${checkedAttr}>
+							</div>
+							<div class="format-list-label-col">
+								<span class="format-list-label" title="${escapeHtml(f.label || "")}">${escapeHtml(f.label || "")}</span>
+							</div>
+							<div class="format-list-ext-col">
+								<span class="format-list-ext">${escapeHtml((f.ext || "").toUpperCase())}</span>
+							</div>
+							<div class="format-list-size-col">
+								<span class="format-list-size">${sizeStr}</span>
+							</div>
+						</div>
+					`;
+				});
+			}
+
+			formatListContainer.innerHTML = formatsHtml;
+		},
+
+		populateFormats(data) {
+			currentJobId = data.jobId;
+			currentTitle = data.title || "video";
+			currentMediaType = data.mediaType;
+			const content = shadowRoot.getElementById("modalContent");
+			if (!content) return;
+
+			// Format duration (seconds to HH:MM:SS)
+			let durationStr = "N/A";
+			if (data.duration) {
+				const d = Math.round(data.duration);
+				const hrs = Math.floor(d / 3600);
+				const mins = Math.floor((d % 3600) / 60);
+				const secs = d % 60;
+				durationStr =
+					hrs > 0
+						? `${hrs}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
+						: `${mins}:${secs.toString().padStart(2, "0")}`;
+			}
+
+			// Title & Thumbnail
+			const mediaHtml = `
         <div class="media-info">
-          <img class="media-thumb" src="${data.thumbnail || "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='80' viewBox='0 0 120 80'><rect width='120' height='80' fill='%232a2a2a'/><path d='M50,30 L75,40 L50,50 Z' fill='%23666666'/></svg>"}" alt="" />
+          <img class="media-thumb" src="${escapeHtml(sanitizeUrl(data.thumbnail) || DEFAULT_THUMBNAIL)}" alt="" />
           <div class="media-details">
-            <div class="media-title" title="${escapeHtml(data.title)}">${escapeHtml(data.title)}</div>
-            <div class="media-meta">
-              <span>Uploader: ${escapeHtml(data.uploader || 'Unknown')}</span>
-              <span>•</span>
-              <span>Duration: ${durationStr}</span>
-              <span>•</span>
-              ${data.mediaType === "stream" 
-                ? '<span class="badge engine stream-engine">Stream</span>' 
-                : '<span class="badge engine ytdlp-engine">yt-dlp</span>'}
+            <div class="media-title" title="${escapeHtml(data.title || "")}">${escapeHtml(data.title || "")}</div>
+            <div class="meta-badges-row">
+              ${data.uploader ? `<span class="meta-badge-chip">Uploader: ${escapeHtml(data.uploader)}</span>` : ""}
+              ${data.duration ? `<span class="meta-badge-chip">Duration: ${durationStr}</span>` : ""}
+              ${
+								data.mediaType
+									? (
+											() => {
+												const badge = getEngineBadge(data.mediaType);
+												return `<span class="meta-badge-chip engine ${badge.cls}">${escapeHtml(badge.label)}</span>`;
+											}
+										)()
+									: ""
+							}
             </div>
           </div>
         </div>
       `;
 
-      // Render format selection list
-      let formatsHtml = `<div class="format-list">`;
-      let formatsList = data.formats || [];
-      if (formatsList.length === 0) {
-        formatsList = [{
-          formatId: "best",
-          label: "Best Available (Original Quality)",
-          codecFamily: "unknown",
-          ext: "mp4",
-          isCombined: true,
-          hdr: false,
-          streamType: data.mediaType === "stream" ? "stream" : undefined
-        }];
-      }
+			// Output select box with appended Browse folder button layout
+			const outputHtml = `
+				<div class="output-row" style="border: 1px dashed var(--border); border-radius: var(--radius-md); padding: 12px; display: flex; flex-direction: column; gap: 8px;">
+					<label style="font-size: 9px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">Save to Preset Category</label>
+					<div style="display: flex; gap: 8px; width: 100%;">
+						<select class="category-select" id="selCategory" style="flex: 1; outline: none;">
+							<option value="">Loading categories...</option>
+						</select>
+						<button class="footer-btn" id="btnBrowseDir" title="Browse Custom Output Location..." style="padding: 8px 12px; display: flex; align-items: center; justify-content: center; height: 32px; box-sizing: border-box; background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--text-secondary); cursor: pointer; transition: all 0.2s ease;">
+							<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/></svg>
+						</button>
+					</div>
+					<div id="customLocationContainer" style="display: none; justify-content: space-between; align-items: center; font-size: 11px; color: var(--text-secondary); marginTop: 4px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 10px; box-sizing: border-box;">
+						<span style="word-break: break-all;">
+							Custom Location: <strong style="color: #ffffff;" id="customLocationPath"></strong>
+						</span>
+						<button id="btnClearCustomDir" style="background: none; border: none; color: var(--status-failed); cursor: pointer; font-size: 11px; font-weight: 600; padding: 0 0 0 8px;">
+							Clear
+						</button>
+					</div>
+				</div>
+			`;
 
-      formatsList.forEach((f, idx) => {
-        const checkedAttr = idx === 0 ? "checked" : "";
-        
-        let badgesHtml = "";
-        badgesHtml += `<span class="badge codec">${escapeHtml(f.codecFamily)}</span>`;
-        if (f.hdr) badgesHtml += `<span class="badge hdr">hdr</span>`;
-        if (f.isCombined) badgesHtml += `<span class="badge muxed">combined</span>`;
-        if (f.streamType) badgesHtml += `<span class="badge ${f.streamType.toLowerCase()}">${escapeHtml(f.streamType)}</span>`;
+			if (data.mediaType === "torrent" && data.torrent) {
+				content.innerHTML = `
+					${mediaHtml}
+					<div class="torrent-summary">${formatBytes(data.torrent.totalSize)} · ${data.torrent.pieceCount} pieces · ${escapeHtml(data.torrent.infoHash)}</div>
+					${outputHtml}
+				`;
+				shadowRoot.getElementById("btnFooterDownload").disabled = false;
 
-        formatsHtml += `
-          <label class="format-item">
-            <input type="radio" name="videoFormat" value="${f.formatId}" data-ext="${f.ext}" ${checkedAttr}>
-            <div class="format-label-group">
-              <span class="format-label">${escapeHtml(f.label)}</span>
-              <div class="format-badges">${badgesHtml}</div>
-            </div>
-          </label>
-        `;
-      });
-      formatsHtml += `</div>`;
+				// Bind Torrent output events
+				const btnBrowse = shadowRoot.getElementById("btnBrowseDir");
+				if (btnBrowse) {
+					btnBrowse.addEventListener("click", () => {
+						const select = shadowRoot.getElementById("selCategory");
+						const initialDir = customOutputDir || (select ? select.value : "");
+						chrome.runtime.sendMessage({
+							type: "REQUEST_BROWSE",
+							initialDir: initialDir,
+						});
+					});
+				}
+				const btnClearCustom = shadowRoot.getElementById("btnClearCustomDir");
+				if (btnClearCustom) {
+					btnClearCustom.addEventListener("click", () => {
+						customOutputDir = "";
+						const container = shadowRoot.getElementById(
+							"customLocationContainer",
+						);
+						if (container) container.style.display = "none";
+					});
+				}
+				const selCategory = shadowRoot.getElementById("selCategory");
+				if (selCategory) {
+					selCategory.addEventListener("change", () => {
+						customOutputDir = "";
+						const container = shadowRoot.getElementById(
+							"customLocationContainer",
+						);
+						if (container) container.style.display = "none";
+					});
+				}
 
-      // Render category selector
-      const outputHtml = `
-        <div class="output-row">
-          <label>Save Destination</label>
-          <div class="output-input-group">
-            <select class="category-select" id="selCategory">
-              <option value="">Loading categories...</option>
-            </select>
-          </div>
-        </div>
-      `;
+				chrome.runtime.sendMessage({ type: "GET_CATEGORIES" });
+				return;
+			}
 
-      content.innerHTML = `
-        ${mediaHtml}
-        <div style="font-size: 10px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;">Available Resolutions</div>
-        ${formatsHtml}
-        ${outputHtml}
-      `;
+			currentFormats = data.formats || [];
+			if (currentFormats.length === 0) {
+				currentFormats = [
+					{
+						formatId: "best",
+						label: "Best Available (Original Quality)",
+						ext: "mp4",
+						estSizeBytes: 0,
+					},
+				];
+			}
 
-      // Enable Download button
-      shadowRoot.getElementById("btnFooterDownload").disabled = false;
+			const tabsHtml = `
+				<div class="modal-tabs">
+					<button type="button" class="modal-tab-btn active" id="tabBtnVideo">
+						<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-video"><path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2" ry="2"/></svg>
+						Video
+					</button>
+					<button type="button" class="modal-tab-btn" id="tabBtnAudio">
+						<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-music"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+						Audio
+					</button>
+				</div>
+			`;
 
-      // Load categories list and populate
-      chrome.runtime.sendMessage({ type: "GET_CATEGORIES" });
-    },
+			const formatsHtml = `<div class="format-list" id="formatListContainer"></div>`;
 
-    startDownload() {
-      if (!currentJobId) return;
+			content.innerHTML = `
+				${mediaHtml}
+				<div style="font-size: 10px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;">Available Resolutions</div>
+				${tabsHtml}
+				${formatsHtml}
+				${outputHtml}
+			`;
 
-      const checkedRadio = shadowRoot.querySelector('input[name="videoFormat"]:checked');
-      if (!checkedRadio) return;
+			// Render the initial format list
+			let activeTab = "video";
+			Modal.renderFormatList(currentFormats, activeTab);
 
-      const formatId = checkedRadio.value;
-      const ext = checkedRadio.getAttribute("data-ext") || "mp4";
-      const select = shadowRoot.getElementById("selCategory");
-      const outputDir = select ? select.value : lastOutputDir;
+			// Bind row selections (Click Row delegation)
+			const formatListEl = content.querySelector("#formatListContainer");
+			if (formatListEl) {
+				formatListEl.addEventListener("click", (e) => {
+					const row = e.target.closest(".format-list-row");
+					if (!row) return;
 
-      let cleanTitle = currentTitle.replace(/[\x00-\x1F\x7F]/g, '');
-      const mappings = {
-        '/': '／',
-        '\\': '＼',
-        ':': '：',
-        '*': '＊',
-        '?': '？',
-        '"': '＂',
-        '<': '＜',
-        '>': '＞',
-        '|': '｜'
-      };
-      for (const [char, replacement] of Object.entries(mappings)) {
-        cleanTitle = cleanTitle.replaceAll(char, replacement);
-      }
-      cleanTitle = cleanTitle.replace(/\s+/g, ' ');
-      cleanTitle = cleanTitle.trim();
-      while (cleanTitle.endsWith('.')) {
-        cleanTitle = cleanTitle.slice(0, -1).trim();
-      }
-      if (!cleanTitle) cleanTitle = 'video';
-      const filename = `${cleanTitle}.${ext}`;
+					// Unselect previous
+					const currentSelected = formatListEl.querySelector(
+						".format-list-row.selected",
+					);
+					if (currentSelected) currentSelected.classList.remove("selected");
 
-      selectedFormatId = formatId;
-      selectedOutputDir = outputDir;
+					// Select new
+					row.classList.add("selected");
+					const radio = row.querySelector('input[type="radio"]');
+					if (radio) radio.checked = true;
+				});
+			}
 
-      chrome.runtime.sendMessage({
-        type: "CHECK_FILE_EXISTS",
-        path: outputDir,
-        filename: filename,
-        jobId: currentJobId
-      });
-    },
+			// Bind Tab clicks
+			const tabBtnVideo = shadowRoot.getElementById("tabBtnVideo");
+			const tabBtnAudio = shadowRoot.getElementById("tabBtnAudio");
+			if (tabBtnVideo && tabBtnAudio) {
+				tabBtnVideo.addEventListener("click", () => {
+					if (activeTab === "video") return;
+					activeTab = "video";
+					tabBtnVideo.classList.add("active");
+					tabBtnAudio.classList.remove("active");
+					Modal.renderFormatList(currentFormats, activeTab);
+				});
+				tabBtnAudio.addEventListener("click", () => {
+					if (activeTab === "audio") return;
+					activeTab = "audio";
+					tabBtnAudio.classList.add("active");
+					tabBtnVideo.classList.remove("active");
+					Modal.renderFormatList(currentFormats, activeTab);
+				});
+			}
 
-    proceedWithDownload(jobId, formatId, outputDir, conflictResolution) {
-      initiatedJobIds.add(jobId);
+			// Bind Browse events
+			const btnBrowse = shadowRoot.getElementById("btnBrowseDir");
+			if (btnBrowse) {
+				btnBrowse.addEventListener("click", () => {
+					const select = shadowRoot.getElementById("selCategory");
+					const initialDir = customOutputDir || (select ? select.value : "");
+					chrome.runtime.sendMessage({
+						type: "REQUEST_BROWSE",
+						initialDir: initialDir,
+					});
+				});
+			}
+			const btnClearCustom = shadowRoot.getElementById("btnClearCustomDir");
+			if (btnClearCustom) {
+				btnClearCustom.addEventListener("click", () => {
+					customOutputDir = "";
+					const container = shadowRoot.getElementById(
+						"customLocationContainer",
+					);
+					if (container) container.style.display = "none";
+				});
+			}
+			const selCategory = shadowRoot.getElementById("selCategory");
+			if (selCategory) {
+				selCategory.addEventListener("change", () => {
+					customOutputDir = "";
+					const container = shadowRoot.getElementById(
+						"customLocationContainer",
+					);
+					if (container) container.style.display = "none";
+				});
+			}
 
-      const msg = {
-        type: "START_DOWNLOAD",
-        jobId: jobId,
-        formatId: formatId,
-        outputDir: outputDir,
-        conflictResolution: conflictResolution
-      };
+			// Enable Download button
+			shadowRoot.getElementById("btnFooterDownload").disabled = false;
 
-      if (interceptedData) {
-        msg.url = interceptedData.url;
-        msg.title = interceptedData.filename;
-        msg.referer = interceptedData.referrer;
-        msg.fileSize = interceptedData.fileSize;
-        msg.mime = interceptedData.mime;
-      }
+			// Load categories list and populate
+			chrome.runtime.sendMessage({ type: "GET_CATEGORIES" });
+		},
 
-      chrome.runtime.sendMessage(msg);
+		startDownload() {
+			const downloadBtn = shadowRoot?.getElementById("btnFooterDownload");
+			if (downloadBtn && downloadBtn.disabled) return;
+			if (!currentJobId) return;
 
-      Modal.showToast("Download started...");
-      this.close();
-    },
+			if (currentMediaType === "torrent") {
+				const select = shadowRoot.getElementById("selCategory");
+				const outputDir =
+					customOutputDir || (select ? select.value : lastOutputDir);
+				initiatedJobIds.add(currentJobId);
+				chrome.runtime.sendMessage({
+					type: "START_DOWNLOAD",
+					jobId: currentJobId,
+					formatId: "torrent",
+					outputDir,
+					conflictResolution: "replace",
+					url: mediaUrl,
+					title: currentTitle,
+				});
+				Modal.showToast("Torrent download started...");
+				this.close();
+				return;
+			}
 
-    createAlertModal(title, contentHtml, footerButtons) {
-      const overlay = document.createElement("div");
-      overlay.className = "modal-backdrop";
-      overlay.style.zIndex = "2147483645"; // Render on top of main picker
+			const checkedRadio = shadowRoot.querySelector(
+				'input[name="videoFormat"]:checked',
+			);
+			if (!checkedRadio) return;
 
-      const box = document.createElement("div");
-      box.className = "modal-box";
-      box.style.maxWidth = "420px";
-      box.innerHTML = `
+			const formatId = checkedRadio.value;
+			const ext = checkedRadio.getAttribute("data-ext") || null;
+			const select = shadowRoot.getElementById("selCategory");
+			const outputDir =
+				customOutputDir || (select ? select.value : lastOutputDir);
+
+			selectedFormatId = formatId;
+			lastOutputDir = outputDir;
+			chrome.storage.local.set({ lastOutputDir: outputDir }).catch(() => {});
+
+			// Let the backend resolve the final filename; send only the raw hints.
+			const checkMsg = {
+				type: "CHECK_FILE_EXISTS",
+				path: outputDir,
+				jobId: currentJobId,
+				title: interceptedData ? document.title || "" : currentTitle || "",
+				ext: ext,
+				url: interceptedData ? interceptedData.url : mediaUrl,
+				mime: interceptedData ? interceptedData.mime : null,
+			};
+			if (interceptedData && interceptedData.filename) {
+				checkMsg.filename = interceptedData.filename;
+			}
+
+			chrome.runtime.sendMessage(checkMsg);
+		},
+
+		proceedWithDownload(jobId, formatId, outputDir, conflictResolution) {
+			initiatedJobIds.add(jobId);
+
+			const msg = {
+				type: "START_DOWNLOAD",
+				jobId: jobId,
+				formatId: formatId,
+				outputDir: outputDir,
+				conflictResolution: conflictResolution,
+			};
+
+			if (interceptedData) {
+				msg.url = interceptedData.url;
+				// Let the backend resolve the title from the page title and the
+				// original filename; do not assemble the filename here.
+				msg.title = document.title || "";
+				msg.filename = interceptedData.filename;
+				msg.referer = interceptedData.referrer;
+				msg.fileSize = interceptedData.fileSize;
+				msg.mime = interceptedData.mime;
+			} else {
+				msg.title = currentTitle;
+			}
+
+			chrome.runtime.sendMessage(msg);
+
+			Modal.showToast("Download started...");
+			this.close();
+		},
+
+		createAlertModal(title, contentHtml, footerButtons) {
+			const overlay = document.createElement("div");
+			overlay.className = "modal-backdrop";
+			overlay.style.zIndex = "2147483645"; // Render on top of main picker
+
+			const box = document.createElement("div");
+			box.className = "modal-box";
+			box.style.maxWidth = "420px";
+			box.innerHTML = `
         <div class="modal-header">
-          <h2>${title}</h2>
+          <h2>${escapeHtml(title)}</h2>
           <button class="close-btn" id="btnAlertClose">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width: 14px; height: 14px; display: block;">
               <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -595,28 +805,28 @@
         </div>
       `;
 
-      overlay.appendChild(box);
-      shadowRoot.appendChild(overlay);
+			overlay.appendChild(box);
+			shadowRoot.appendChild(overlay);
 
-      const closeAlert = () => overlay.remove();
-      box.querySelector("#btnAlertClose").addEventListener("click", closeAlert);
+			const closeAlert = () => overlay.remove();
+			box.querySelector("#btnAlertClose").addEventListener("click", closeAlert);
 
-      const footer = box.querySelector("#alertFooter");
-      footerButtons.forEach(btnInfo => {
-        const btn = document.createElement("button");
-        btn.className = `footer-btn ${btnInfo.class || ''}`;
-        btn.innerText = btnInfo.text;
-        btn.style.fontSize = "10.5px";
-        btn.style.padding = "6px 12px";
-        btn.addEventListener("click", () => {
-          btnInfo.onClick(closeAlert);
-        });
-        footer.appendChild(btn);
-      });
-    },
+			const footer = box.querySelector("#alertFooter");
+			footerButtons.forEach((btnInfo) => {
+				const btn = document.createElement("button");
+				btn.className = `footer-btn ${btnInfo.class || ""}`;
+				btn.innerText = btnInfo.text;
+				btn.style.fontSize = "10.5px";
+				btn.style.padding = "6px 12px";
+				btn.addEventListener("click", () => {
+					btnInfo.onClick(closeAlert);
+				});
+				footer.appendChild(btn);
+			});
+		},
 
-    showDuplicateJobAlert(title, url, status, jobId) {
-      const contentHtml = `
+		showDuplicateJobAlert(title, url, status, jobId) {
+			const contentHtml = `
         <div style="color: var(--text-muted);">
           This link has already been submitted and exists in the task registry.
         </div>
@@ -629,20 +839,20 @@
         </div>
       `;
 
-      this.createAlertModal("Link Already In List", contentHtml, [
-        {
-          text: "Dismiss",
-          class: "cancel",
-          onClick: (closeAlert) => {
-            closeAlert();
-            this.close();
-          }
-        }
-      ]);
-    },
+			this.createAlertModal("Link Already In List", contentHtml, [
+				{
+					text: "Dismiss",
+					class: "cancel",
+					onClick: (closeAlert) => {
+						closeAlert();
+						this.close();
+					},
+				},
+			]);
+		},
 
-    showDuplicateFileAlert(filename, path, jobId) {
-      const contentHtml = `
+		showDuplicateFileAlert(filename, path, jobId) {
+			const contentHtml = `
         <div style="color: var(--text-muted);">
           A file with the same name already exists in the target save destination.
         </div>
@@ -655,39 +865,40 @@
         </div>
       `;
 
-      this.createAlertModal("Duplicate File Detected", contentHtml, [
-        {
-          text: "Cancel",
-          class: "cancel",
-          onClick: (closeAlert) => {
-            closeAlert();
-          }
-        },
-        {
-          text: "Add Anyway (Rename)",
-          class: "cancel",
-          onClick: (closeAlert) => {
-            closeAlert();
-            this.proceedWithDownload(jobId, selectedFormatId, path, "rename");
-          }
-        },
-        {
-          text: "Replace / Overwrite",
-          class: "download",
-          onClick: (closeAlert) => {
-            closeAlert();
-            this.proceedWithDownload(jobId, selectedFormatId, path, "replace");
-          }
-        }
-      ]);
-    },
+			this.createAlertModal("Duplicate File Detected", contentHtml, [
+				{
+					text: "Cancel",
+					class: "cancel",
+					onClick: (closeAlert) => {
+						closeAlert();
+					},
+				},
+				{
+					text: "Add Anyway (Rename)",
+					class: "cancel",
+					onClick: (closeAlert) => {
+						closeAlert();
+						this.proceedWithDownload(jobId, selectedFormatId, path, "rename");
+					},
+				},
+				{
+					text: "Replace / Overwrite",
+					class: "download",
+					onClick: (closeAlert) => {
+						closeAlert();
+						this.proceedWithDownload(jobId, selectedFormatId, path, "replace");
+					},
+				},
+			]);
+		},
 
-    setDownloadingUI() {
-      const content = shadowRoot.getElementById("modalContent");
-      // Keep only thumbnail block + replace resolution list with progress bar
-      const mediaInfo = shadowRoot.querySelector(".media-info")?.outerHTML || "";
-      
-      content.innerHTML = `
+		setDownloadingUI() {
+			const content = shadowRoot.getElementById("modalContent");
+			// Keep only thumbnail block + replace resolution list with progress bar
+			const mediaInfo =
+				shadowRoot.querySelector(".media-info")?.outerHTML || "";
+
+			content.innerHTML = `
         ${mediaInfo}
         <div class="progress-container" id="activeProgress">
           <div class="progress-label-row">
@@ -707,220 +918,363 @@
         </div>
       `;
 
-      // Convert Footer "Download" button to "Cancel" or "Stop"
-      const footer = shadowRoot.getElementById("modalFooter");
-      footer.innerHTML = `
+			// Convert Footer "Download" button to "Cancel" or "Stop"
+			const footer = shadowRoot.getElementById("modalFooter");
+			footer.innerHTML = `
         <button class="footer-btn cancel" id="btnCancelDownload">Stop Download</button>
       `;
 
-      shadowRoot.getElementById("btnCancelDownload").addEventListener("click", () => {
-        shadowRoot.getElementById("btnCancelDownload").innerText = "Stopping...";
-        shadowRoot.getElementById("btnCancelDownload").disabled = true;
-        chrome.runtime.sendMessage({
-          type: "CANCEL_DOWNLOAD",
-          jobId: currentJobId
-        });
-      });
-    },
+			shadowRoot
+				.getElementById("btnCancelDownload")
+				.addEventListener("click", () => {
+					shadowRoot.getElementById("btnCancelDownload").innerText =
+						"Stopping...";
+					shadowRoot.getElementById("btnCancelDownload").disabled = true;
+					chrome.runtime.sendMessage({
+						type: "CANCEL_DOWNLOAD",
+						jobId: currentJobId,
+					});
+				});
+		},
 
-    updateProgress(progress) {
-      const activeProgress = shadowRoot.getElementById("activeProgress");
-      if (!activeProgress) return;
+		updateProgress(progress) {
+			const activeProgress = shadowRoot.getElementById("activeProgress");
+			if (!activeProgress) return;
 
-      const fill = shadowRoot.getElementById("progressFill");
-      const percent = shadowRoot.getElementById("progressPercent");
-      const stage = shadowRoot.getElementById("progressStage");
-      const speed = shadowRoot.getElementById("progressSpeed");
-      const eta = shadowRoot.getElementById("progressETA");
-      const frags = shadowRoot.getElementById("progressFragments");
+			const fill = shadowRoot.getElementById("progressFill");
+			const percent = shadowRoot.getElementById("progressPercent");
+			const stage = shadowRoot.getElementById("progressStage");
+			const speed = shadowRoot.getElementById("progressSpeed");
+			const eta = shadowRoot.getElementById("progressETA");
+			const frags = shadowRoot.getElementById("progressFragments");
 
-      // Stage label
-      if (progress.status === "downloading") {
-        stage.innerText = "Downloading...";
-      } else if (progress.status === "postprocessing") {
-        stage.innerText = "Post-processing...";
-        fill.classList.add("indeterminate");
-        speed.innerText = "";
-        eta.innerText = "";
-        frags.innerText = "";
-        return;
-      }
+			// Stage label
+			if (progress.status === "downloading") {
+				stage.innerText = "Downloading...";
+				fill.classList.remove("indeterminate");
+			} else if (progress.status === "postprocessing") {
+				stage.innerText = "Post-processing...";
+				fill.classList.add("indeterminate");
+				speed.innerText = "";
+				eta.innerText = "";
+				frags.innerText = "";
+				return;
+			}
 
-      // Percentage and Fill
-      let pct = 0;
-      let isEstimate = false;
-      
-      const total = progress.totalBytes;
-      const est = progress.totalBytesEstimate;
-      const dl = progress.downloadedBytes;
-      
-      if (total && total > 0) {
-        pct = Math.round((dl / total) * 100);
-      } else if (est && est > 0) {
-        pct = Math.round((dl / est) * 100);
-        isEstimate = true;
-      }
+			// Percentage and Fill
+			let pct = 0;
+			let isEstimate = false;
 
-      if (fill) fill.style.width = `${pct}%`;
-      if (percent) percent.innerText = `${pct}%${isEstimate ? ' (est)' : ''}`;
+			const total = progress.combinedTotalBytes ?? progress.totalBytes;
+			const est = progress.totalBytesEstimate;
+			const dl =
+				progress.combinedDownloadedBytes ?? progress.downloadedBytes ?? 0;
 
-      // Speed formatting
-      if (speed && progress.speed) {
-        const mbSpeed = progress.speed / 1024 / 1024;
-        speed.innerText = `${mbSpeed.toFixed(2)} MB/s`;
-      }
+			if (total && total > 0) {
+				pct = Math.round((dl / total) * 100);
+			} else if (est && est > 0) {
+				pct = Math.round((dl / est) * 100);
+				isEstimate = true;
+			}
 
-      // ETA formatting
-      if (eta && progress.eta) {
-        const totalSecs = Math.round(progress.eta);
-        const m = Math.floor(totalSecs / 60);
-        const s = totalSecs % 60;
-        eta.innerText = `ETA: ${m}m ${s}s`;
-      }
+			if (fill) fill.style.width = `${pct}%`;
+			if (percent) percent.innerText = `${pct}%${isEstimate ? " (est)" : ""}`;
 
-      // Fragments
-      if (frags && progress.fragmentIndex) {
-        const idx = progress.fragmentIndex;
-        const totalFrags = progress.fragmentCount || "?";
-        frags.innerText = `Fragment: ${idx} / ${totalFrags}`;
-      }
-    },
+			// Speed formatting
+			if (speed && progress.speed) {
+				const mbSpeed = progress.speed / 1024 / 1024;
+				speed.innerText = `${mbSpeed.toFixed(2)} MB/s`;
+			}
 
-    showToast(message, isError = false) {
-      // Clean old toasts
-      const oldToast = document.getElementById("download-anything-toast");
-      if (oldToast) oldToast.remove();
+			// ETA formatting
+			if (eta && progress.eta) {
+				const totalSecs = Math.round(progress.eta);
+				const d = Math.floor(totalSecs / 86400);
+				const h = Math.floor((totalSecs % 86400) / 3600);
+				const m = Math.floor((totalSecs % 3600) / 60);
+				const s = totalSecs % 60;
+				let etaText = "";
+				if (d > 0) {
+					etaText = `${d}d ${h}h ${m}m`;
+				} else if (h > 0) {
+					etaText = `${h}h ${m}m ${s}s`;
+				} else if (m > 0) {
+					etaText = `${m}m ${s}s`;
+				} else {
+					etaText = `${s}s`;
+				}
+				eta.innerText = `ETA: ${etaText}`;
+			}
 
-      const toast = document.createElement("div");
-      toast.id = "download-anything-toast";
-      toast.className = `dl-toast ${isError ? 'dl-toast-error' : 'dl-toast-success'}`;
-      toast.innerText = message;
-      document.body.appendChild(toast);
+			// Fragments
+			if (frags && progress.fragmentIndex != null) {
+				const idx = progress.fragmentIndex;
+				const totalFrags = progress.fragmentCount || "?";
+				frags.innerText = `Fragment: ${idx} / ${totalFrags}`;
+			}
+		},
 
-      // Force reflow to register initial state, then add show class to animate
-      toast.offsetHeight;
-      toast.classList.add("show");
+		showToast(message, isError = false) {
+			// Clean old toasts
+			const oldToast = document.getElementById("download-anything-toast");
+			if (oldToast) oldToast.remove();
 
-      setTimeout(() => {
-        toast.classList.remove("show");
-        setTimeout(() => {
-          if (toast.parentNode) toast.remove();
-        }, 250);
-      }, 4000);
-    }
-  };
+			const toast = document.createElement("div");
+			toast.id = "download-anything-toast";
+			toast.className = `dl-toast ${isError ? "dl-toast-error" : "dl-toast-success"}`;
+			toast.innerText = message;
+			document.body.appendChild(toast);
 
-  // Listen to messages from background worker
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message.type === "SHOW_MODAL") {
-      Modal.show(message.url);
-      return;
-    }
+			// Force reflow to register initial state, then add show class to animate
+			toast.offsetHeight;
+			toast.classList.add("show");
 
-    if (message.type === "INTERCEPTED_DOWNLOAD") {
-      Modal.showIntercepted(message.download);
-      return;
-    }
+			setTimeout(() => {
+				toast.classList.remove("show");
+				setTimeout(() => {
+					if (toast.parentNode) toast.remove();
+				}, 250);
+			}, 4000);
+		},
+	};
 
-    // Show completed/failed toasts even if the modal is closed
-    if (message.type === "download_completed" && initiatedJobIds.has(message.jobId)) {
-      Modal.showToast(`Saved: ${message.filePath.split(/[/\\]/).pop()}`);
-      initiatedJobIds.delete(message.jobId);
-      if (message.jobId === currentJobId) {
-        Modal.close();
-      }
-    } else if (message.type === "download_failed" && initiatedJobIds.has(message.jobId)) {
-      Modal.showToast(`Download failed: ${message.error}`, true);
-      initiatedJobIds.delete(message.jobId);
-      if (message.jobId === currentJobId) {
-        Modal.close();
-      }
-    } else if (message.type === "download_canceled" && initiatedJobIds.has(message.jobId)) {
-      Modal.showToast("Download cancelled", true);
-      initiatedJobIds.delete(message.jobId);
-      if (message.jobId === currentJobId) {
-        Modal.close();
-      }
-    }
+	// Listen to messages from background worker
+	chrome.runtime.onMessage.addListener((message) => {
+		if (message.type === "SHOW_MODAL") {
+			Modal.show(message.url);
+			return;
+		}
 
-    if (!shadowRoot) return;
+		if (message.type === "INTERCEPTED_DOWNLOAD") {
+			Modal.showIntercepted(message.download);
+			return;
+		}
 
-    switch (message.type) {
-      case "STREAM_SNIFFED":
-        if (!currentSniffedStreams.some(s => s.url === message.stream.url)) {
-          message.stream.title = resolveBestTitleForUrl(message.stream.url);
-          currentSniffedStreams.push(message.stream);
-        }
-        break;
-      case "categories_list":
-        const select = shadowRoot.getElementById("selCategory");
-        if (select) {
-          if (message.categories && message.categories.length > 0) {
-            select.innerHTML = "";
-            message.categories.forEach((cat) => {
-              const opt = document.createElement("option");
-              opt.value = cat.path;
-              opt.textContent = `${cat.name} (${cat.path})`;
-              select.appendChild(opt);
-            });
-          } else {
-            select.innerHTML = `<option value="${escapeHtml(lastOutputDir || '')}">Default Location (${escapeHtml(lastOutputDir || 'Downloads')})</option>`;
-          }
-        }
-        break;
-      case "probe_started":
-        currentJobId = message.jobId;
-        Modal.setProbingState();
-        break;
-      case "probe_result":
-        if (message.jobId === currentJobId) {
-          Modal.populateFormats(message);
-        }
-        break;
-      case "probe_failed":
-        {
-          const isStreamUrl = currentSniffedStreams.some(s => s.url === mediaUrl);
-          const isUnsupported = message.isUnsupportedUrl || false;
-          
-          if (isUnsupported && !isStreamUrl && currentSniffedStreams.length > 0) {
-            // Sort descending by timestamp (most recently sniffed first)
-            const sortedStreams = [...currentSniffedStreams].sort((a, b) => b.timestamp - a.timestamp);
-            const fallbackUrl = sortedStreams[0].url;
-            console.log("[Fallback] Probed URL unsupported. Falling back to sniffed stream:", fallbackUrl);
-            Modal.showToast("Media unsupported. Loading detected stream...");
-            Modal.changeSource(fallbackUrl);
-          } else {
-            Modal.showError(message.error, message.suggestion);
-          }
-        }
-        break;
-      case "duplicate_job_alert":
-        Modal.showDuplicateJobAlert(message.title, message.url, message.status, message.jobId);
-        break;
-      case "file_exists_result":
-        if (message.exists) {
-          Modal.showDuplicateFileAlert(message.filename, message.path, message.jobId);
-        } else {
-          Modal.proceedWithDownload(message.jobId, selectedFormatId, message.path, "replace");
-        }
-        break;
-      case "download_queued":
-        console.log("Download queued on server path:", message.outputPath);
-        break;
-      case "download_progress":
-        if (message.jobId === currentJobId) {
-          Modal.updateProgress(message);
-        }
-        break;
-      case "SERVER_DISCONNECTED":
-        Modal.showToast("Service disconnected. Retrying...", true);
-        break;
-      case "SERVER_CONNECTED":
-        Modal.showToast("Service reconnected!");
-        break;
-    }
-  });
+		if (message.type === "SHOW_TOAST") {
+			Modal.showToast(message.message, message.isError);
+			return;
+		}
 
-  // Expose to window namespace
-  window.DownloadAnythingModal = Modal;
+		if (message.type === "BACKEND_STATUS") {
+			if (!message.available) {
+				Modal.showToast("Backend service went offline.", true);
+			} else {
+				Modal.showToast("Backend service is back online!");
+			}
+			return;
+		}
+
+		// Show completed/failed toasts even if the modal is closed
+		if (
+			message.type === "download_completed" &&
+			initiatedJobIds.has(message.jobId)
+		) {
+			Modal.showToast(`Saved: ${message.filePath.split(/[/\\]/).pop()}`);
+			initiatedJobIds.delete(message.jobId);
+			if (message.jobId === currentJobId) {
+				Modal.close();
+			}
+		} else if (
+			message.type === "download_failed" &&
+			initiatedJobIds.has(message.jobId)
+		) {
+			Modal.showToast(`Download failed: ${message.error}`, true);
+			initiatedJobIds.delete(message.jobId);
+			if (message.jobId === currentJobId) {
+				Modal.close();
+			}
+		} else if (
+			message.type === "download_canceled" &&
+			initiatedJobIds.has(message.jobId)
+		) {
+			Modal.showToast("Download cancelled", true);
+			initiatedJobIds.delete(message.jobId);
+			if (message.jobId === currentJobId) {
+				Modal.close();
+			}
+		}
+
+		if (!shadowRoot) return;
+
+		switch (message.type) {
+			case "directory_selected": {
+				customOutputDir = message.path;
+				const container = shadowRoot.getElementById("customLocationContainer");
+				const pathLabel = shadowRoot.getElementById("customLocationPath");
+				if (container && pathLabel) {
+					pathLabel.textContent = message.path;
+					container.style.display = "flex";
+				}
+				break;
+			}
+			case "STREAM_SNIFFED": {
+				const existingIndex = currentSniffedStreams.findIndex(
+					(stream) => stream.url === message.stream.url,
+				);
+				message.stream.title = "Stream";
+				if (existingIndex >= 0) {
+					currentSniffedStreams[existingIndex] = {
+						...currentSniffedStreams[existingIndex],
+						...message.stream,
+					};
+				} else {
+					currentSniffedStreams.push(message.stream);
+				}
+				break;
+			}
+			case "categories_list": {
+				const select = shadowRoot.getElementById("selCategory");
+				if (select) {
+					if (message.categories && message.categories.length > 0) {
+						select.innerHTML = "";
+						message.categories.forEach((cat) => {
+							const opt = document.createElement("option");
+							opt.value = cat.path;
+							opt.textContent = `${cat.name} (${cat.path})`;
+							select.appendChild(opt);
+						});
+					} else {
+						select.innerHTML = `<option value="${escapeHtml(lastOutputDir || "")}">Default Location (${escapeHtml(lastOutputDir || "Downloads")})</option>`;
+					}
+				}
+				break;
+			}
+			case "probe_started":
+				if (message.jobId === currentJobId) {
+					Modal.setProbingState();
+				}
+				break;
+			case "probe_result":
+				if (message.jobId === currentJobId) {
+					Modal.populateFormats(message);
+				}
+				break;
+			case "probe_failed":
+				if (message.jobId !== currentJobId) break;
+				{
+					if (fallbackStage === "native") {
+						// Transition to stream stage and populate HLS/DASH candidates
+						fallbackStage = "stream";
+						const streamCandidates =
+							window.StreamExtractorFallback.filterCandidates(
+								currentSniffedStreams,
+								fallbackUrlsTried,
+							);
+						fallbackQueue =
+							window.StreamExtractorFallback.sortCandidates(streamCandidates);
+					}
+
+					if (fallbackStage === "stream") {
+						// Try the next stream candidate from fallbackQueue
+						let nextCandidate = null;
+						while (fallbackQueue.length > 0) {
+							const candidate = fallbackQueue.shift();
+							if (!fallbackUrlsTried.has(candidate.url)) {
+								nextCandidate = candidate;
+								break;
+							}
+						}
+
+						if (nextCandidate) {
+							console.log(
+								"[Fallback] Probing failed. Trying stream extraction:",
+								nextCandidate.url,
+							);
+							Modal.showToast("Probing failed. Trying stream extraction...");
+							fallbackUrlsTried.add(nextCandidate.url);
+							Modal.changeSource(
+								nextCandidate.url,
+								nextCandidate.documentUrl || nextCandidate.initiator,
+							);
+							break;
+						} else {
+							// No more stream candidates left, transition to direct stage
+							fallbackStage = "direct";
+							const mediaCandidates =
+								window.DirectMediaFallback.filterCandidates(
+									currentSniffedStreams,
+									fallbackUrlsTried,
+								);
+							fallbackQueue =
+								window.DirectMediaFallback.sortCandidates(mediaCandidates);
+						}
+					}
+
+					if (fallbackStage === "direct") {
+						// Try the next direct media candidate from fallbackQueue
+						let nextCandidate = null;
+						while (fallbackQueue.length > 0) {
+							const candidate = fallbackQueue.shift();
+							if (!fallbackUrlsTried.has(candidate.url)) {
+								nextCandidate = candidate;
+								break;
+							}
+						}
+
+						if (nextCandidate) {
+							console.log(
+								"[Fallback] Probing failed. Trying direct media extraction:",
+								nextCandidate.url,
+							);
+							Modal.showToast(
+								"Probing failed. Trying direct media extraction...",
+							);
+							fallbackUrlsTried.add(nextCandidate.url);
+							Modal.changeSource(
+								nextCandidate.url,
+								nextCandidate.documentUrl || nextCandidate.initiator,
+							);
+							break;
+						} else {
+							fallbackStage = "done";
+						}
+					}
+
+					Modal.showError(message.error, message.suggestion);
+				}
+				break;
+			case "duplicate_job_alert":
+				Modal.showDuplicateJobAlert(
+					message.title,
+					message.url,
+					message.status,
+					message.jobId,
+				);
+				break;
+			case "file_exists_result":
+				if (message.jobId !== currentJobId) break;
+				if (message.exists) {
+					Modal.showDuplicateFileAlert(
+						message.filename,
+						message.path,
+						message.jobId,
+					);
+				} else {
+					Modal.proceedWithDownload(
+						message.jobId,
+						selectedFormatId,
+						message.path,
+						"replace",
+					);
+				}
+				break;
+			case "download_queued":
+				console.log("Download queued on server path:", message.outputPath);
+				break;
+			case "download_progress":
+				if (message.jobId === currentJobId) {
+					Modal.updateProgress(message);
+				}
+				break;
+			case "SERVER_DISCONNECTED":
+				Modal.showToast("Service disconnected. Retrying...", true);
+				break;
+			case "SERVER_CONNECTED":
+				Modal.showToast("Service reconnected!");
+				break;
+		}
+	});
+
+	// Expose to window namespace
+	window.DownloadAnythingModal = Modal;
 })();

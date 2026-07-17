@@ -1,6 +1,7 @@
 from typing import Optional
 from pydantic import BaseModel
 
+
 class FormatSummary(BaseModel):
     label: str
     height: int
@@ -16,3 +17,9 @@ class FormatSummary(BaseModel):
     audioEstSizeBytes: Optional[int] = None
     isStream: bool = False
     streamType: Optional[str] = None
+    videoCodec: Optional[str] = None
+    audioCodec: Optional[str] = None
+    language: Optional[str] = None
+    protocol: Optional[str] = None
+    dynamicRange: Optional[str] = None
+    compatibility: Optional[str] = None

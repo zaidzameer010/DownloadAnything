@@ -1,8 +1,8 @@
 import asyncio
+import json
 import os
 import sys
-from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 from pydantic import BaseModel
 from app.utils.logger import logger
 
@@ -10,27 +10,6 @@ from app.utils.logger import logger
 class DirectoryItem(BaseModel):
     name: str
     absolutePath: str
-
-
-def get_home_dir() -> Path:
-    return Path.home()
-
-
-def _list_subdirectories(target_path: Path) -> list[DirectoryItem]:
-    subdirs: list[DirectoryItem] = []
-    for entry in os.scandir(target_path):
-        try:
-            if entry.is_dir() and not entry.name.startswith("."):
-                subdirs.append(
-                    DirectoryItem(
-                        name=entry.name,
-                        absolutePath=str(Path(entry.path).resolve())
-                    )
-                )
-        except OSError:
-            continue
-    subdirs.sort(key=lambda x: x.name.lower())
-    return subdirs
 
 
 async def pick_directory_system(initial_dir: Optional[str] = None) -> Optional[str]:
@@ -46,12 +25,13 @@ async def pick_directory_system(initial_dir: Optional[str] = None) -> Optional[s
         if sys.platform == "darwin":
             try:
                 default_path = initial_dir or os.path.expanduser("~")
-                script = f'POSIX path of (choose folder with prompt "Select Download Destination" default location POSIX file "{default_path}")'
+                script_path = json.dumps(default_path)
+                script = f'POSIX path of (choose folder with prompt "Select Download Destination" default location POSIX file {script_path})'
                 res = subprocess.run(
                     ["osascript", "-e", script],
                     capture_output=True,
                     text=True,
-                    timeout=120
+                    timeout=120,
                 )
                 if res.returncode == 0:
                     selected_path = res.stdout.strip()
@@ -61,22 +41,27 @@ async def pick_directory_system(initial_dir: Optional[str] = None) -> Optional[s
                 if "User canceled" in res.stderr or res.returncode == 1:
                     return None
             except Exception as e:
-                logger.warning(f"macOS AppleScript dialog failed, falling back to Tkinter: {e}")
+                logger.warning(
+                    f"macOS AppleScript dialog failed, falling back to Tkinter: {e}"
+                )
 
-        # Fallback to Tkinter (works on macOS/Windows/Linux)
+        # Fallback to Tkinter (works on macOS/Windows)
         try:
             import tkinter as tk
             from tkinter import filedialog
+
             root = tk.Tk()
-            root.withdraw()
-            root.focus_force()
-            root.attributes("-topmost", True)
-            selected = filedialog.askdirectory(
-                initialdir=initial_dir or os.path.expanduser("~"),
-                title="Select Download Destination"
-            )
-            root.destroy()
-            return selected if selected else None
+            try:
+                root.withdraw()
+                root.focus_force()
+                root.attributes("-topmost", True)
+                selected = filedialog.askdirectory(
+                    initialdir=initial_dir or os.path.expanduser("~"),
+                    title="Select Download Destination",
+                )
+                return selected if selected else None
+            finally:
+                root.destroy()
         except Exception as e:
             logger.error(f"Failed to open system directory dialog: {e}")
             return None

@@ -18,6 +18,8 @@
 	"host_permissions": [
 		"ws://localhost/*",
 		"wss://localhost/*",
+		"ws://127.0.0.1/*",
+		"wss://127.0.0.1/*",
 		"http://*/*",
 		"https://*/*"
 	],
@@ -25,7 +27,12 @@
 		{
 			"matches": ["http://*/*", "https://*/*"],
 			"css": ["content/styles.css"],
-			"js": ["content/modal.js", "content/overlay.js"],
+			"js": [
+				"content/stream_extractor.js",
+				"content/direct_media.js",
+				"content/modal.js",
+				"content/overlay.js"
+			],
 			"run_at": "document_end",
 			"all_frames": true
 		}

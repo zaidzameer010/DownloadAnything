@@ -1,9 +1,12 @@
-import sys
-import subprocess
+import json
 import os
+import re
+import subprocess
+import sys
 from app.utils.logger import logger
 
 _icon_cache: dict[str, str] = {}
+
 
 def get_system_icon_base64(path_or_ext: str) -> str | None:
     """
@@ -12,13 +15,13 @@ def get_system_icon_base64(path_or_ext: str) -> str | None:
     """
     if sys.platform == "darwin":
         # macOS implementation using JavaScript for Automation (JFA) Cocoa access
-        escaped_target = path_or_ext.replace('"', '\\"')
+        escaped_target = json.dumps(path_or_ext)
         js_code = f"""
         ObjC.import('AppKit');
         ObjC.import('Foundation');
         var ws = $.NSWorkspace.sharedWorkspace;
         var icon = null;
-        var target = "{escaped_target}";
+        var target = {escaped_target};
         
         if (target === "folder" || target === "directory" || target === "public.folder") {{
             icon = ws.iconForFileType('public.folder');
@@ -57,17 +60,19 @@ def get_system_icon_base64(path_or_ext: str) -> str | None:
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=5
+                timeout=5,
             )
             return proc.stdout.strip() or None
         except Exception as e:
             logger.debug(f"Failed to get macOS system icon: {e}")
             return None
-            
+
     elif sys.platform == "win32":
         # Windows implementation using PowerShell to extract System.Drawing.Icon
-        is_folder = path_or_ext in ("folder", "directory", "public.folder") or (not path_or_ext.startswith(".") and not "." in os.path.basename(path_or_ext))
-        
+        is_folder = path_or_ext in ("folder", "directory", "public.folder") or (
+            not path_or_ext.startswith(".") and "." not in os.path.basename(path_or_ext)
+        )
+
         if is_folder:
             ps_script = """
             Add-Type -AssemblyName System.Drawing
@@ -84,7 +89,13 @@ def get_system_icon_base64(path_or_ext: str) -> str | None:
             }
             """
         else:
-            ext = path_or_ext if path_or_ext.startswith(".") else f".{path_or_ext.split('.')[-1]}"
+            ext = (
+                path_or_ext
+                if path_or_ext.startswith(".")
+                else f".{path_or_ext.split('.')[-1]}"
+            )
+            if not re.fullmatch(r"\.[A-Za-z0-9]{1,16}", ext):
+                ext = ".bin"
             ps_script = f"""
             Add-Type -AssemblyName System.Drawing
             $tempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.Guid]::NewGuid().ToString() + "{ext}")
@@ -105,14 +116,15 @@ def get_system_icon_base64(path_or_ext: str) -> str | None:
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=5
+                timeout=5,
             )
             return proc.stdout.strip() or None
         except Exception as e:
             logger.debug(f"Failed to get Windows system icon: {e}")
             return None
-            
+
     return None
+
 
 def get_cached_system_icon(path_or_ext: str) -> str | None:
     """Gets the base64 icon data from cache, or queries the OS."""
@@ -121,23 +133,28 @@ def get_cached_system_icon(path_or_ext: str) -> str | None:
         return None
     if key in _icon_cache:
         return _icon_cache[key]
-    
+
     val = get_system_icon_base64(key)
     if val:
         _icon_cache[key] = val
     return val
 
+
 def enrich_job_with_icon(job_dict: dict[str, object]) -> dict[str, object]:
     """Appends system-based base64 thumbnails to job payloads if not already present."""
-    if job_dict.get("thumbnail"):
+    thumbnail = job_dict.get("thumbnail")
+    if isinstance(thumbnail, str) and thumbnail:
         return job_dict
-        
-    file_path = job_dict.get("file_path")
-    title = job_dict.get("title") or ""
-    url = job_dict.get("url") or ""
+
+    file_path_value = job_dict.get("file_path")
+    file_path = file_path_value if isinstance(file_path_value, str) else None
+    title_value = job_dict.get("title")
+    title = title_value if isinstance(title_value, str) else ""
+    url_value = job_dict.get("url")
+    url = url_value if isinstance(url_value, str) else ""
     media_type = job_dict.get("media_type")
-    
-    target = None
+
+    target: str | None = None
     if media_type == "torrent" or url.lower().startswith("magnet:"):
         target = ".torrent"
     elif file_path and os.path.exists(file_path):
@@ -150,10 +167,10 @@ def enrich_job_with_icon(job_dict: dict[str, object]) -> dict[str, object]:
         if not ext:
             _, ext = os.path.splitext(url.split("?")[0])
         target = ext if ext else ".mp4"
-        
+
     if target:
         icon_url = get_cached_system_icon(target)
         if icon_url:
             job_dict["thumbnail"] = icon_url
-            
+
     return job_dict

@@ -1,7 +1,9 @@
+import json
 import os
+import sys
 from pathlib import Path
-import tempfile
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -11,40 +13,35 @@ class Settings(BaseSettings):
 
     HOST: str = "127.0.0.1"
     PORT: int = 8765
-    
+
     # Defaults to the user's Downloads directory
     DEFAULT_OUTPUT_DIR: str = str(Path.home() / "Downloads")
-    
-    MAX_CONCURRENT_DOWNLOADS: int = 2
-    FFMPEG_PATH: str = "ffmpeg"  # Will rely on PATH unless overridden
+
     LOG_LEVEL: str = "INFO"
-    
-    # Directory to store temp Netscape cookies
-    COOKIE_JAR_DIR: str = os.path.join(tempfile.gettempdir(), "md_cookies")
+
 
 settings = Settings()
 
-# Ensure Cookie Jar directory exists
-os.makedirs(settings.COOKIE_JAR_DIR, exist_ok=True)
-
 def get_app_data_dir() -> Path:
-    import sys
     platform = sys.platform
     if platform == "darwin":
         base_dir = Path.home() / "Library" / "Application Support"
     elif platform == "win32":
-        base_dir = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+        base_dir = Path(
+            os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+        )
     else:
         base_dir = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
-        
+
     app_dir = base_dir / "DownloadAnything"
     app_dir.mkdir(parents=True, exist_ok=True)
     return app_dir
 
+
 def get_config_file_path(filename: str) -> Path:
     new_dir = get_app_data_dir()
     new_path = new_dir / filename
-    
+
     if not new_path.exists():
         # Check old location (server/)
         old_dir = Path(__file__).resolve().parent.parent
@@ -52,10 +49,21 @@ def get_config_file_path(filename: str) -> Path:
         if old_path.exists():
             try:
                 import shutil
+
                 shutil.copy2(old_path, new_path)
             except Exception:
                 pass
     return new_path
+
+
+def write_json_atomic(path: Path, payload: object) -> None:
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    with open(tmp_path, "w") as file:
+        json.dump(payload, file, indent=2)
+        file.flush()
+        os.fsync(file.fileno())
+    tmp_path.replace(path)
+
 
 def get_app_version() -> str:
     # 1. Try environment variable passed from Rust/Tauri wrapper
@@ -65,16 +73,18 @@ def get_app_version() -> str:
 
     # 2. Try reading package.json (dev mode fallback)
     try:
-        package_json_path = Path(__file__).resolve().parent.parent.parent / "package.json"
+        package_json_path = (
+            Path(__file__).resolve().parent.parent.parent / "package.json"
+        )
         if package_json_path.exists():
             import json
+
             with open(package_json_path, "r") as f:
                 version = json.load(f).get("version")
                 if version:
                     return version
     except Exception:
         pass
-    
+
     # 3. Fallback if not resolvable
     return "0.0.0"
-

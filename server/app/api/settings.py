@@ -1,10 +1,10 @@
 import json
-import os
 import threading
-from pathlib import Path
 from typing import Optional
+
 from pydantic import BaseModel
-from app.config import settings, get_config_file_path
+
+from app.config import get_config_file_path, write_json_atomic
 from app.utils.logger import logger
 
 
@@ -12,7 +12,9 @@ class AppSettings(BaseModel):
     mergeFormat: str = "mkv"
     embedThumbnail: bool = True
     embedSubs: bool = False
-    cookiesFromBrowser: Optional[str] = None  # e.g. "chrome", "firefox", "safari", "none" or null
+    cookiesFromBrowser: Optional[str] = (
+        None  # e.g. "chrome", "firefox", "safari", "none" or null
+    )
 
     # yt-dlp configs
     concurrentFragmentDownloads: int = 4
@@ -32,8 +34,16 @@ class AppSettings(BaseModel):
     aria2CheckCertificate: bool = True
     aria2AlwaysResume: bool = True
 
-    # General queue limit
-    maxConcurrentDownloads: int = 2
+    # libtorrent configs. Rate limits are KiB/s; zero means unlimited.
+    torrentEnabled: bool = True
+    torrentMaxActive: int = 32
+    torrentDownloadLimit: int = 0
+    torrentUploadLimit: int = 0
+    torrentOutputDir: Optional[str] = None
+    torrentSeedRatio: float = 100.0
+    torrentSeedTimeMinutes: int = 100000
+    torrentPeerLimit: int = 2000
+    torrentUploadPeerLimit: int = 500
 
 
 # Persisted configurations file
@@ -52,7 +62,7 @@ def load_settings() -> AppSettings:
         if not SETTINGS_FILE.exists():
             defaults = AppSettings()
             try:
-                _write_json_atomic(SETTINGS_FILE, defaults.model_dump())
+                write_json_atomic(SETTINGS_FILE, defaults.model_dump())
             except Exception as e:
                 logger.error(f"Failed to write default settings.json: {e}")
             _settings_cache = defaults
@@ -71,21 +81,12 @@ def load_settings() -> AppSettings:
             return fallback
 
 
-def _write_json_atomic(path: Path, payload: dict):
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    with open(tmp_path, "w") as f:
-        json.dump(payload, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    tmp_path.replace(path)
-
-
 def save_settings_to_file(settings_data: AppSettings):
     global _settings_cache
     with _settings_lock:
         try:
-            _write_json_atomic(SETTINGS_FILE, settings_data.model_dump())
+            write_json_atomic(SETTINGS_FILE, settings_data.model_dump())
             _settings_cache = settings_data
         except Exception as e:
             logger.error(f"Failed to save settings.json: {e}")
-            raise RuntimeError(f"Failed to save configurations: {e}")
+            raise RuntimeError(f"Failed to save configurations: {e}") from e
