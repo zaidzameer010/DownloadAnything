@@ -7,6 +7,14 @@ export function formatBytes(bytes: number): string {
 	return `${bytes} B`;
 }
 
+export function formatSpeed(bytesPerSec: number): string {
+	if (bytesPerSec <= 0) return "0.0 KB/s";
+	if (bytesPerSec >= 1024 * 1024)
+		return `${(bytesPerSec / 1024 / 1024).toFixed(1)} MB/s`;
+	if (bytesPerSec >= 1024) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
+	return `${bytesPerSec.toFixed(0)} B/s`;
+}
+
 export function formatDuration(sec?: number): string {
 	if (!sec || sec <= 0) return "00:00";
 	const h = Math.floor(sec / 3600);
@@ -19,19 +27,6 @@ export function formatDuration(sec?: number): string {
 		return `${h}:${pad(m)}:${pad(s)}`;
 	}
 	return `${m}:${pad(s)}`;
-}
-
-export function formatETA(sec: number): string {
-	if (sec <= 0) return "";
-	const d = Math.floor(sec / 86400);
-	const h = Math.floor((sec % 86400) / 3600);
-	const m = Math.floor((sec % 3600) / 60);
-	const s = Math.round(sec % 60);
-
-	if (d > 0) return `${d}d ${h}h ${m}m`;
-	if (h > 0) return `${h}h ${m}m ${s}s`;
-	if (m > 0) return `${m}m ${s}s`;
-	return `${s}s`;
 }
 
 export function getSessionTabId(): number {

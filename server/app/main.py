@@ -1,34 +1,6 @@
 import os
 import sys
 
-# Apply global SSL monkeypatch to ignore unexpected EOF protocol violations
-try:
-    import ssl
-    if hasattr(ssl, "OP_IGNORE_UNEXPECTED_EOF"):
-        orig_create_default_context = ssl.create_default_context
-        def patched_create_default_context(*args, **kwargs):
-            ctx = orig_create_default_context(*args, **kwargs)
-            ctx.options |= ssl.OP_IGNORE_UNEXPECTED_EOF
-            return ctx
-        ssl.create_default_context = patched_create_default_context
-        
-        if hasattr(ssl, "_create_default_https_context"):
-            orig_create_default_https_context = ssl._create_default_https_context
-            def patched_create_default_https_context(*args, **kwargs):
-                ctx = orig_create_default_https_context(*args, **kwargs)
-                ctx.options |= ssl.OP_IGNORE_UNEXPECTED_EOF
-                return ctx
-            ssl._create_default_https_context = patched_create_default_https_context
-except Exception:
-    pass
-
-# Disable yt-dlp's security block on unusual extensions (e.g. .php) when run as a library
-try:
-    from yt_dlp.utils._utils import _UnsafeExtensionError
-    _UnsafeExtensionError._enabled = False
-except Exception:
-    pass
-
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -38,22 +10,35 @@ from fastapi.middleware.cors import CORSMiddleware
 
 try:
     from app.config import get_app_version, settings
-    from app.utils.logger import logger
-    from app.ws.manager import ws_manager
-    from app.ws.router import router as ws_router
+    from app.utils.logger import get_logger, setup_logging
 except ModuleNotFoundError as error:
     if error.name != "app":
         raise
-    # Add the parent directory of 'app' to the Python path to support running from any directory
     parent_dir = str(Path(__file__).resolve().parent.parent)
     if parent_dir not in sys.path:
         sys.path.insert(0, parent_dir)
     from app.config import get_app_version, settings
-    from app.utils.logger import logger
-    from app.ws.manager import ws_manager
-    from app.ws.router import router as ws_router
+    from app.utils.logger import get_logger, setup_logging
 
-# Expose homebrew binaries to the running process PATH
+from app.api.browse import DirectoryPicker
+from app.engine.jobs import jobs_registry
+from app.engine.probe import ProbeOrchestrator
+from app.engine.torrent import TorrentDownloader, TorrentProber
+from app.repositories.categories_repository import CategoriesRepository
+from app.repositories.settings_repository import SettingsRepository
+from app.services.category_service import CategoryService
+from app.services.download_service import DownloadService
+from app.services.file_service import FileService
+from app.services.job_service import JobService
+from app.services.probe_service import ProbeService
+from app.services.settings_service import SettingsService
+from app.services.torrent_service import TorrentService
+from app.ws.dispatcher import MessageDispatcher
+from app.ws.manager import ConnectionManager
+from app.ws.router import create_ws_router
+
+logger = get_logger("app.main")
+
 if sys.platform == "darwin":
     homebrew_bin = "/opt/homebrew/bin"
     path_entries = os.environ.get("PATH", "").split(os.pathsep)
@@ -61,14 +46,68 @@ if sys.platform == "darwin":
         os.environ["PATH"] = os.pathsep.join([homebrew_bin, *path_entries])
 
 
+# Wire dependencies once at startup.  `jobs_registry` is the existing singleton
+# used by the engine modules until they are converted to DI.
+settings_repository = SettingsRepository()
+categories_repository = CategoriesRepository()
+directory_picker = DirectoryPicker()
+connection_manager = ConnectionManager()
+
+settings_service = SettingsService(settings_repository)
+category_service = CategoryService(categories_repository)
+job_service = JobService(jobs_registry)
+file_service = FileService(
+    categories_repository=categories_repository,
+    directory_picker=directory_picker,
+)
+
+probe_orchestrator = ProbeOrchestrator()
+torrent_prober = TorrentProber()
+probe_service = ProbeService(
+    connection_manager=connection_manager,
+    probe_orchestrator=probe_orchestrator,
+    torrent_prober=torrent_prober,
+    settings_repository=settings_repository,
+)
+
+download_service = DownloadService(
+    connection_manager=connection_manager,
+    job_repository=jobs_registry,
+    probe_engine=probe_orchestrator,
+    settings_repository=settings_repository,
+    file_service=file_service,
+)
+
+torrent_service = TorrentService(
+    connection_manager=connection_manager,
+    job_repository=jobs_registry,
+    file_service=file_service,
+    settings_repository=settings_repository,
+    torrent_downloader=TorrentDownloader(),
+)
+
+dispatcher = MessageDispatcher(
+    connection_manager=connection_manager,
+    settings_service=settings_service,
+    category_service=category_service,
+    job_service=job_service,
+    file_service=file_service,
+    probe_service=probe_service,
+    download_service=download_service,
+    torrent_service=torrent_service,
+)
+
+ws_router = create_ws_router(dispatcher, connection_manager)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_logging()
     logger.info("Starting Downloader Backend Service...")
     logger.info(f"Configurations Loaded: Host={settings.HOST}, Port={settings.PORT}")
     yield
     logger.info("Shutting down Downloader Backend Service...")
-    # Clean up active websocket connections
-    for _tab_id, ws in list(ws_manager.active_connections.items()):
+    for _tab_id, ws in list(connection_manager.active_connections.items()):
         try:
             await ws.close(code=1001, reason="Server shutting down")
         except Exception:
@@ -77,7 +116,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="yt-dlp Powered Browser Media Downloader",
+    title="DownloadAnything",
     description="WebSocket-only service broker for downloading web media using yt-dlp",
     version=get_app_version(),
     lifespan=lifespan,
@@ -85,13 +124,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origin_regex=r"^(tauri://localhost|http://localhost:\d+|http://127\.0\.0\.1:\d+|chrome-extension://.*|moz-extension://.*)$",
+    allow_credentials=False,
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 
-# Wire WebSocket route only
 app.include_router(ws_router)
 
 if __name__ == "__main__":
@@ -101,5 +139,6 @@ if __name__ == "__main__":
         host=settings.HOST,
         port=settings.PORT,
         log_level=settings.LOG_LEVEL.lower(),
+        log_config=None,
         reload=not is_frozen,
     )

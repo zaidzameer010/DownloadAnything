@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { logger } from "../lib/logger";
 import type {
 	ActiveTab,
 	BrowserInfo,
@@ -29,14 +30,14 @@ export interface DownloaderSettings {
 	embedThumbnail: boolean;
 	embedSubs: boolean;
 	cookiesFromBrowser: string;
-	useAria2: boolean;
-	aria2MaxConnections: number;
-	aria2ConcurrentDownloads: number;
-	aria2Split: number;
-	aria2MinSplitSize: string;
-	aria2Preallocate: boolean;
-	aria2CheckCertificate: boolean;
-	aria2AlwaysResume: boolean;
+	useAria2Next: boolean;
+	aria2NextMaxConnections: number;
+	aria2NextConcurrentDownloads: number;
+	aria2NextSplit: number;
+	aria2NextMinSplitSize: string;
+	aria2NextPreallocate: boolean;
+	aria2NextCheckCertificate: boolean;
+	aria2NextAlwaysResume: boolean;
 	concurrentFragmentDownloads: number;
 	downloadRetries: number;
 	fragmentRetries: number;
@@ -47,9 +48,7 @@ export interface DownloaderSettings {
 	torrentMaxActive: number;
 	torrentDownloadLimit: number;
 	torrentUploadLimit: number;
-	torrentOutputDir: string;
 	torrentSeedRatio: number;
-	torrentSeedTimeMinutes: number;
 	torrentPeerLimit: number;
 	torrentUploadPeerLimit: number;
 }
@@ -69,14 +68,16 @@ export function useDownloader() {
 	const [embedThumbnail, setEmbedThumbnail] = useState(true);
 	const [embedSubs, setEmbedSubs] = useState(false);
 	const [cookiesFromBrowser, setCookiesFromBrowser] = useState("none");
-	const [useAria2, setUseAria2] = useState(true);
-	const [aria2MaxConnections, setAria2MaxConnections] = useState(16);
-	const [aria2ConcurrentDownloads, setAria2ConcurrentDownloads] = useState(5);
-	const [aria2Split, setAria2Split] = useState(16);
-	const [aria2MinSplitSize, setAria2MinSplitSize] = useState("1M");
-	const [aria2Preallocate, setAria2Preallocate] = useState(true);
-	const [aria2CheckCertificate, setAria2CheckCertificate] = useState(true);
-	const [aria2AlwaysResume, setAria2AlwaysResume] = useState(true);
+	const [useAria2Next, setUseAria2Next] = useState(true);
+	const [aria2NextMaxConnections, setAria2NextMaxConnections] = useState(16);
+	const [aria2NextConcurrentDownloads, setAria2NextConcurrentDownloads] =
+		useState(5);
+	const [aria2NextSplit, setAria2NextSplit] = useState(16);
+	const [aria2NextMinSplitSize, setAria2NextMinSplitSize] = useState("1M");
+	const [aria2NextPreallocate, setAria2NextPreallocate] = useState(true);
+	const [aria2NextCheckCertificate, setAria2NextCheckCertificate] =
+		useState(true);
+	const [aria2NextAlwaysResume, setAria2NextAlwaysResume] = useState(true);
 
 	const [concurrentFragmentDownloads, setConcurrentFragmentDownloads] =
 		useState(4);
@@ -86,14 +87,12 @@ export function useDownloader() {
 	const [subtitlesLangs, setSubtitlesLangs] = useState("all");
 	const [ffmpegLocation, setFfmpegLocation] = useState("");
 	const [torrentEnabled, setTorrentEnabled] = useState(true);
-	const [torrentMaxActive, setTorrentMaxActive] = useState(32);
+	const [torrentMaxActive, setTorrentMaxActive] = useState(4);
 	const [torrentDownloadLimit, setTorrentDownloadLimit] = useState(0);
 	const [torrentUploadLimit, setTorrentUploadLimit] = useState(0);
-	const [torrentOutputDir, setTorrentOutputDir] = useState("");
-	const [torrentSeedRatio, setTorrentSeedRatio] = useState(100);
-	const [torrentSeedTimeMinutes, setTorrentSeedTimeMinutes] = useState(100000);
-	const [torrentPeerLimit, setTorrentPeerLimit] = useState(2000);
-	const [torrentUploadPeerLimit, setTorrentUploadPeerLimit] = useState(500);
+	const [torrentSeedRatio, setTorrentSeedRatio] = useState(2);
+	const [torrentPeerLimit, setTorrentPeerLimit] = useState(500);
+	const [torrentUploadPeerLimit, setTorrentUploadPeerLimit] = useState(20);
 
 	// Categories
 	const [categories, setCategories] = useState<Category[]>([]);
@@ -105,7 +104,6 @@ export function useDownloader() {
 	const [serverInfo, setServerInfo] = useState<ServerInfo>({
 		ytDlpVersion: "Unknown",
 		ffmpegAvailable: false,
-		poTokenPluginLoaded: false,
 	});
 
 	// Extension installer
@@ -139,6 +137,10 @@ export function useDownloader() {
 	const [showFormatDrawer, setShowFormatDrawer] = useState(false);
 	const [probedInfo, setProbedInfo] = useState<ProbedInfo | null>(null);
 	const [selectedFormatId, setSelectedFormatId] = useState("");
+	const [selectedTorrentFiles, _setSelectedTorrentFiles] = useState<
+		Set<number>
+	>(new Set());
+	const selectedTorrentFilesRef = useRef<Set<number>>(new Set());
 	const [selectedCategoryPath, _setSelectedCategoryPath] = useState("");
 	const selectedCategoryPathRef = useRef("");
 	const setSelectedCategoryPath = useCallback((val: string) => {
@@ -146,6 +148,43 @@ export function useDownloader() {
 		_setSelectedCategoryPath(val);
 	}, []);
 	const [drawerCustomPath, setDrawerCustomPath] = useState("");
+
+	const setSelectedTorrentFiles = useCallback((next: Set<number>) => {
+		selectedTorrentFilesRef.current = next;
+		_setSelectedTorrentFiles(next);
+	}, []);
+
+	useEffect(() => {
+		if (probedInfo?.torrent?.files) {
+			const all = new Set(probedInfo.torrent.files.map((f) => f.index));
+			selectedTorrentFilesRef.current = all;
+			_setSelectedTorrentFiles(all);
+		} else {
+			selectedTorrentFilesRef.current = new Set();
+			_setSelectedTorrentFiles(new Set());
+		}
+	}, [probedInfo]);
+
+	const toggleTorrentFile = useCallback((index: number) => {
+		_setSelectedTorrentFiles((prev) => {
+			const next = new Set(prev);
+			if (next.has(index)) next.delete(index);
+			else next.add(index);
+			selectedTorrentFilesRef.current = next;
+			return next;
+		});
+	}, []);
+
+	const selectAllTorrentFiles = useCallback(() => {
+		const all = new Set(probedInfo?.torrent?.files.map((f) => f.index) ?? []);
+		selectedTorrentFilesRef.current = all;
+		_setSelectedTorrentFiles(all);
+	}, [probedInfo]);
+
+	const deselectAllTorrentFiles = useCallback(() => {
+		selectedTorrentFilesRef.current = new Set();
+		_setSelectedTorrentFiles(new Set());
+	}, []);
 
 	// Alerts
 	const [duplicateJobAlert, setDuplicateJobAlert] =
@@ -156,9 +195,14 @@ export function useDownloader() {
 		null,
 	);
 	const [genericAlert, setGenericAlert] = useState<GenericAlert | null>(null);
+	const [urlRefreshJobId, _setUrlRefreshJobId] = useState<string | null>(null);
+	const urlRefreshJobIdRef = useRef<string | null>(null);
+	const setUrlRefreshJobId = useCallback((val: string | null) => {
+		urlRefreshJobIdRef.current = val;
+		_setUrlRefreshJobId(val);
+	}, []);
 
 	const selectedFormatIdRef = useRef("");
-	const selectedOutputDirRef = useRef("");
 
 	// WebSocket refs
 	const wsRef = useRef<WebSocket | null>(null);
@@ -192,14 +236,14 @@ export function useDownloader() {
 		embedThumbnail,
 		embedSubs,
 		cookiesFromBrowser,
-		useAria2,
-		aria2MaxConnections,
-		aria2ConcurrentDownloads,
-		aria2Split,
-		aria2MinSplitSize,
-		aria2Preallocate,
-		aria2CheckCertificate,
-		aria2AlwaysResume,
+		useAria2Next,
+		aria2NextMaxConnections,
+		aria2NextConcurrentDownloads,
+		aria2NextSplit,
+		aria2NextMinSplitSize,
+		aria2NextPreallocate,
+		aria2NextCheckCertificate,
+		aria2NextAlwaysResume,
 		concurrentFragmentDownloads,
 		downloadRetries,
 		fragmentRetries,
@@ -210,9 +254,7 @@ export function useDownloader() {
 		torrentMaxActive,
 		torrentDownloadLimit,
 		torrentUploadLimit,
-		torrentOutputDir,
 		torrentSeedRatio,
-		torrentSeedTimeMinutes,
 		torrentPeerLimit,
 		torrentUploadPeerLimit,
 	});
@@ -223,14 +265,14 @@ export function useDownloader() {
 			embedThumbnail,
 			embedSubs,
 			cookiesFromBrowser,
-			useAria2,
-			aria2MaxConnections,
-			aria2ConcurrentDownloads,
-			aria2Split,
-			aria2MinSplitSize,
-			aria2Preallocate,
-			aria2CheckCertificate,
-			aria2AlwaysResume,
+			useAria2Next,
+			aria2NextMaxConnections,
+			aria2NextConcurrentDownloads,
+			aria2NextSplit,
+			aria2NextMinSplitSize,
+			aria2NextPreallocate,
+			aria2NextCheckCertificate,
+			aria2NextAlwaysResume,
 			concurrentFragmentDownloads,
 			downloadRetries,
 			fragmentRetries,
@@ -241,9 +283,7 @@ export function useDownloader() {
 			torrentMaxActive,
 			torrentDownloadLimit,
 			torrentUploadLimit,
-			torrentOutputDir,
 			torrentSeedRatio,
-			torrentSeedTimeMinutes,
 			torrentPeerLimit,
 			torrentUploadPeerLimit,
 		};
@@ -328,14 +368,14 @@ export function useDownloader() {
 							updated.cookiesFromBrowser === "none"
 								? null
 								: updated.cookiesFromBrowser,
-						useAria2: updated.useAria2,
-						aria2MaxConnections: updated.aria2MaxConnections,
-						aria2ConcurrentDownloads: updated.aria2ConcurrentDownloads,
-						aria2Split: updated.aria2Split,
-						aria2MinSplitSize: updated.aria2MinSplitSize,
-						aria2Preallocate: updated.aria2Preallocate,
-						aria2CheckCertificate: updated.aria2CheckCertificate,
-						aria2AlwaysResume: updated.aria2AlwaysResume,
+						useAria2Next: updated.useAria2Next,
+						aria2NextMaxConnections: updated.aria2NextMaxConnections,
+						aria2NextConcurrentDownloads: updated.aria2NextConcurrentDownloads,
+						aria2NextSplit: updated.aria2NextSplit,
+						aria2NextMinSplitSize: updated.aria2NextMinSplitSize,
+						aria2NextPreallocate: updated.aria2NextPreallocate,
+						aria2NextCheckCertificate: updated.aria2NextCheckCertificate,
+						aria2NextAlwaysResume: updated.aria2NextAlwaysResume,
 						concurrentFragmentDownloads: updated.concurrentFragmentDownloads,
 						downloadRetries: updated.downloadRetries,
 						fragmentRetries: updated.fragmentRetries,
@@ -347,10 +387,7 @@ export function useDownloader() {
 						torrentMaxActive: updated.torrentMaxActive,
 						torrentDownloadLimit: updated.torrentDownloadLimit,
 						torrentUploadLimit: updated.torrentUploadLimit,
-						torrentOutputDir:
-							updated.torrentOutputDir === "" ? null : updated.torrentOutputDir,
 						torrentSeedRatio: updated.torrentSeedRatio,
-						torrentSeedTimeMinutes: updated.torrentSeedTimeMinutes,
 						torrentPeerLimit: updated.torrentPeerLimit,
 						torrentUploadPeerLimit: updated.torrentUploadPeerLimit,
 					},
@@ -382,17 +419,18 @@ export function useDownloader() {
 			formatId: string,
 			outputDir: string,
 			conflictResolution: "replace" | "rename",
+			filename?: string,
 		) => {
 			if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-				wsRef.current.send(
-					JSON.stringify({
-						type: "choose",
-						jobId,
-						formatId,
-						outputDir,
-						conflictResolution,
-					}),
-				);
+				const payload: Record<string, unknown> = {
+					type: "choose",
+					jobId,
+					formatId,
+					outputDir,
+					conflictResolution,
+				};
+				if (filename) payload.filename = filename;
+				wsRef.current.send(JSON.stringify(payload));
 				setShowFormatDrawer(false);
 				setProbedInfo(null);
 				setDuplicateFileAlert(null);
@@ -409,13 +447,15 @@ export function useDownloader() {
 			wsRef.current.close();
 		}
 
-		console.log(`Connecting WebSocket to ${serverUrlRef.current}...`);
+		const wsUrl = serverUrlRef.current;
+		logger.debug(`Connecting WebSocket to ${wsUrl}...`);
+
 		try {
-			const ws = new WebSocket(serverUrlRef.current);
+			const ws = new WebSocket(wsUrl);
 			wsRef.current = ws;
 
 			ws.onopen = () => {
-				console.log("WebSocket connected");
+				logger.debug("WebSocket connected");
 				setIsConnected(true);
 				ws.send(
 					JSON.stringify({
@@ -447,7 +487,6 @@ export function useDownloader() {
 							setServerInfo({
 								ytDlpVersion: msg.ytDlpVersion,
 								ffmpegAvailable: msg.ffmpegAvailable,
-								poTokenPluginLoaded: msg.poTokenPluginLoaded || false,
 							});
 							break;
 
@@ -469,6 +508,8 @@ export function useDownloader() {
 									uploader: msg.uploader,
 									formats: msg.formats || [],
 									mediaType: msg.mediaType,
+									fileType: msg.fileType,
+									mime: msg.mime,
 									torrent: msg.torrent,
 								});
 								if (msg.formats && msg.formats.length > 0) {
@@ -519,7 +560,8 @@ export function useDownloader() {
 								(msg.totalBytes || msg.totalBytesEstimate || 0) +
 									(msg.audioTotalBytes || 0);
 							const pct =
-								combinedTotal > 0 ? (combinedDl / combinedTotal) * 100 : 0;
+								msg.progress ??
+								(combinedTotal > 0 ? (combinedDl / combinedTotal) * 100 : 0);
 							updateLocalJob(msg.jobId, {
 								status: msg.status,
 								progress: pct,
@@ -553,19 +595,63 @@ export function useDownloader() {
 							break;
 
 						case "download_failed":
-							updateLocalJob(msg.jobId, { status: "failed", error: msg.error });
+							updateLocalJob(msg.jobId, {
+								status: "failed",
+								error: msg.error,
+								error_category: msg.errorCategory,
+							});
+							if (
+								msg.errorCategory === "expired_url" &&
+								msg.needsUrl &&
+								msg.pageUrl
+							) {
+								setUrlRefreshJobId(msg.jobId);
+							}
 							break;
 
 						case "download_canceled":
 							updateLocalJob(msg.jobId, { status: "canceled" });
 							break;
 
+						case "download_url": {
+							if (msg.jobId === urlRefreshJobIdRef.current) {
+								handleRefreshUrl(
+									msg.jobId,
+									msg.url as string,
+									(msg.referer as string) || undefined,
+								);
+							}
+							break;
+						}
+
 						case "jobs_list": {
-							const jobsMap: Record<string, Job> = {};
-							msg.jobs.forEach((job: Job) => {
-								jobsMap[job.job_id] = job;
+							// Merge server baseline into local state; never overwrite fresher
+							// progress fields with stale baseline values.
+							setJobs((prev) => {
+								const merged = { ...prev };
+								for (const job of msg.jobs as Job[]) {
+									const existing = merged[job.job_id];
+									if (existing) {
+										// Prefer local progress if it is ahead of the baseline.
+										const keepProgress =
+											(existing.combined_downloaded_bytes ?? 0) >
+											(job.combined_downloaded_bytes ?? 0);
+										merged[job.job_id] = {
+											...job,
+											downloaded_bytes: keepProgress
+												? existing.downloaded_bytes
+												: job.downloaded_bytes,
+											combined_downloaded_bytes: keepProgress
+												? existing.combined_downloaded_bytes
+												: job.combined_downloaded_bytes,
+											progress: keepProgress ? existing.progress : job.progress,
+										};
+									} else {
+										merged[job.job_id] = job;
+									}
+								}
+								return merged;
 							});
-							setJobs(jobsMap);
 							break;
 						}
 
@@ -618,6 +704,7 @@ export function useDownloader() {
 									selectedFormatIdRef.current,
 									msg.path,
 									"replace",
+									msg.filename,
 								);
 							}
 							break;
@@ -627,18 +714,26 @@ export function useDownloader() {
 							setEmbedThumbnail(msg.settings.embedThumbnail);
 							setEmbedSubs(msg.settings.embedSubs);
 							setCookiesFromBrowser(msg.settings.cookiesFromBrowser || "none");
-							setUseAria2(msg.settings.useAria2 ?? true);
-							setAria2MaxConnections(msg.settings.aria2MaxConnections ?? 16);
-							setAria2ConcurrentDownloads(
-								msg.settings.aria2ConcurrentDownloads ?? 5,
+							setUseAria2Next(msg.settings.useAria2Next ?? true);
+							setAria2NextMaxConnections(
+								msg.settings.aria2NextMaxConnections ?? 16,
 							);
-							setAria2Split(msg.settings.aria2Split ?? 16);
-							setAria2MinSplitSize(msg.settings.aria2MinSplitSize || "1M");
-							setAria2Preallocate(msg.settings.aria2Preallocate ?? true);
-							setAria2CheckCertificate(
-								msg.settings.aria2CheckCertificate ?? true,
+							setAria2NextConcurrentDownloads(
+								msg.settings.aria2NextConcurrentDownloads ?? 5,
 							);
-							setAria2AlwaysResume(msg.settings.aria2AlwaysResume ?? true);
+							setAria2NextSplit(msg.settings.aria2NextSplit ?? 16);
+							setAria2NextMinSplitSize(
+								msg.settings.aria2NextMinSplitSize || "1M",
+							);
+							setAria2NextPreallocate(
+								msg.settings.aria2NextPreallocate ?? true,
+							);
+							setAria2NextCheckCertificate(
+								msg.settings.aria2NextCheckCertificate ?? true,
+							);
+							setAria2NextAlwaysResume(
+								msg.settings.aria2NextAlwaysResume ?? true,
+							);
 							setConcurrentFragmentDownloads(
 								msg.settings.concurrentFragmentDownloads ?? 4,
 							);
@@ -648,31 +743,27 @@ export function useDownloader() {
 							setSubtitlesLangs(msg.settings.subtitlesLangs || "all");
 							setFfmpegLocation(msg.settings.ffmpegLocation || "");
 							setTorrentEnabled(msg.settings.torrentEnabled ?? true);
-							setTorrentMaxActive(msg.settings.torrentMaxActive ?? 32);
+							setTorrentMaxActive(msg.settings.torrentMaxActive ?? 4);
 							setTorrentDownloadLimit(msg.settings.torrentDownloadLimit ?? 0);
 							setTorrentUploadLimit(msg.settings.torrentUploadLimit ?? 0);
-							setTorrentOutputDir(msg.settings.torrentOutputDir || "");
-							setTorrentSeedRatio(msg.settings.torrentSeedRatio ?? 100);
-							setTorrentSeedTimeMinutes(
-								msg.settings.torrentSeedTimeMinutes ?? 100000,
-							);
-							setTorrentPeerLimit(msg.settings.torrentPeerLimit ?? 2000);
+							setTorrentSeedRatio(msg.settings.torrentSeedRatio ?? 2);
+							setTorrentPeerLimit(msg.settings.torrentPeerLimit ?? 500);
 							setTorrentUploadPeerLimit(
-								msg.settings.torrentUploadPeerLimit ?? 500,
+								msg.settings.torrentUploadPeerLimit ?? 20,
 							);
 							break;
 
 						case "browse_failed":
-							console.error("Directory browse failed:", msg.error);
+							logger.error("Directory browse failed:", msg.error);
 							break;
 					}
 				} catch (err) {
-					console.error("Failed to parse WS message:", err);
+					logger.error("Failed to parse WS message:", err);
 				}
 			};
 
 			ws.onclose = () => {
-				console.log("WebSocket closed");
+				logger.debug("WebSocket closed");
 				setIsConnected(false);
 				if (heartbeatIntervalRef.current)
 					clearInterval(heartbeatIntervalRef.current);
@@ -682,10 +773,10 @@ export function useDownloader() {
 			};
 
 			ws.onerror = (err) => {
-				console.error("WebSocket error:", err);
+				logger.error("WebSocket error:", err);
 			};
 		} catch (e) {
-			console.error("Failed to connect WebSocket:", e);
+			logger.error("Failed to connect WebSocket:", e);
 			setIsConnected(false);
 			if (reconnectTimeoutRef.current)
 				clearTimeout(reconnectTimeoutRef.current);
@@ -736,15 +827,6 @@ export function useDownloader() {
 		}
 	}, [inputUrl, jobs, setAmProbingUrl]);
 
-	const handlePasteUrl = useCallback(async () => {
-		try {
-			const text = await navigator.clipboard.readText();
-			if (text) setInputUrl(text);
-		} catch (err) {
-			console.error("Clipboard paste blocked or unsupported:", err);
-		}
-	}, []);
-
 	const handleChooseFormat = useCallback(() => {
 		if (
 			!probedInfo ||
@@ -753,6 +835,7 @@ export function useDownloader() {
 			return;
 		const finalDest = drawerCustomPath || selectedCategoryPath;
 		if (probedInfo.mediaType === "torrent" && probedInfo.torrent) {
+			if (selectedTorrentFilesRef.current.size === 0) return;
 			if (wsRef.current?.readyState === WebSocket.OPEN) {
 				wsRef.current.send(
 					JSON.stringify({
@@ -761,50 +844,37 @@ export function useDownloader() {
 						formatId: "torrent",
 						outputDir: finalDest,
 						conflictResolution: "replace",
+						torrentSelectedFileIndices: Array.from(
+							selectedTorrentFilesRef.current,
+						),
 					}),
 				);
 			}
 			setShowFormatDrawer(false);
 			setProbedInfo(null);
 			setInputUrl("");
+			selectedTorrentFilesRef.current = new Set();
+			_setSelectedTorrentFiles(new Set());
 			return;
 		}
 		const chosenFormatObj = probedInfo.formats.find(
 			(f) => f.formatId === selectedFormatId,
 		);
 		const estimatedExt = chosenFormatObj?.ext || "mp4";
-		let cleanTitle = probedInfo.title || "video";
-		const mappings: Record<string, string> = {
-			"/": "／",
-			"\\": "＼",
-			":": "：",
-			"*": "＊",
-			"?": "？",
-			'"': "＂",
-			"<": "＜",
-			">": "＞",
-			"|": "｜",
-		};
-		for (const [char, replacement] of Object.entries(mappings)) {
-			cleanTitle = cleanTitle.replaceAll(char, replacement);
-		}
-		cleanTitle = cleanTitle.replace(/\s+/g, " ").trim();
-		while (cleanTitle.endsWith(".")) {
-			cleanTitle = cleanTitle.slice(0, -1).trim();
-		}
-		if (!cleanTitle) cleanTitle = "video";
-		const filename = `${cleanTitle}.${estimatedExt}`;
 
 		selectedFormatIdRef.current = selectedFormatId;
-		selectedOutputDirRef.current = finalDest;
 
 		if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
 			wsRef.current.send(
 				JSON.stringify({
+					// Raw hints only — backend resolve_filename is the source of truth.
 					type: "check_file_exists",
 					path: finalDest,
-					filename,
 					jobId: probedInfo.jobId,
+					title: probedInfo.title || "video",
+					ext: estimatedExt,
+					filename: probedInfo.filename || undefined,
+					mime: probedInfo.mime || undefined,
 				}),
 			);
 		}
@@ -849,6 +919,7 @@ export function useDownloader() {
 			downloading: list.filter((j) =>
 				["downloading", "queued", "postprocessing"].includes(j.status),
 			).length,
+			seeding: list.filter((j) => j.status === "seeding").length,
 			completed: list.filter((j) => j.status === "completed").length,
 			paused: list.filter((j) => j.status === "paused").length,
 			failed: list.filter((j) => ["failed", "canceled"].includes(j.status))
@@ -864,6 +935,8 @@ export function useDownloader() {
 				["downloading", "queued", "postprocessing"].includes(j.status),
 			);
 		}
+		if (filterTab === "seeding")
+			return list.filter((j) => j.status === "seeding");
 		if (filterTab === "completed")
 			return list.filter((j) => j.status === "completed");
 		if (filterTab === "paused")
@@ -885,6 +958,10 @@ export function useDownloader() {
 		if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
 			wsRef.current.send(JSON.stringify({ type: "remove_job", jobId }));
 		}
+		setJobs((prev) => {
+			const { [jobId]: _, ...rest } = prev;
+			return rest;
+		});
 	}, []);
 
 	const handleClearCompleted = useCallback(() => {
@@ -895,17 +972,49 @@ export function useDownloader() {
 		});
 	}, [jobs, handleRemoveJob]);
 
-	const handlePauseJob = useCallback((jobId: string) => {
-		if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-			wsRef.current.send(JSON.stringify({ type: "pause", jobId }));
-		}
-	}, []);
+	const handlePauseJob = useCallback(
+		(jobId: string) => {
+			if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+				wsRef.current.send(JSON.stringify({ type: "pause", jobId }));
+			}
+			updateLocalJob(jobId, { status: "paused" });
+		},
+		[updateLocalJob],
+	);
 
-	const handleResumeJob = useCallback((jobId: string) => {
-		if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-			wsRef.current.send(JSON.stringify({ type: "resume", jobId }));
-		}
-	}, []);
+	const handleResumeJob = useCallback(
+		(jobId: string) => {
+			if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+				wsRef.current.send(JSON.stringify({ type: "resume", jobId }));
+			}
+			updateLocalJob(jobId, { status: "queued" });
+		},
+		[updateLocalJob],
+	);
+
+	const handleRefreshUrl = useCallback(
+		(jobId: string, url: string, referer?: string) => {
+			if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+				wsRef.current.send(
+					JSON.stringify({
+						type: "refresh_url",
+						jobId,
+						url,
+						referer,
+					}),
+				);
+			}
+			setUrlRefreshJobId(null);
+			updateLocalJob(jobId, {
+				status: "queued",
+				url,
+				referer,
+				error: undefined,
+				error_category: undefined,
+			});
+		},
+		[updateLocalJob],
+	);
 
 	const handleDeleteFile = useCallback((jobId: string) => {
 		setDeleteFileConfirm(jobId);
@@ -1002,7 +1111,7 @@ export function useDownloader() {
 				]);
 			}
 		} catch (err) {
-			console.error("Failed to detect browsers:", err);
+			logger.error("Failed to detect browsers:", err);
 		} finally {
 			setIsLoadingBrowsers(false);
 		}
@@ -1020,11 +1129,15 @@ export function useDownloader() {
 				});
 			}
 			setIsExtModalOpen(false);
-			alert(
-				`DownloadAnything extension loaded into ${browser.name} successfully!`,
-			);
+			setGenericAlert({
+				title: "Extension Installed",
+				message: `DownloadAnything extension loaded into ${browser.name} successfully!`,
+			});
 		} catch (err) {
-			alert(`Installation failed: ${err}`);
+			setGenericAlert({
+				title: "Extension Installation Failed",
+				message: `Installation failed: ${err}`,
+			});
 		}
 	}, []);
 
@@ -1045,22 +1158,22 @@ export function useDownloader() {
 		setEmbedSubs,
 		cookiesFromBrowser,
 		setCookiesFromBrowser,
-		useAria2,
-		setUseAria2,
-		aria2MaxConnections,
-		setAria2MaxConnections,
-		aria2ConcurrentDownloads,
-		setAria2ConcurrentDownloads,
-		aria2Split,
-		setAria2Split,
-		aria2MinSplitSize,
-		setAria2MinSplitSize,
-		aria2Preallocate,
-		setAria2Preallocate,
-		aria2CheckCertificate,
-		setAria2CheckCertificate,
-		aria2AlwaysResume,
-		setAria2AlwaysResume,
+		useAria2Next,
+		setUseAria2Next,
+		aria2NextMaxConnections,
+		setAria2NextMaxConnections,
+		aria2NextConcurrentDownloads,
+		setAria2NextConcurrentDownloads,
+		aria2NextSplit,
+		setAria2NextSplit,
+		aria2NextMinSplitSize,
+		setAria2NextMinSplitSize,
+		aria2NextPreallocate,
+		setAria2NextPreallocate,
+		aria2NextCheckCertificate,
+		setAria2NextCheckCertificate,
+		aria2NextAlwaysResume,
+		setAria2NextAlwaysResume,
 		concurrentFragmentDownloads,
 		setConcurrentFragmentDownloads,
 		downloadRetries,
@@ -1081,12 +1194,8 @@ export function useDownloader() {
 		setTorrentDownloadLimit,
 		torrentUploadLimit,
 		setTorrentUploadLimit,
-		torrentOutputDir,
-		setTorrentOutputDir,
 		torrentSeedRatio,
 		setTorrentSeedRatio,
-		torrentSeedTimeMinutes,
-		setTorrentSeedTimeMinutes,
 		torrentPeerLimit,
 		setTorrentPeerLimit,
 		torrentUploadPeerLimit,
@@ -1118,6 +1227,11 @@ export function useDownloader() {
 		setProbedInfo,
 		selectedFormatId,
 		setSelectedFormatId,
+		selectedTorrentFiles,
+		toggleTorrentFile,
+		selectAllTorrentFiles,
+		deselectAllTorrentFiles,
+		setSelectedTorrentFiles,
 		selectedCategoryPath,
 		setSelectedCategoryPath,
 		drawerCustomPath,
@@ -1130,6 +1244,8 @@ export function useDownloader() {
 		setDeleteFileConfirm,
 		genericAlert,
 		setGenericAlert,
+		urlRefreshJobId,
+		setUrlRefreshJobId,
 		displayJobs,
 		counts,
 		hasCompletedJobs,
@@ -1137,7 +1253,6 @@ export function useDownloader() {
 		fetchDirectory,
 		handleRevealFile,
 		handleProbeUrl,
-		handlePasteUrl,
 		handleChooseFormat,
 		proceedWithDownload,
 		handleAddCategory,

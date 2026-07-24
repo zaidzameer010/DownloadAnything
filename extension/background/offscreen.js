@@ -1,6 +1,6 @@
+import { WS_URL } from "../lib/constants.js";
 import { WSClient } from "../lib/ws-client.js";
 
-const SERVER_URL = "ws://127.0.0.1:8765/ws";
 const OFFSCREEN_TAB_ID = -1;
 let client = null;
 
@@ -16,7 +16,7 @@ function connectWS() {
 	}
 
 	client = new WSClient(
-		SERVER_URL,
+		WS_URL,
 		OFFSCREEN_TAB_ID,
 		(wsMsg) => {
 			notifyServiceWorker({

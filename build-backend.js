@@ -1,7 +1,23 @@
-import { execSync } from "child_process";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import { execSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const LOG_LEVEL = (process.env.LOG_LEVEL || "info").toLowerCase();
+const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
+
+function isEnabled(level) {
+	return LEVELS[level] >= (LEVELS[LOG_LEVEL] ?? LEVELS.info);
+}
+
+const logger = {
+	debug: (...args) =>
+		isEnabled("debug") && console.log("[build][DEBUG]", ...args),
+	info: (...args) => isEnabled("info") && console.log("[build][INFO]", ...args),
+	warn: (...args) =>
+		isEnabled("warn") && console.warn("[build][WARN]", ...args),
+	error: (...args) => console.error("[build][ERROR]", ...args),
+};
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,7 +31,7 @@ if (platform === "darwin") {
 } else if (platform === "win32") {
 	targetTriple = "x86_64-pc-windows-msvc";
 } else {
-	console.error(`Unsupported platform: ${platform}`);
+	logger.error(`Unsupported platform: ${platform}`);
 	process.exit(1);
 }
 
@@ -62,23 +78,72 @@ if (fs.existsSync(destExecutable)) {
 
 	const destStat = fs.statSync(destExecutable);
 	if (destStat.mtimeMs > maxMtime) {
-		console.log(
+		logger.info(
 			"Python backend is up to date (incremental check of all python files). Skipping PyInstaller build.",
 		);
 		process.exit(0);
 	}
 }
 
-console.log("Changes detected or backend missing. Compiling Python backend...");
+logger.info("Changes detected or backend missing. Compiling Python backend...");
 
 try {
-	// Run PyInstaller
+	// Prefer the dedicated conda environment locally, but fall back to system
+	// Python in CI so release builds do not require conda.
+	const hasConda = (() => {
+		try {
+			execSync("conda --version", { stdio: "pipe" });
+			return true;
+		} catch {
+			return false;
+		}
+	})();
+	const pythonCmd = hasConda
+		? "conda run -n downloadanything --no-capture-output python"
+		: "python";
+	logger.info(`Building backend using ${hasConda ? "conda" : "system python"}`);
+
+	const pyInstallerArgs = [
+		"--onedir",
+		"--clean",
+		"--noupx",
+		"--paths=server",
+		"--hidden-import",
+		"libtorrent",
+		"--collect-all",
+		"yt_dlp",
+		"--collect-all",
+		"libtorrent",
+		"--collect-all",
+		"curl_cffi",
+		"--collect-all",
+		"aiohttp",
+		"--collect-all",
+		"orjson",
+		"--collect-all",
+		"pydantic",
+		"--collect-all",
+		"pydantic_settings",
+		"--collect-all",
+		"fastapi",
+		"--collect-all",
+		"uvicorn",
+		"--collect-all",
+		"m3u8",
+		"--collect-all",
+		"send2trash",
+		"--collect-all",
+		"structlog",
+		"--collect-data",
+		"certifi",
+		"server/app/main.py",
+	];
 	execSync(
-		"pyinstaller --onedir --clean --noupx --paths=server server/app/main.py",
+		`${pythonCmd} -m PyInstaller ${pyInstallerArgs.join(" ")}`,
 		{ stdio: "inherit" },
 	);
 } catch (error) {
-	console.error("Failed to run PyInstaller:", error.message);
+	logger.error("Failed to run PyInstaller:", error.message);
 	process.exit(1);
 }
 
@@ -86,7 +151,7 @@ if (!fs.existsSync(binariesDir)) {
 	fs.mkdirSync(binariesDir, { recursive: true });
 }
 
-console.log(`Copying backend directory: dist/main -> ${destPath}`);
+logger.info(`Copying backend directory: dist/main -> ${destPath}`);
 try {
 	if (fs.existsSync(destPath)) {
 		// Only clean up python backend files to preserve other bundled binaries (like aria2-next)
@@ -98,13 +163,13 @@ try {
 		if (fs.existsSync(internalDir))
 			fs.rmSync(internalDir, { recursive: true, force: true });
 
-		// Remove legacy unrenamed aria2-next-* files and old aria2c / aria2c.exe to avoid duplicates
+		// Remove legacy unrenamed aria2-next-* files and old aria2-next / aria2-next.exe to avoid duplicates
 		const destFiles = fs.readdirSync(destPath);
 		destFiles.forEach((file) => {
 			if (
 				file.startsWith("aria2-next-") ||
-				file === "aria2c" ||
-				file === "aria2c.exe"
+				file === "aria2-next" ||
+				file === "aria2-next.exe"
 			) {
 				fs.rmSync(path.join(destPath, file), { force: true });
 			}
@@ -131,7 +196,7 @@ try {
 		}
 	});
 } catch (error) {
-	console.error("Failed to copy backend directory:", error.message);
+	logger.error("Failed to copy backend directory:", error.message);
 	process.exit(1);
 }
 
@@ -140,8 +205,8 @@ if (platform !== "win32") {
 	try {
 		fs.chmodSync(destExecutable, "755");
 	} catch (error) {
-		console.error("Failed to set executable permissions:", error.message);
+		logger.error("Failed to set executable permissions:", error.message);
 	}
 }
 
-console.log("Python backend built and copied successfully!");
+logger.info("Python backend built and copied successfully!");

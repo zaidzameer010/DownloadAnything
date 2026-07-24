@@ -1,3 +1,8 @@
+import { getClientVersion } from "./constants.js";
+import { createLogger } from "./logger.js";
+
+const logger = createLogger("ws-client");
+
 const MAX_QUEUED_MESSAGES = 100;
 
 export class WSClient {
@@ -27,21 +32,20 @@ export class WSClient {
 		}
 
 		this.isConnecting = true;
-		console.log(`Connecting WebSocket for tab ${this.tabId} to ${this.url}`);
 
+		const wsUrl = this.url;
 		let socket;
 		try {
-			socket = new WebSocket(this.url);
+			socket = new WebSocket(wsUrl);
 			this.ws = socket;
 		} catch (error) {
-			console.error("WS instantiation failed:", error);
+			logger.error("WS instantiation failed:", error);
 			this.handleClose();
 			return;
 		}
 
 		socket.onopen = () => {
 			if (this.ws !== socket) return;
-			console.log("WebSocket connection established");
 			this.reconnectAttempts = 0;
 			this.isConnecting = false;
 			clearTimeout(this._retryTimer);
@@ -51,12 +55,12 @@ export class WSClient {
 				socket.send(
 					JSON.stringify({
 						type: "hello",
-						clientVersion: "0.4.0",
+						clientVersion: getClientVersion(),
 						tabId: this.tabId,
 					}),
 				);
 			} catch (error) {
-				console.warn("Failed to send WebSocket handshake:", error);
+				logger.warn("Failed to send WebSocket handshake:", error);
 				socket.close();
 				return;
 			}
@@ -72,7 +76,7 @@ export class WSClient {
 				try {
 					socket.send(JSON.stringify(payload));
 				} catch (error) {
-					console.warn("Failed to flush queued WebSocket payload:", error);
+					logger.warn("Failed to flush queued WebSocket payload:", error);
 					this.sendQueue.unshift(payload);
 					socket.close();
 					break;
@@ -88,24 +92,23 @@ export class WSClient {
 				const payload = JSON.parse(event.data);
 				if (payload.type === "pong") return;
 				if (!validateServerMessage(payload)) {
-					console.warn("Invalid server payload ignored:", payload);
+					logger.warn("Invalid server payload ignored:", payload);
 					return;
 				}
 				if (this.onMessage) this.onMessage(payload);
 			} catch (error) {
-				console.error("Failed to parse WS payload:", error, event.data);
+				logger.error("Failed to parse WS payload:", error, event.data);
 			}
 		};
 
 		socket.onclose = () => {
 			if (this.ws !== socket) return;
-			console.log("WebSocket connection closed");
 			this.handleClose();
 		};
 
 		socket.onerror = (error) => {
 			if (this.ws === socket) {
-				console.error("WebSocket connection error:", error);
+				logger.error("WebSocket connection error:", error);
 			}
 		};
 	}
@@ -182,6 +185,7 @@ const VALID_SERVER_MESSAGE_TYPES = new Set([
 	"directory_selected",
 	"duplicate_job_alert",
 	"file_exists_result",
+	"needs_refresh",
 ]);
 
 function validateServerMessage(payload) {
@@ -207,6 +211,7 @@ function validateServerMessage(payload) {
 		"download_canceled",
 		"duplicate_job_alert",
 		"file_exists_result",
+		"needs_refresh",
 	]);
 	if (jobMessageTypes.has(type)) {
 		if (typeof payload.jobId !== "string") return false;

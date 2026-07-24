@@ -14,14 +14,6 @@ export interface TorrentMetadata {
 	infoHash: string;
 }
 
-export interface TorrentStatus {
-	peers: number;
-	seeds: number;
-	availability: number;
-	completedPieces: number;
-	pieceCount: number;
-}
-
 export interface Job {
 	job_id: string;
 	url: string;
@@ -39,6 +31,7 @@ export interface Job {
 	format_id?: string;
 	output_dir?: string;
 	error?: string;
+	error_category?: string;
 	title?: string;
 	duration?: number;
 	thumbnail?: string;
@@ -47,6 +40,8 @@ export interface Job {
 	fragment_index?: number;
 	fragment_count?: number;
 	media_type?: string;
+	referer?: string;
+	page_url?: string;
 	torrent_files?: TorrentFile[];
 	torrent_info_hash?: string;
 	torrent_piece_length?: number;
@@ -65,6 +60,7 @@ export interface Category {
 export interface FormatOption {
 	label: string;
 	height: number;
+	width: number;
 	fps: number;
 	codecFamily: string;
 	ext: string;
@@ -80,18 +76,21 @@ export interface FormatOption {
 export interface ProbedInfo {
 	jobId: string;
 	title: string;
+	/** Fully resolved basename including extension when known. Display uses `title`. */
+	filename?: string;
 	duration?: number;
 	thumbnail?: string;
 	uploader?: string;
 	formats: FormatOption[];
 	mediaType?: string;
+	fileType?: string;
+	mime?: string;
 	torrent?: TorrentMetadata;
 }
 
 export interface ServerInfo {
 	ytDlpVersion: string;
 	ffmpegAvailable: boolean;
-	poTokenPluginLoaded: boolean;
 }
 
 export interface DuplicateJobAlert {
@@ -116,6 +115,7 @@ export interface GenericAlert {
 export type FilterTab =
 	| "all"
 	| "downloading"
+	| "seeding"
 	| "completed"
 	| "paused"
 	| "failed";

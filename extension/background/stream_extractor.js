@@ -1,31 +1,56 @@
-export function classifyStream(url, contentType = "") {
-	const lowerUrl = url.toLowerCase();
-	const lowerType = (contentType || "").toLowerCase().split(";", 1)[0].trim();
-	const isHls =
-		lowerType === "application/vnd.apple.mpegurl" ||
-		lowerType === "application/x-mpegurl" ||
-		lowerUrl.includes(".m3u8") ||
-		lowerUrl.includes("/m3u8") ||
-		lowerUrl.includes("/hls/");
-	const isDash =
-		lowerType === "application/dash+xml" ||
-		lowerUrl.includes(".mpd") ||
-		lowerUrl.includes("/manifest.mpd") ||
-		lowerUrl.includes("/dash/");
+import {
+	isStreamSegmentUrl,
+	normalizeMime,
+	STREAM_DASH,
+	STREAM_HLS,
+	streamConfidence as sharedStreamConfidence,
+} from "../lib/file_types.js";
+import { trackCandidate } from "./sniff_common.js";
 
-	if (isHls) return "HLS";
-	if (isDash) return "DASH";
+const HLS_MIME_TYPES = new Set([
+	"application/vnd.apple.mpegurl",
+	"application/x-mpegurl",
+]);
+const DASH_MIME_TYPES = new Set(["application/dash+xml"]);
+
+/**
+ * Classify HLS/DASH stream candidates.
+ * Path tokens (including ".mp4.m3u8") beat progressive video/* MIME.
+ * Init/segment fragments are not tracked as candidates.
+ */
+export function classifyStream(url, contentType = "") {
+	const lowerType = normalizeMime(contentType);
+	const lowerUrl = String(url || "").toLowerCase();
+
+	if (HLS_MIME_TYPES.has(lowerType)) return STREAM_HLS;
+	if (DASH_MIME_TYPES.has(lowerType)) return STREAM_DASH;
+
+	// Manifests first (handles disguised names like file.mp4.m3u8).
+	if (lowerUrl.includes(".m3u8") || lowerUrl.includes("/m3u8")) {
+		return STREAM_HLS;
+	}
+	if (lowerUrl.includes(".mpd") || lowerUrl.includes("/manifest.mpd")) {
+		return STREAM_DASH;
+	}
+
+	// Never promote init/segment fragments as stream manifests.
+	if (isStreamSegmentUrl(url)) {
+		return null;
+	}
+
+	// Weaker stream directory tokens.
+	if (lowerUrl.includes("/hls/") || lowerUrl.includes("media=hls")) {
+		return STREAM_HLS;
+	}
+	if (lowerUrl.includes("/dash/")) {
+		return STREAM_DASH;
+	}
+
 	return null;
 }
 
-function canonicalizeCandidateUrl(url) {
-	try {
-		const parsed = new URL(url);
-		parsed.hash = "";
-		return parsed.toString();
-	} catch {
-		return url;
-	}
+export function streamConfidence(url, contentType = "") {
+	return sharedStreamConfidence(url, contentType);
 }
 
 export function trackStream(
@@ -35,38 +60,13 @@ export function trackStream(
 	maxSniffedStreams,
 	contentType = "",
 ) {
-	const tabId = details.tabId;
-	if (tabId < 0 || !type) return null;
-	const url = canonicalizeCandidateUrl(details.url);
-
-	if (!sniffedStreamsMap.has(tabId)) {
-		sniffedStreamsMap.set(tabId, new Map());
-	}
-	const streamsMap = sniffedStreamsMap.get(tabId);
-	const existing = streamsMap.get(url);
-	const changed =
-		!existing ||
-		existing.type !== type ||
-		(contentType && existing.contentType !== contentType);
-
-	const streamInfo = {
-		...(existing || {}),
-		url,
+	const confidence = streamConfidence(details.url, contentType);
+	return trackCandidate(
+		details,
 		type,
-		contentType: contentType || existing?.contentType || null,
-		timestamp: Date.now(),
-		frameId: details.frameId,
-		documentUrl: details.documentUrl || existing?.documentUrl || null,
-		initiator: details.initiator || existing?.initiator || null,
-		requestType: details.type || existing?.requestType || null,
-		confidence: 1.0,
-	};
-
-	streamsMap.set(url, streamInfo);
-	while (streamsMap.size > maxSniffedStreams) {
-		const oldestUrl = streamsMap.keys().next().value;
-		streamsMap.delete(oldestUrl);
-	}
-
-	return { streamInfo, isNew: !existing, changed };
+		sniffedStreamsMap,
+		maxSniffedStreams,
+		contentType,
+		confidence,
+	);
 }

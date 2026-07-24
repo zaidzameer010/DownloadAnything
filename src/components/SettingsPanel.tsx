@@ -1,9 +1,16 @@
-import { Cpu, FolderOpen, Play, Puzzle, Settings, Trash2 } from "lucide-react";
+import {
+	Cpu,
+	FolderOpen,
+	Globe,
+	Play,
+	Puzzle,
+	Settings,
+	Trash2,
+} from "lucide-react";
 import type {
 	DownloaderSettings,
 	UseDownloaderReturn,
 } from "../hooks/useDownloader";
-import { GlobeIcon } from "./icons/GlobeIcon";
 
 interface SettingsPanelProps {
 	downloader: UseDownloaderReturn;
@@ -262,22 +269,22 @@ function EnginesSettings({ downloader }: { downloader: UseDownloaderReturn }) {
 		setRateLimit,
 		ffmpegLocation,
 		setFfmpegLocation,
-		useAria2,
-		setUseAria2,
-		aria2MaxConnections,
-		setAria2MaxConnections,
-		aria2ConcurrentDownloads,
-		setAria2ConcurrentDownloads,
-		aria2Split,
-		setAria2Split,
-		aria2MinSplitSize,
-		setAria2MinSplitSize,
-		aria2Preallocate,
-		setAria2Preallocate,
-		aria2CheckCertificate,
-		setAria2CheckCertificate,
-		aria2AlwaysResume,
-		setAria2AlwaysResume,
+		useAria2Next,
+		setUseAria2Next,
+		aria2NextMaxConnections,
+		setAria2NextMaxConnections,
+		aria2NextConcurrentDownloads,
+		setAria2NextConcurrentDownloads,
+		aria2NextSplit,
+		setAria2NextSplit,
+		aria2NextMinSplitSize,
+		setAria2NextMinSplitSize,
+		aria2NextPreallocate,
+		setAria2NextPreallocate,
+		aria2NextCheckCertificate,
+		setAria2NextCheckCertificate,
+		aria2NextAlwaysResume,
+		setAria2NextAlwaysResume,
 		pushSettings,
 	} = downloader;
 
@@ -286,7 +293,7 @@ function EnginesSettings({ downloader }: { downloader: UseDownloaderReturn }) {
 			<section className="settings-card">
 				<div className="section-header-row">
 					<h2 className="section-title-large">
-						<GlobeIcon width={18} height={18} />
+						<Globe size={18} />
 						<span>yt-dlp Core Tuning</span>
 					</h2>
 				</div>
@@ -399,98 +406,100 @@ function EnginesSettings({ downloader }: { downloader: UseDownloaderReturn }) {
 					<label className="checkbox-row custom-toggle-row">
 						<input
 							type="checkbox"
-							checked={useAria2}
+							checked={useAria2Next}
 							onChange={(e) => {
-								setUseAria2(e.target.checked);
-								pushSettings({ useAria2: e.target.checked });
+								setUseAria2Next(e.target.checked);
+								pushSettings({ useAria2Next: e.target.checked });
 							}}
 						/>
 						<span>Enable aria2-next External Downloader</span>
 					</label>
 
-					{useAria2 && (
-						<div className="aria2-subpanel animate-fade-in-up">
+					{useAria2Next && (
+						<div className="aria2-next-subpanel animate-fade-in-up">
 							<div className="sliders-grid">
 								<div className="form-field">
 									<div className="label-row">
-										<label htmlFor="aria2ConcurrentDownloads">
+										<label htmlFor="aria2NextConcurrentDownloads">
 											Max Concurrent Downloads
 										</label>
 										<span className="slider-value tabular-nums">
-											{aria2ConcurrentDownloads}
+											{aria2NextConcurrentDownloads}
 										</span>
 									</div>
 									<input
-										id="aria2ConcurrentDownloads"
+										id="aria2NextConcurrentDownloads"
 										type="range"
 										min="1"
 										max="10"
 										className="form-input-slider"
-										value={aria2ConcurrentDownloads}
+										value={aria2NextConcurrentDownloads}
 										onChange={(e) => {
 											const v = parseInt(e.target.value);
-											setAria2ConcurrentDownloads(v);
-											pushSettings({ aria2ConcurrentDownloads: v });
+											setAria2NextConcurrentDownloads(v);
+											pushSettings({ aria2NextConcurrentDownloads: v });
 										}}
 									/>
 								</div>
 								<div className="form-field">
 									<div className="label-row">
-										<label htmlFor="aria2MaxConnections">
+										<label htmlFor="aria2NextMaxConnections">
 											Max Connections Per Server
 										</label>
 										<span className="slider-value tabular-nums">
-											{aria2MaxConnections}
+											{aria2NextMaxConnections}
 										</span>
 									</div>
 									<input
-										id="aria2MaxConnections"
+										id="aria2NextMaxConnections"
 										type="range"
 										min="1"
-										max="32"
+										max="64"
 										className="form-input-slider"
-										value={aria2MaxConnections}
+										value={aria2NextMaxConnections}
 										onChange={(e) => {
 											const v = parseInt(e.target.value);
-											setAria2MaxConnections(v);
-											pushSettings({ aria2MaxConnections: v });
+											setAria2NextMaxConnections(v);
+											pushSettings({ aria2NextMaxConnections: v });
 										}}
 									/>
 								</div>
 								<div className="form-field">
 									<div className="label-row">
-										<label htmlFor="aria2Split">
+										<label htmlFor="aria2NextSplit">
 											Max Split Connections Per File
 										</label>
 										<span className="slider-value tabular-nums">
-											{aria2Split}
+											{aria2NextSplit}
 										</span>
 									</div>
 									<input
-										id="aria2Split"
+										id="aria2NextSplit"
 										type="range"
 										min="1"
-										max="32"
+										max="64"
 										className="form-input-slider"
-										value={aria2Split}
+										value={aria2NextSplit}
 										onChange={(e) => {
 											const v = parseInt(e.target.value);
-											setAria2Split(v);
-											pushSettings({ aria2Split: v });
+											setAria2NextSplit(v);
+											pushSettings({ aria2NextSplit: v });
 										}}
 									/>
 								</div>
 							</div>
 
 							<div className="form-field" style={{ marginTop: "8px" }}>
-								<label htmlFor="aria2MinSplitSize">Minimum Split Size</label>
+								<label htmlFor="aria2NextMinSplitSize">
+									Minimum Split Size
+								</label>
 								<select
-									id="aria2MinSplitSize"
+									id="aria2NextMinSplitSize"
 									className="form-select"
-									value={aria2MinSplitSize}
+									value={aria2NextMinSplitSize}
 									onChange={(e) => {
-										setAria2MinSplitSize(e.target.value);
-										pushSettings({ aria2MinSplitSize: e.target.value });
+										setAria2NextMinSplitSize(e.target.value);
+										pushSettings({ aria2NextMinSplitSize: e.target.value });
 									}}
 								>
 									<option value="1M">1 MB (Aggressive splitting)</option>
@@ -505,10 +514,10 @@ function EnginesSettings({ downloader }: { downloader: UseDownloaderReturn }) {
 								<label className="checkbox-row custom-toggle-row">
 									<input
 										type="checkbox"
-										checked={aria2Preallocate}
+										checked={aria2NextPreallocate}
 										onChange={(e) => {
-											setAria2Preallocate(e.target.checked);
-											pushSettings({ aria2Preallocate: e.target.checked });
+											setAria2NextPreallocate(e.target.checked);
+											pushSettings({ aria2NextPreallocate: e.target.checked });
 										}}
 									/>
 									<span>Pre-allocate File Space</span>
@@ -516,10 +525,12 @@ function EnginesSettings({ downloader }: { downloader: UseDownloaderReturn }) {
 								<label className="checkbox-row custom-toggle-row">
 									<input
 										type="checkbox"
-										checked={aria2CheckCertificate}
+										checked={aria2NextCheckCertificate}
 										onChange={(e) => {
-											setAria2CheckCertificate(e.target.checked);
-											pushSettings({ aria2CheckCertificate: e.target.checked });
+											setAria2NextCheckCertificate(e.target.checked);
+											pushSettings({
+												aria2NextCheckCertificate: e.target.checked,
+											});
 										}}
 									/>
 									<span>Validate SSL Certificates</span>
@@ -527,10 +538,10 @@ function EnginesSettings({ downloader }: { downloader: UseDownloaderReturn }) {
 								<label className="checkbox-row custom-toggle-row">
 									<input
 										type="checkbox"
-										checked={aria2AlwaysResume}
+										checked={aria2NextAlwaysResume}
 										onChange={(e) => {
-											setAria2AlwaysResume(e.target.checked);
-											pushSettings({ aria2AlwaysResume: e.target.checked });
+											setAria2NextAlwaysResume(e.target.checked);
+											pushSettings({ aria2NextAlwaysResume: e.target.checked });
 										}}
 									/>
 									<span>Always Resume Downloads</span>
@@ -554,12 +565,8 @@ function TorrentSettings({ downloader }: { downloader: UseDownloaderReturn }) {
 		setTorrentDownloadLimit,
 		torrentUploadLimit,
 		setTorrentUploadLimit,
-		torrentOutputDir,
-		setTorrentOutputDir,
 		torrentSeedRatio,
 		setTorrentSeedRatio,
-		torrentSeedTimeMinutes,
-		setTorrentSeedTimeMinutes,
 		torrentPeerLimit,
 		setTorrentPeerLimit,
 		torrentUploadPeerLimit,
@@ -652,35 +659,14 @@ function TorrentSettings({ downloader }: { downloader: UseDownloaderReturn }) {
 							setTorrentUploadLimit,
 						)}
 					</div>
-					<div className="form-field">
-						<label htmlFor="torrentOutputDir">Torrent Output Directory</label>
-						<input
-							id="torrentOutputDir"
-							className="form-input"
-							value={torrentOutputDir}
-							onChange={(event) => setTorrentOutputDir(event.target.value)}
-							onBlur={(event) =>
-								pushSettings({ torrentOutputDir: event.target.value })
-							}
-							placeholder="Use selected download destination"
-						/>
-					</div>
 					<div className="sliders-grid">
 						{field(
 							"torrentSeedRatio",
-							"Seed Ratio",
+							"Seed Ratio (0 = disabled)",
 							torrentSeedRatio,
 							setTorrentSeedRatio,
 							0,
 							100,
-						)}
-						{field(
-							"torrentSeedTimeMinutes",
-							"Seed Time (minutes, 0 = unlimited)",
-							torrentSeedTimeMinutes,
-							setTorrentSeedTimeMinutes,
-							0,
-							100000,
 						)}
 					</div>
 				</div>

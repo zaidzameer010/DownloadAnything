@@ -11,11 +11,12 @@ import {
 	Loader2,
 	Pause,
 	Settings,
+	UploadCloud,
 } from "lucide-react";
 import { useMemo } from "react";
 import type { UseDownloaderReturn } from "../hooks/useDownloader";
 import type { Job } from "../types";
-import { formatBytes } from "../utils";
+import { formatBytes, formatSpeed } from "../utils";
 
 interface DashboardProps {
 	downloader: UseDownloaderReturn;
@@ -180,6 +181,20 @@ function DownloadsTable({ downloader }: { downloader: UseDownloaderReturn }) {
 								<span>{job.error || "Download failed"}</span>
 							</span>
 						);
+					} else if (job.status === "seeding") {
+						subInfo = (
+							<span
+								style={{
+									color: "var(--status-seeding)",
+									display: "inline-flex",
+									alignItems: "center",
+									gap: "6px",
+								}}
+							>
+								<UploadCloud size={12} />
+								<span>Seeding</span>
+							</span>
+						);
 					} else if (job.status === "completed") {
 						subInfo = (
 							<span
@@ -252,6 +267,7 @@ function DownloadsTable({ downloader }: { downloader: UseDownloaderReturn }) {
 					if (job.status === "downloading") barFillClass = "downloading";
 					else if (job.status === "postprocessing")
 						barFillClass = "postprocessing";
+					else if (job.status === "seeding") barFillClass = "seeding";
 					else if (job.status === "completed") barFillClass = "completed";
 					else if (job.status === "failed") barFillClass = "failed";
 					else if (job.status === "paused") barFillClass = "paused";
@@ -270,9 +286,9 @@ function DownloadsTable({ downloader }: { downloader: UseDownloaderReturn }) {
 								<span className="progress-speed">
 									{isPostProcessing
 										? "Post-processing..."
-										: job.speed > 0
-											? `${(job.speed / 1024 / 1024).toFixed(1)} MB/s`
-											: "0.0 MB/s"}
+										: job.status === "seeding"
+											? "Seeding..."
+											: formatSpeed(job.speed)}
 								</span>
 								<span className="progress-percent">
 									{progressDisplay}%
@@ -352,6 +368,13 @@ function DownloadsTable({ downloader }: { downloader: UseDownloaderReturn }) {
 						<span className="filter-count tabular-nums">
 							{counts.downloading}
 						</span>
+					</button>
+					<button
+						className={`filter-tab ${filterTab === "seeding" ? "active" : ""}`}
+						onClick={() => setFilterTab("seeding")}
+					>
+						Seeding{" "}
+						<span className="filter-count tabular-nums">{counts.seeding}</span>
 					</button>
 					<button
 						className={`filter-tab ${filterTab === "completed" ? "active" : ""}`}

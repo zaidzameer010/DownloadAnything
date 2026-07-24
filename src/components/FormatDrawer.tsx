@@ -1,5 +1,5 @@
 import { Download, FileDown, FolderOpen, Music, Video } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { UseDownloaderReturn } from "../hooks/useDownloader";
 import { formatBytes, formatDuration } from "../utils";
 import { Modal } from "./Modals";
@@ -10,8 +10,20 @@ interface FormatDrawerProps {
 
 const ENGINE_BADGES: Record<string, { label: string; cls: string }> = {
 	stream: { label: "Stream", cls: "stream" },
+	file: { label: "Direct", cls: "file" },
+	direct: { label: "Direct", cls: "file" },
 	torrent: { label: "Torrent", cls: "torrent" },
 	ytdlp: { label: "yt-dlp", cls: "ytdlp" },
+	// High-level MIME buckets
+	video: { label: "Video", cls: "file" },
+	audio: { label: "Audio", cls: "file" },
+	image: { label: "Image", cls: "file" },
+	document: { label: "Document", cls: "file" },
+	archive: { label: "Archive", cls: "file" },
+	installer: { label: "Installer", cls: "file" },
+	font: { label: "Font", cls: "file" },
+	text: { label: "Text", cls: "file" },
+	other: { label: "File", cls: "file" },
 };
 
 export function FormatDrawer({ downloader }: FormatDrawerProps) {
@@ -22,6 +34,10 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 		setProbedInfo,
 		selectedFormatId,
 		setSelectedFormatId,
+		selectedTorrentFiles,
+		toggleTorrentFile,
+		selectAllTorrentFiles,
+		deselectAllTorrentFiles,
 		categories,
 		selectedCategoryPath,
 		setSelectedCategoryPath,
@@ -37,7 +53,12 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 	useEffect(() => {
 		if (!probedInfo) return;
 		const activeFormats = probedInfo.formats.filter((fmt) => {
-			const isVideo = (fmt.height && fmt.height > 0) || fmt.formatId === "best";
+			const hasDimension =
+				(fmt.height && fmt.height > 0) || (fmt.width && fmt.width > 0);
+			const isVideo =
+				hasDimension ||
+				fmt.formatId === "best" ||
+				(fmt.codecFamily === "video" && !fmt.isStream);
 			return activeTab === "video" ? isVideo : !isVideo;
 		});
 		const isCurrentSelectedInTab = activeFormats.some(
@@ -47,6 +68,30 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 			setSelectedFormatId(activeFormats[0].formatId);
 		}
 	}, [activeTab, probedInfo, selectedFormatId, setSelectedFormatId]);
+
+	const selectAllRef = useRef<HTMLInputElement>(null);
+	const torrentFileCount = probedInfo?.torrent?.files.length ?? 0;
+	const allTorrentFilesSelected =
+		torrentFileCount > 0 && selectedTorrentFiles.size === torrentFileCount;
+	const someTorrentFilesSelected =
+		selectedTorrentFiles.size > 0 && !allTorrentFilesSelected;
+	const totalSelectedTorrentSize = useMemo(() => {
+		if (!probedInfo?.torrent?.files) return 0;
+		return probedInfo.torrent.files.reduce(
+			(sum, file) =>
+				selectedTorrentFiles.has(file.index) ? sum + file.size : sum,
+			0,
+		);
+	}, [probedInfo, selectedTorrentFiles]);
+
+	useEffect(() => {
+		if (selectAllRef.current) {
+			selectAllRef.current.indeterminate = someTorrentFilesSelected;
+		}
+	}, [someTorrentFilesSelected]);
+
+	const isDownloadDisabled =
+		probedInfo?.mediaType === "torrent" && selectedTorrentFiles.size === 0;
 
 	const isOpen = showFormatDrawer && !!probedInfo;
 
@@ -70,7 +115,11 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 					>
 						Cancel
 					</button>
-					<button className="action-btn" onClick={handleChooseFormat}>
+					<button
+						className="action-btn"
+						onClick={handleChooseFormat}
+						disabled={isDownloadDisabled}
+					>
 						<span>Download Now</span>
 						<Download size={14} />
 					</button>
@@ -117,11 +166,13 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 										Duration: {formatDuration(probedInfo.duration)}
 									</span>
 								)}
-								{probedInfo.mediaType && (
+								{(probedInfo.fileType || probedInfo.mediaType) && (
 									<span
-										className={`meta-badge-chip engine ${ENGINE_BADGES[probedInfo.mediaType]?.cls ?? "ytdlp"}`}
+										className={`meta-badge-chip engine ${ENGINE_BADGES[probedInfo.fileType || probedInfo.mediaType || ""]?.cls ?? "ytdlp"}`}
 									>
-										{ENGINE_BADGES[probedInfo.mediaType]?.label ?? "yt-dlp"}
+										{ENGINE_BADGES[
+											probedInfo.fileType || probedInfo.mediaType || ""
+										]?.label ?? "yt-dlp"}
 									</span>
 								)}
 							</div>
@@ -138,6 +189,57 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 								<strong>{probedInfo.torrent.pieceCount}</strong>
 								<span>Piece length</span>
 								<strong>{formatBytes(probedInfo.torrent.pieceLength)}</strong>
+							</div>
+
+							<div
+								style={{
+									fontSize: "12px",
+									fontWeight: 600,
+									margin: "16px 0 8px",
+									color: "var(--text-secondary)",
+								}}
+							>
+								Select Files to Download
+							</div>
+							<div className="format-list">
+								<div className="format-list-header">
+									<div className="format-list-radio-col">
+										<input
+											type="checkbox"
+											ref={selectAllRef}
+											checked={allTorrentFilesSelected}
+											onChange={() =>
+												allTorrentFilesSelected
+													? deselectAllTorrentFiles()
+													: selectAllTorrentFiles()
+											}
+										/>
+									</div>
+									<div className="format-list-label-col">File Name</div>
+									<div
+										className="format-list-size-col"
+										style={{ textAlign: "right" }}
+									>
+										{formatBytes(totalSelectedTorrentSize)} /{" "}
+										{formatBytes(probedInfo.torrent.totalSize)}
+									</div>
+								</div>
+								{probedInfo.torrent.files.map((file) => (
+									<label
+										key={file.index}
+										className="torrent-file-row"
+										htmlFor={`torrent-file-${file.index}`}
+									>
+										<input
+											type="checkbox"
+											id={`torrent-file-${file.index}`}
+											checked={selectedTorrentFiles.has(file.index)}
+											onChange={() => toggleTorrentFile(file.index)}
+										/>
+										<span title={file.path}>{file.path}</span>
+										<small>{formatBytes(file.size)}</small>
+									</label>
+								))}
 							</div>
 						</div>
 					) : (
@@ -176,7 +278,9 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 								{probedInfo.formats
 									.filter((fmt) => {
 										const isVideo =
-											(fmt.height && fmt.height > 0) || fmt.formatId === "best";
+											(fmt.height && fmt.height > 0) ||
+											fmt.formatId === "best" ||
+											(fmt.codecFamily === "video" && !fmt.isStream);
 										return activeTab === "video" ? isVideo : !isVideo;
 									})
 									.map((fmt) => {
@@ -237,8 +341,13 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 										);
 									})}
 								{probedInfo.formats.filter((fmt) => {
+									const hasDimension =
+										(fmt.height && fmt.height > 0) ||
+										(fmt.width && fmt.width > 0);
 									const isVideo =
-										(fmt.height && fmt.height > 0) || fmt.formatId === "best";
+										hasDimension ||
+										fmt.formatId === "best" ||
+										(fmt.codecFamily === "video" && !fmt.isStream);
 									return activeTab === "video" ? isVideo : !isVideo;
 								}).length === 0 && (
 									<div

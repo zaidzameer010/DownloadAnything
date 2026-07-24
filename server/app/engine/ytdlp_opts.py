@@ -2,6 +2,9 @@
 
 from typing import Any, Dict, Optional
 
+from app.utils.http import DEFAULT_USER_AGENT
+
+
 
 def build_ytdlp_options(
     *,
@@ -13,18 +16,19 @@ def build_ytdlp_options(
 ) -> Dict[str, Any]:
     """Return the common per-operation yt-dlp configuration."""
     opts: Dict[str, Any] = {
-        "quiet": True,
-        "no_warnings": True,
+        "quiet": False,
+        "no_warnings": False,
         "ignoreconfig": True,
         "js_runtimes": {"node": {}, "bun": {}},
-        "allow_unplayable_formats": True,
-        "allow_multiple_audio_streams": True,
-        "allow_multiple_video_streams": True,
+        "allow_unplayable_formats": False,
+        "allow_multiple_audio_streams": False,
+        "allow_multiple_video_streams": False,
+        "noplaylist": True,
         "ignore_no_formats_error": False,
         "age_limit": None,
         "geo_bypass": False,
-        "nocheckcertificate": True,
-        "legacyserverconnect": True,
+        "nocheckcertificate": False,
+        "legacyserverconnect": False,
         "check_formats": "cached",
         "retries": 10,
         "fragment_retries": 10,
@@ -38,7 +42,7 @@ def build_ytdlp_options(
     }
     # Bypasses basic bot protections
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": DEFAULT_USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
         "Accept-Language": "en-US,en;q=0.9",
     }

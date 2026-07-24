@@ -1,5 +1,14 @@
+import { PING_URL } from "../lib/constants.js";
+import {
+	classifyMediaCandidate as classifyByMime,
+	shouldInterceptDownload,
+} from "../lib/file_types.js";
+import { createLogger } from "../lib/logger.js";
 import { classifyDirectMedia, trackDirectMedia } from "./direct_media.js";
+import { canonicalizeCandidateUrl } from "./sniff_common.js";
 import { classifyStream, trackStream } from "./stream_extractor.js";
+
+const logger = createLogger("service-worker");
 
 const OFFSCREEN_TAB_ID = -1;
 const MAX_SNIFFED_STREAMS_PER_TAB = 100;
@@ -8,7 +17,7 @@ let backendAvailable = false;
 
 async function pingBackend() {
 	try {
-		const response = await fetch("http://127.0.0.1:8765/ping", {
+		const response = await fetch(PING_URL, {
 			method: "GET",
 			cache: "no-cache",
 			signal: AbortSignal.timeout(800),
@@ -18,7 +27,7 @@ async function pingBackend() {
 			return data && data.status === "ok";
 		}
 	} catch (e) {
-		console.debug("Ping backend failed:", e.message);
+		logger.debug("Ping backend failed:", e.message);
 	}
 	return false;
 }
@@ -26,7 +35,7 @@ async function pingBackend() {
 async function updateBackendStatus(available) {
 	if (backendAvailable === available) return;
 	backendAvailable = available;
-	console.log(`[Status] Backend availability changed: ${available}`);
+	logger.info(`[Status] Backend availability changed: ${available}`);
 
 	try {
 		if (available) {
@@ -44,7 +53,7 @@ async function updateBackendStatus(available) {
 			broadcastToAllTabs({ type: "BACKEND_STATUS", available: false });
 		}
 	} catch (err) {
-		console.warn("Failed to update extension action badge/state:", err);
+		logger.warn("Failed to update extension action badge/state:", err);
 	}
 }
 
@@ -59,6 +68,10 @@ const MAX_TRACKED_DOWNLOADS = 200;
 const sniffedStreams = new Map();
 const requestCandidates = new Map();
 const downloadInitiators = new Map();
+const pendingRefreshByTab = new Map();
+const pendingRefreshByPageUrl = new Map();
+const REFRESH_TTL_MS = 60_000;
+let pendingRefreshCleanup = null;
 let storageMutationQueue = Promise.resolve();
 let offscreenMessageQueue = Promise.resolve();
 
@@ -66,7 +79,7 @@ let offscreenMessageQueue = Promise.resolve();
 chrome.alarms.create("swKeepAliveAlarm", { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
 	if (alarm.name === "swKeepAliveAlarm") {
-		console.debug("Service Worker keep-alive heartbeat alarm fired.");
+		logger.debug("Service Worker keep-alive heartbeat alarm fired.");
 	}
 });
 
@@ -76,12 +89,77 @@ chrome.action.onClicked.addListener((tab) => {
 		chrome.tabs
 			.sendMessage(tab.id, { type: "EXTENSION_ACTIVATED" })
 			.catch((err) => {
-				console.warn("Failed to activate extension on click:", err);
+				logger.warn("Failed to activate extension on click:", err);
 			});
 	}
 });
 
-// Offscreen document lifecycle management
+// Expired URL refresh tracking
+function _isRefreshExpired(entry) {
+	return !entry || Date.now() > entry.expiresAt;
+}
+
+function _prunePendingRefreshEntries() {
+	const now = Date.now();
+	for (const [tabId, entry] of pendingRefreshByTab.entries()) {
+		if (!entry || now > entry.expiresAt || entry.consumed) {
+			pendingRefreshByTab.delete(tabId);
+		}
+	}
+	for (const [pageUrl, entries] of pendingRefreshByPageUrl.entries()) {
+		const alive = entries.filter(
+			(entry) => entry && now <= entry.expiresAt && !entry.consumed,
+		);
+		if (alive.length === 0) {
+			pendingRefreshByPageUrl.delete(pageUrl);
+		} else if (alive.length !== entries.length) {
+			pendingRefreshByPageUrl.set(pageUrl, alive);
+		}
+	}
+	if (
+		pendingRefreshByTab.size === 0 &&
+		pendingRefreshByPageUrl.size === 0 &&
+		pendingRefreshCleanup
+	) {
+		clearTimeout(pendingRefreshCleanup);
+		pendingRefreshCleanup = null;
+	}
+}
+
+function _scheduleRefreshCleanup() {
+	if (pendingRefreshCleanup) return;
+	pendingRefreshCleanup = setTimeout(() => {
+		pendingRefreshCleanup = null;
+		_prunePendingRefreshEntries();
+	}, REFRESH_TTL_MS);
+}
+
+function _findPendingRefresh(item) {
+	if (typeof item.tabId === "number" && item.tabId >= 0) {
+		const refresh = pendingRefreshByTab.get(item.tabId);
+		if (refresh && !_isRefreshExpired(refresh) && !refresh.consumed) {
+			return {
+				refresh,
+				key: canonicalizeCandidateUrl(refresh.pageUrl),
+				byTab: true,
+			};
+		}
+	}
+	if (item.referrer) {
+		const key = canonicalizeCandidateUrl(item.referrer);
+		const entries = pendingRefreshByPageUrl.get(key);
+		if (Array.isArray(entries)) {
+			const refresh = entries.find(
+				(entry) => entry && !_isRefreshExpired(entry) && !entry.consumed,
+			);
+			if (refresh) {
+				return { refresh, key, byTab: false };
+			}
+		}
+	}
+	return null;
+}
+
 let creatingOffscreen;
 async function ensureOffscreenDocument() {
 	const contexts = await chrome.runtime.getContexts({
@@ -117,7 +195,7 @@ async function sendToWS(data) {
 			payload: data,
 		});
 	} catch (error) {
-		console.warn("Unable to send message to WebSocket client:", error);
+		logger.warn("Unable to send message to WebSocket client:", error);
 	}
 }
 
@@ -141,7 +219,21 @@ function queueOffscreenMessage(message) {
 	return operation;
 }
 
-// Storage helpers for Job/Tab mappings
+// Storage helpers for Job/Tab mappings. Reads are also chained through the
+// mutation queue so a read that races a pending write always observes the
+// most recent persisted state.
+function readStorageMap(mapName) {
+	return storageMutationQueue.then(async () => {
+		const data = await chrome.storage.local.get(mapName);
+		const storedMap = data[mapName];
+		return storedMap &&
+			typeof storedMap === "object" &&
+			!Array.isArray(storedMap)
+			? storedMap
+			: {};
+	});
+}
+
 function mutateStorageMap(mapName, mutate) {
 	const operation = storageMutationQueue.then(async () => {
 		const data = await chrome.storage.local.get(mapName);
@@ -165,8 +257,8 @@ function registerJobTab(jobId, tabId) {
 }
 
 async function getTabForJob(jobId) {
-	const data = await chrome.storage.local.get("jobTabMap");
-	return data.jobTabMap?.[jobId] ?? null;
+	const map = await readStorageMap("jobTabMap");
+	return map[jobId] ?? null;
 }
 
 function removeJobTab(jobId) {
@@ -183,8 +275,8 @@ function registerUrlTab(url, tabId) {
 }
 
 async function getTabForUrl(url) {
-	const data = await chrome.storage.local.get("urlTabMap");
-	return data.urlTabMap?.[url] ?? null;
+	const map = await readStorageMap("urlTabMap");
+	return map[url] ?? null;
 }
 
 function removeUrlTab(url) {
@@ -213,7 +305,9 @@ function getHeaderValue(headers, name) {
 
 function classifyMediaCandidate(url, contentType = "") {
 	return (
-		classifyStream(url, contentType) || classifyDirectMedia(url, contentType)
+		classifyByMime(url, contentType) ||
+		classifyStream(url, contentType) ||
+		classifyDirectMedia(url, contentType)
 	);
 }
 
@@ -241,7 +335,7 @@ function rememberCandidate(details, type, contentType = "") {
 
 function notifyStreamCandidate(tabId, streamInfo) {
 	if (typeof tabId !== "number" || tabId < 0) return;
-	console.log(
+	logger.info(
 		`[Sniffer] Tab ${tabId} detected ${streamInfo.type} candidate: ${streamInfo.url}`,
 	);
 	chrome.tabs
@@ -265,12 +359,7 @@ function notifyStreamCandidate(tabId, streamInfo) {
 }
 
 function trackRequest(url, tabId) {
-	if (
-		typeof tabId === "number" &&
-		tabId >= 0 &&
-		url &&
-		url.startsWith("http")
-	) {
+	if (typeof tabId === "number" && tabId >= 0 && url?.startsWith("http")) {
 		downloadInitiators.set(url, tabId);
 		if (downloadInitiators.size > MAX_TRACKED_DOWNLOADS) {
 			const firstKey = downloadInitiators.keys().next().value;
@@ -295,11 +384,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 	// Handle messages from offscreen
 	if (message.source === "offscreen") {
 		if (!isTrustedOffscreenMessage(message, sender)) {
-			console.warn("Rejected untrusted offscreen message");
+			logger.warn("Rejected untrusted offscreen message");
 			return false;
 		}
 		queueOffscreenMessage(message).catch((error) => {
-			console.warn("Failed to handle offscreen message:", error);
+			logger.warn("Failed to handle offscreen message:", error);
 		});
 		return false; // No async response
 	}
@@ -320,7 +409,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 				{ frameId: 0 },
 			)
 			.catch((err) => {
-				console.warn("Failed to send SHOW_MODAL to top frame:", err);
+				logger.warn("Failed to send SHOW_MODAL to top frame:", err);
 			});
 		sendResponse({ status: "forwarded" });
 		return true;
@@ -329,7 +418,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 	if (message.type === "PROBE_MEDIA") {
 		chrome.tabs.get(tabId, async (tab) => {
 			if (chrome.runtime.lastError) {
-				console.warn(
+				logger.warn(
 					"Failed to get tab info during probe:",
 					chrome.runtime.lastError.message,
 				);
@@ -374,38 +463,63 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 	}
 
 	if (message.type === "CHECK_FILE_EXISTS") {
-		registerJobTab(message.jobId, tabId).then(() => {
-			sendToWS({
-				type: "check_file_exists",
-				path: message.path,
-				filename: message.filename || null,
-				jobId: message.jobId,
-				title: message.title || null,
-				ext: message.ext || null,
-				url: message.url || null,
-				mime: message.mime || null,
-			});
-		});
+		(async () => {
+			try {
+				await registerJobTab(message.jobId, tabId);
+				sendToWS({
+					type: "check_file_exists",
+					path: message.path,
+					filename: message.filename || null,
+					jobId: message.jobId,
+					title: message.title || null,
+					ext: message.ext || null,
+					url: message.url || null,
+					mime: message.mime || null,
+				});
+			} catch (error) {
+				logger.warn("Failed to register job tab for file check:", error);
+			}
+		})();
 		sendResponse({ status: "checking" });
 		return true;
 	}
 
 	if (message.type === "START_DOWNLOAD") {
-		registerJobTab(message.jobId, tabId).then(() => {
-			sendToWS({
-				type: "choose",
-				jobId: message.jobId,
-				formatId: message.formatId,
-				outputDir: message.outputDir,
-				conflictResolution: message.conflictResolution || "replace",
-				url: message.url,
-				title: message.title,
-				filename: message.filename,
-				referer: message.referer,
-				fileSize: message.fileSize,
-				mime: message.mime,
-			});
-		});
+		(async () => {
+			try {
+				await registerJobTab(message.jobId, tabId);
+
+				const sendChoose = (pageUrl) => {
+					sendToWS({
+						type: "choose",
+						jobId: message.jobId,
+						formatId: message.formatId,
+						outputDir: message.outputDir,
+						conflictResolution: message.conflictResolution || "replace",
+						torrentSelectedFileIndices: message.torrentSelectedFileIndices,
+						url: message.url,
+						title: message.title,
+						filename: message.filename,
+						referer: message.referer,
+						pageUrl,
+						fileSize: message.fileSize,
+						mime: message.mime,
+					});
+				};
+
+				if (typeof tabId === "number" && tabId >= 0) {
+					chrome.tabs.get(tabId, (tab) => {
+						const pageUrl =
+							!chrome.runtime.lastError && tab?.url ? tab.url : message.pageUrl;
+						sendChoose(pageUrl);
+					});
+				} else {
+					sendChoose(message.pageUrl);
+				}
+			} catch (error) {
+				logger.warn("Failed to register job tab for download:", error);
+			}
+		})();
 		sendResponse({ status: "download_started" });
 		return true;
 	}
@@ -425,7 +539,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 				type: "get_categories",
 			});
 		});
-		return false;
+		sendResponse({ status: "sent" });
+		return true;
+	}
+
+	if (message.type === "GET_SETTINGS") {
+		chrome.storage.local.get("settings").then((data) => {
+			sendResponse({ settings: data.settings || null });
+		});
+		return true;
 	}
 
 	if (message.type === "REQUEST_BROWSE") {
@@ -435,7 +557,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 				path: message.path || message.initialDir || null,
 			});
 		});
-		return false;
+		sendResponse({ status: "sent" });
+		return true;
+	}
+
+	if (message.type === "SHOW_TOAST_IN_TOP_FRAME") {
+		chrome.tabs
+			.sendMessage(
+				tabId,
+				{
+					type: "SHOW_TOAST",
+					message: message.message,
+					isError: message.isError,
+				},
+				{ frameId: 0 },
+			)
+			.catch((err) => {
+				logger.warn("Failed to forward SHOW_TOAST to top frame:", err);
+			});
+		sendResponse({ status: "forwarded" });
+		return true;
 	}
 
 	if (message.type === "GET_SNIFFED_STREAMS") {
@@ -450,11 +591,18 @@ async function handleOffscreenMessage(message) {
 	if (message.type === "WS_OPEN") {
 		updateBackendStatus(true);
 		broadcastToAllTabs({ type: "SERVER_CONNECTED" });
+		sendToWS({ type: "get_settings" });
 	} else if (message.type === "WS_CLOSE") {
 		checkBackendAvailability();
 		broadcastToAllTabs({ type: "SERVER_DISCONNECTED" });
 	} else if (message.type === "WS_MESSAGE") {
 		const wsMsg = message.payload;
+
+		if (wsMsg.type === "settings_data" && wsMsg.settings) {
+			chrome.storage.local.set({ settings: wsMsg.settings }).catch(() => {});
+			broadcastToAllTabs(wsMsg);
+			return;
+		}
 
 		// Broadcast updates
 		if (wsMsg.type === "jobs_list" || wsMsg.type === "categories_list") {
@@ -487,6 +635,31 @@ async function handleOffscreenMessage(message) {
 			return;
 		}
 
+		if (wsMsg.type === "needs_refresh") {
+			const pageUrl = wsMsg.pageUrl;
+			const jobId = wsMsg.jobId;
+			if (!pageUrl) {
+				logger.warn(`[Refresh] No pageUrl for job ${jobId}`);
+				return;
+			}
+			const canonicalPageUrl = canonicalizeCandidateUrl(pageUrl);
+			logger.info(
+				`[Refresh] Registered source page for job ${jobId}: ${canonicalPageUrl}`,
+			);
+			_prunePendingRefreshEntries();
+			const entry = {
+				jobId,
+				pageUrl,
+				expiresAt: Date.now() + REFRESH_TTL_MS,
+				consumed: false,
+			};
+			const existing = pendingRefreshByPageUrl.get(canonicalPageUrl) || [];
+			existing.push(entry);
+			pendingRefreshByPageUrl.set(canonicalPageUrl, existing);
+			_scheduleRefreshCleanup();
+			return;
+		}
+
 		if (wsMsg.type === "probe_started") {
 			let tabId = await getTabForJob(wsMsg.jobId);
 			if (typeof tabId !== "number") {
@@ -498,6 +671,11 @@ async function handleOffscreenMessage(message) {
 			}
 			if (typeof tabId === "number") {
 				chrome.tabs.sendMessage(tabId, wsMsg).catch(() => {});
+			} else {
+				logger.warn(
+					`[Routing] No tab for probe_started ${wsMsg.jobId}; broadcasting`,
+				);
+				broadcastToAllTabs(wsMsg);
 			}
 			return;
 		}
@@ -507,9 +685,11 @@ async function handleOffscreenMessage(message) {
 			if (typeof tabId === "number") {
 				chrome.tabs.sendMessage(tabId, wsMsg).catch(() => {});
 
+				// Keep job→tab across probe_result: START_DOWNLOAD reuses the
+				// probe jobId, so download_progress still needs this mapping.
+				// Clear only on terminal download/probe-failure events.
 				if (
 					[
-						"probe_result",
 						"probe_failed",
 						"download_completed",
 						"download_failed",
@@ -518,6 +698,15 @@ async function handleOffscreenMessage(message) {
 				) {
 					await removeJobTab(wsMsg.jobId);
 				}
+			} else {
+				// Desktop-app jobs have no extension tab — don't spam broadcast.
+				if (wsMsg.type === "download_progress") {
+					return;
+				}
+				logger.warn(
+					`[Routing] No tab for job ${wsMsg.jobId}; broadcasting ${wsMsg.type}`,
+				);
+				broadcastToAllTabs(wsMsg);
 			}
 		}
 	}
@@ -527,7 +716,11 @@ async function handleOffscreenMessage(message) {
 chrome.tabs.onRemoved.addListener((tabId) => {
 	if (sniffedStreams.has(tabId)) {
 		sniffedStreams.delete(tabId);
-		console.log(`Cleaned up sniffed streams for tab ${tabId}`);
+		logger.info(`Cleaned up sniffed streams for tab ${tabId}`);
+	}
+	if (pendingRefreshByTab.has(tabId)) {
+		pendingRefreshByTab.delete(tabId);
+		logger.info(`Cleaned up pending refresh for tab ${tabId}`);
 	}
 	// Clear any storage job-to-tab mappings for this tab
 	mutateStorageMap("jobTabMap", (map) => {
@@ -537,8 +730,30 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 			}
 		}
 	}).catch((error) => {
-		console.warn("Failed to clear closed-tab job mappings:", error);
+		logger.warn("Failed to clear closed-tab job mappings:", error);
 	});
+});
+
+// Map tabs that navigate to a pending refresh source page. This lets the user
+// open the page manually (or reuse an already-open tab) instead of the
+// extension creating a new tab.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+	if (!tab.url) return;
+	if (changeInfo.url || changeInfo.status === "complete") {
+		const canonical = canonicalizeCandidateUrl(tab.url);
+		const entries = pendingRefreshByPageUrl.get(canonical);
+		if (Array.isArray(entries)) {
+			const refresh = entries.find(
+				(entry) => entry && !entry.consumed && !_isRefreshExpired(entry),
+			);
+			if (refresh) {
+				pendingRefreshByTab.set(tabId, refresh);
+				logger.debug(
+					`[Refresh] Tab ${tabId} matched source page ${tab.url} for job ${refresh.jobId}`,
+				);
+			}
+		}
+	}
 });
 
 // Clear sniffed streams on navigation commit (main frame, non-same-document)
@@ -547,9 +762,20 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 		const tabId = details.tabId;
 		if (sniffedStreams.has(tabId)) {
 			sniffedStreams.delete(tabId);
-			console.log(
+			logger.info(
 				`Cleaned up sniffed streams for tab ${tabId} due to main-frame navigation`,
 			);
+		}
+		if (pendingRefreshByTab.has(tabId)) {
+			const entry = pendingRefreshByTab.get(tabId);
+			const canonical = canonicalizeCandidateUrl(entry?.pageUrl || "");
+			const entries = pendingRefreshByPageUrl.get(canonical);
+			if (
+				!Array.isArray(entries) ||
+				!entries.includes(entry)
+			) {
+				pendingRefreshByTab.delete(tabId);
+			}
 		}
 	}
 });
@@ -607,22 +833,66 @@ chrome.webRequest.onErrorOccurred.addListener(clearRequestCandidate, {
 	urls: ["http://*/*", "https://*/*"],
 });
 
-// Intercept browser downloads
-if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
+// Intercept browser downloads. Any non-local, non-system URL triggered by
+// the user is handed to the backend, except HTML/CSS/JS page assets.
+if (chrome.downloads?.onDeterminingFilename) {
 	chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-		console.log(
+		logger.info(
 			"[Interception] Download event captured. URL:",
 			item.url,
 			"Filename:",
 			item.filename,
+			"MIME:",
+			item.mime,
 		);
 
 		// Skip downloads triggered by this extension to prevent loop
 		if (item.byExtensionId === chrome.runtime.id) {
-			console.log(
+			logger.info(
 				"[Interception] Download was triggered by this extension. Skipping.",
 			);
 			suggest();
+			return;
+		}
+
+		// If this download is from a tab the user opened for a URL refresh, route
+		// it back to the existing job instead of creating a new one. Stale or
+		// already consumed entries are ignored and pruned.
+		const refreshMatch = _findPendingRefresh(item);
+		if (refreshMatch) {
+			const { refresh, key, byTab } = refreshMatch;
+			refresh.consumed = true;
+			const entries = pendingRefreshByPageUrl.get(key);
+			if (Array.isArray(entries)) {
+				const idx = entries.indexOf(refresh);
+				if (idx >= 0) {
+					entries.splice(idx, 1);
+				}
+				if (entries.length === 0) {
+					pendingRefreshByPageUrl.delete(key);
+				}
+			}
+			if (byTab) {
+				pendingRefreshByTab.delete(item.tabId);
+			}
+			logger.info(
+				`[Interception] Refresh download from tab ${item.tabId ?? "(referrer)"} for job ${refresh.jobId}`,
+			);
+			const refreshUrl = item.finalUrl || item.url;
+			const refreshReferrer = item.referrer || refresh.pageUrl;
+			chrome.downloads.cancel(item.id, () => {
+				if (chrome.runtime.lastError) {
+					logger.info(
+						"[Interception] Suppressed cancellation error:",
+						chrome.runtime.lastError.message,
+					);
+				}
+				suggest();
+				sendDownloadUrlToBackend(refresh.jobId, {
+					url: refreshUrl,
+					referrer: refreshReferrer,
+				});
+			});
 			return;
 		}
 
@@ -637,7 +907,15 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
 			url.startsWith("blob:") ||
 			url.startsWith("data:")
 		) {
-			console.log("[Interception] Local or system URL. Skipping.");
+			logger.info("[Interception] Local or system URL. Skipping.");
+			suggest();
+			return;
+		}
+
+		if (!shouldInterceptDownload(url, item.mime, item.filename)) {
+			logger.info(
+				"[Interception] Page asset (HTML/CSS/JS) or empty URL. Skipping.",
+			);
 			suggest();
 			return;
 		}
@@ -645,30 +923,16 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
 		// Perform live ping check to see if backend is available
 		checkBackendAvailability().then((available) => {
 			if (!available) {
-				console.log(
+				logger.info(
 					"[Interception] Backend is unavailable. Skipping interception.",
 				);
 				suggest();
 				return;
 			}
 
-			console.log(
+			logger.info(
 				"[Interception] Intercepting download! Cancelling Chrome native download...",
 			);
-
-			// Cancel Chrome's native download and catch any potential errors
-			chrome.downloads.cancel(item.id, () => {
-				const err = chrome.runtime.lastError;
-				if (err) {
-					console.log(
-						"[Interception] Suppressed cancellation error:",
-						err.message,
-					);
-				}
-			});
-
-			// Resolve suggest callback to release the download thread cleanly
-			suggest();
 
 			// Extract metadata. Keep the raw filename so the backend is the single
 			// source of truth for filename/title extraction.
@@ -680,7 +944,7 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
 				mime: item.mime,
 			};
 
-			console.log("[Interception] Extracted metadata:", downloadData);
+			logger.info("[Interception] Extracted metadata:", downloadData);
 
 			// Track initiating tabId using downloadInitiators mapping
 			const tabId =
@@ -690,54 +954,93 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
 				downloadInitiators.delete(item.referrer);
 			}
 
-			if (typeof tabId === "number") {
-				if (!downloadData.referrer) {
-					chrome.tabs.get(tabId, (t) => {
-						if (!chrome.runtime.lastError && t && t.url) {
-							downloadData.referrer = t.url;
-						}
-						sendIntercepted(tabId, downloadData);
-					});
-				} else {
-					sendIntercepted(tabId, downloadData);
-				}
-			} else {
-				// Fallback: search for active tab only when no better signal exists
-				chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-					const tab = tabs && tabs[0];
-					const activeTabId = tab?.id;
+			// Cancel the native download. Resolve the filename event immediately so
+			// Chrome does not time it out. Send the intercepted data from inside the
+			// cancel callback so runtime.lastError is consumed before any new API call.
+			const proceed = (targetId) => {
+				chrome.tabs.get(targetId, (t) => {
 					if (
-						typeof activeTabId === "number" &&
-						tab.url &&
-						tab.url.startsWith("http")
+						!chrome.runtime.lastError &&
+						t &&
+						t.url &&
+						!downloadData.referrer
 					) {
+						downloadData.referrer = t.url;
+					}
+					sendIntercepted(targetId, downloadData);
+				});
+			};
+			const fallback = () => {
+				chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+					if (chrome.runtime.lastError) {
+						logger.info(
+							"[Interception] Tab query error:",
+							chrome.runtime.lastError.message,
+						);
+					}
+					const tab = tabs?.[0];
+					const activeTabId = tab?.id;
+					if (typeof activeTabId === "number" && tab.url?.startsWith("http")) {
 						if (!downloadData.referrer) {
 							downloadData.referrer = tab.url;
 						}
 						sendIntercepted(activeTabId, downloadData);
 					} else {
-						console.log(
+						logger.info(
 							"[Interception] No active webpage tab found. Routing directly to backend...",
 						);
 						routeDirectlyToBackend(OFFSCREEN_TAB_ID, downloadData);
 					}
 				});
-			}
+			};
+
+			// Cancel the native download. The callback wrapper forces us to read
+			// runtime.lastError so Chrome does not log an unchecked warning.
+			new Promise((resolve) => {
+				chrome.downloads.cancel(item.id, () => {
+					const err = chrome.runtime.lastError;
+					if (err) {
+						logger.info(
+							"[Interception] Suppressed cancellation error:",
+							err.message,
+						);
+					}
+					resolve(undefined);
+				});
+			}).then(() => {
+				// Release the filename event and then start the intercepted workflow.
+				suggest();
+				if (typeof tabId === "number") {
+					proceed(tabId);
+				} else {
+					fallback();
+				}
+			});
 		});
 
 		return true; // Keep channel open for asynchronous suggest() call
 	});
 }
 
+function sendDownloadUrlToBackend(jobId, downloadData) {
+	logger.info(`[Interception] Sending download_url for job ${jobId}`);
+	sendToWS({
+		type: "download_url",
+		jobId,
+		url: downloadData.url,
+		referer: downloadData.referrer,
+	});
+}
+
 function sendIntercepted(tabId, downloadData) {
-	console.log(`[Interception] Sending INTERCEPTED_DOWNLOAD to tab ${tabId}...`);
+	logger.info(`[Interception] Sending INTERCEPTED_DOWNLOAD to tab ${tabId}...`);
 	chrome.tabs
 		.sendMessage(tabId, {
 			type: "INTERCEPTED_DOWNLOAD",
 			download: downloadData,
 		})
 		.catch((err) => {
-			console.warn(
+			logger.warn(
 				"[Interception] Content script not responding in tab, routing directly to backend:",
 				err,
 			);
@@ -745,18 +1048,17 @@ function sendIntercepted(tabId, downloadData) {
 		});
 }
 
-function routeDirectlyToBackend(tabId, downloadData) {
+async function routeDirectlyToBackend(tabId, downloadData) {
 	const targetTabId =
 		typeof tabId === "number" && tabId >= 0 ? tabId : OFFSCREEN_TAB_ID;
 	const jobId = `job_intercept_${crypto.randomUUID()}`;
 	const rawFilename = downloadData.filename || "downloaded_file";
 
-	console.log(
+	logger.info(
 		`[Interception] Routing direct download to backend: ${rawFilename}`,
 	);
-	registerJobTab(jobId, targetTabId).then(() => {
-		// Pass the raw filename hint and let the backend resolve the clean
-		// title/filename through title_extractor.
+	try {
+		await registerJobTab(jobId, targetTabId);
 		sendToWS({
 			type: "choose",
 			jobId: jobId,
@@ -769,5 +1071,7 @@ function routeDirectlyToBackend(tabId, downloadData) {
 			fileSize: downloadData.fileSize,
 			mime: downloadData.mime,
 		});
-	});
+	} catch (error) {
+		logger.warn("[Interception] Failed to route direct download:", error);
+	}
 }

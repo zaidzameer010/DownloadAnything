@@ -28,6 +28,8 @@
 			"matches": ["http://*/*", "https://*/*"],
 			"css": ["content/styles.css"],
 			"js": [
+				"content/logger.js",
+				"content/messaging.js",
 				"content/stream_extractor.js",
 				"content/direct_media.js",
 				"content/modal.js",

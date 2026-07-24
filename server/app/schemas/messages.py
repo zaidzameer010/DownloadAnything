@@ -1,10 +1,7 @@
 from typing import Annotated, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
-from app.schemas.formats import FormatSummary
-from app.api.categories import Category
-from app.api.settings import AppSettings
-from app.api.browse import DirectoryItem
-from app.engine.jobs import JobInfo
+from app.schemas.category import Category
+from app.schemas.settings import AppSettings
 
 
 # ==========================================
@@ -39,8 +36,12 @@ class ClientChooseMessage(BaseModel):
     title: Optional[str] = None
     filename: Optional[str] = None
     referer: Optional[str] = None
+    pageUrl: Optional[str] = None
     fileSize: Optional[int] = None
     mime: Optional[str] = None
+
+    # Optional torrent file selection (indices of files to download)
+    torrentSelectedFileIndices: Optional[List[int]] = None
 
 
 class ClientCheckFileExistsMessage(BaseModel):
@@ -103,6 +104,20 @@ class ClientResumeMessage(BaseModel):
     jobId: str
 
 
+class ClientRefreshUrlMessage(BaseModel):
+    type: Literal["refresh_url"]
+    jobId: str
+    url: str
+    referer: Optional[str] = None
+
+
+class ClientDownloadUrlMessage(BaseModel):
+    type: Literal["download_url"]
+    jobId: str
+    url: str
+    referer: Optional[str] = None
+
+
 class ClientRemoveJobMessage(BaseModel):
     type: Literal["remove_job"]
     jobId: str
@@ -118,17 +133,14 @@ class ClientCancelDownloadMessage(BaseModel):
     jobId: str
 
 
-class ClientUnknownMessage(BaseModel):
-    type: str
-    model_config = {"extra": "allow"}
-
-
 class ClientCancelProbeMessage(BaseModel):
     type: Literal["cancel_probe"]
     jobId: str
 
 
-# Discriminated/fallback union of all messages sent by Client to Server
+# Discriminated union of all messages sent by Client to Server. Unknown message
+# types are intentionally rejected so version skew and typos do not silently
+# turn into no-ops.
 ClientMessage = Annotated[
     Union[
         ClientHelloMessage,
@@ -137,6 +149,8 @@ ClientMessage = Annotated[
         ClientRevealFileMessage,
         ClientPauseMessage,
         ClientResumeMessage,
+        ClientRefreshUrlMessage,
+        ClientDownloadUrlMessage,
         ClientRemoveJobMessage,
         ClientDeleteFileMessage,
         ClientCancelDownloadMessage,
@@ -149,184 +163,8 @@ ClientMessage = Annotated[
         ClientSaveSettingsMessage,
         ClientCheckFileExistsMessage,
         ClientCancelProbeMessage,
-        ClientUnknownMessage,
     ],
     Field(union_mode="left_to_right"),
 ]
 
 
-# ==========================================
-# Server -> Client Messages
-# ==========================================
-
-
-class ServerHelloMessage(BaseModel):
-    type: Literal["hello"] = "hello"
-    serverVersion: str
-    ytDlpVersion: str
-    ffmpegAvailable: bool
-    heartbeatIntervalMs: int = 20000
-
-
-class ServerProbeStartedMessage(BaseModel):
-    type: Literal["probe_started"] = "probe_started"
-    jobId: str
-    url: str
-
-
-class ServerProbeResultMessage(BaseModel):
-    type: Literal["probe_result"] = "probe_result"
-    jobId: str
-    title: str
-    duration: Optional[float] = None
-    thumbnail: Optional[str] = None
-    uploader: Optional[str] = None
-    formats: List[FormatSummary]
-    mediaType: Optional[str] = None
-    torrent: Optional[dict[str, object]] = None
-
-
-class ServerProbeFailedMessage(BaseModel):
-    type: Literal["probe_failed"] = "probe_failed"
-    jobId: str
-    error: str
-    errorCategory: Optional[str] = None
-    suggestion: Optional[str] = None  # e.g., 'cookies_required', 'po_token_required'
-    isUnsupportedUrl: Optional[bool] = None
-
-
-class ServerDownloadQueuedMessage(BaseModel):
-    type: Literal["download_queued"] = "download_queued"
-    jobId: str
-    outputPath: str
-    url: Optional[str] = None
-    title: Optional[str] = None
-    duration: Optional[float] = None
-    thumbnail: Optional[str] = None
-    uploader: Optional[str] = None
-    mediaType: Optional[str] = None
-
-
-class ServerDownloadProgressMessage(BaseModel):
-    type: Literal["download_progress"] = "download_progress"
-    jobId: str
-    status: Literal["downloading", "postprocessing", "completed"]
-    downloadedBytes: Optional[int] = None
-    totalBytes: Optional[int] = None
-    totalBytesEstimate: Optional[int] = None
-    audioDownloadedBytes: Optional[int] = None
-    audioTotalBytes: Optional[int] = None
-    combinedDownloadedBytes: Optional[int] = None
-    combinedTotalBytes: Optional[int] = None
-    streamPhase: Optional[Literal["video", "audio", "single"]] = None
-    speed: Optional[float] = None
-    eta: Optional[float] = None
-    fragmentIndex: Optional[int] = None
-    fragmentCount: Optional[int] = None
-    filePath: Optional[str] = None
-    torrent: Optional[dict[str, object]] = None
-
-
-class ServerDownloadCompletedMessage(BaseModel):
-    type: Literal["download_completed"] = "download_completed"
-    jobId: str
-    filePath: str
-    sizeBytes: Optional[int] = None
-    durationMs: Optional[float] = None
-
-
-class ServerDownloadFailedMessage(BaseModel):
-    type: Literal["download_failed"] = "download_failed"
-    jobId: str
-    error: str
-    stage: str  # e.g., 'downloading', 'writing', 'postprocessing'
-
-
-class ServerDownloadCanceledMessage(BaseModel):
-    type: Literal["download_canceled"] = "download_canceled"
-    jobId: str
-
-
-class ServerPongMessage(BaseModel):
-    type: Literal["pong"] = "pong"
-    ts: float
-
-
-class ServerJobsListMessage(BaseModel):
-    type: Literal["jobs_list"] = "jobs_list"
-    jobs: List[JobInfo]
-
-
-class ServerCategoriesListMessage(BaseModel):
-    type: Literal["categories_list"] = "categories_list"
-    categories: List[Category]
-
-
-class ServerDirectoryContentsMessage(BaseModel):
-    type: Literal["directory_contents"] = "directory_contents"
-    currentDir: str
-    parentDir: Optional[str] = None
-    subdirs: List[DirectoryItem]
-
-
-class ServerSettingsDataMessage(BaseModel):
-    type: Literal["settings_data"] = "settings_data"
-    settings: AppSettings
-
-
-class ServerBrowseFailedMessage(BaseModel):
-    type: Literal["browse_failed"] = "browse_failed"
-    error: str
-
-
-class ServerDirectorySelectedMessage(BaseModel):
-    type: Literal["directory_selected"] = "directory_selected"
-    path: str
-    forField: Optional[str] = None
-
-
-class ServerDuplicateJobAlertMessage(BaseModel):
-    type: Literal["duplicate_job_alert"] = "duplicate_job_alert"
-    jobId: str
-    url: str
-    title: str
-    status: str
-
-
-class ServerFileExistsResultMessage(BaseModel):
-    type: Literal["file_exists_result"] = "file_exists_result"
-    exists: bool
-    filename: str
-    path: str
-    jobId: str
-
-
-class ServerUnknownMessage(BaseModel):
-    type: str
-    model_config = {"extra": "allow"}
-
-
-ServerMessage = Annotated[
-    Union[
-        ServerHelloMessage,
-        ServerProbeStartedMessage,
-        ServerProbeResultMessage,
-        ServerProbeFailedMessage,
-        ServerDownloadQueuedMessage,
-        ServerDownloadProgressMessage,
-        ServerDownloadCompletedMessage,
-        ServerDownloadFailedMessage,
-        ServerDownloadCanceledMessage,
-        ServerPongMessage,
-        ServerJobsListMessage,
-        ServerCategoriesListMessage,
-        ServerDirectoryContentsMessage,
-        ServerSettingsDataMessage,
-        ServerBrowseFailedMessage,
-        ServerDirectorySelectedMessage,
-        ServerDuplicateJobAlertMessage,
-        ServerFileExistsResultMessage,
-        ServerUnknownMessage,
-    ],
-    Field(union_mode="left_to_right"),
-]

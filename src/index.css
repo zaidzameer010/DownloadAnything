@@ -36,6 +36,8 @@
 	--status-paused: #a1a1aa; /* zinc-400 */
 	--status-paused-glow: rgba(161, 161, 170, 0.1);
 	--status-queued: #52525b; /* zinc-600 */
+	--status-seeding: #fbbf24; /* amber-400 */
+	--status-seeding-glow: rgba(251, 191, 36, 0.2);
 
 	/* Typography: Inter for controls, Mono for numerical metadata */
 	--font-sans:
@@ -56,14 +58,6 @@
 
 .tabular-nums {
 	font-variant-numeric: tabular-nums;
-}
-
-.text-balance {
-	text-wrap: balance;
-}
-
-.text-pretty {
-	text-wrap: pretty;
 }
 
 * {
@@ -104,49 +98,6 @@ body {
 ::selection {
 	background: rgba(255, 255, 255, 0.12);
 	color: #ffffff;
-}
-
-/* Blinking loader cursor - softer gray */
-@keyframes cursorBlink {
-	0%,
-	49% {
-		opacity: 1;
-	}
-	50%,
-	100% {
-		opacity: 0;
-	}
-}
-
-.tui-cursor {
-	display: inline-block;
-	width: 6px;
-	height: 12px;
-	background: var(--text-secondary);
-	animation: cursorBlink 1s step-start infinite;
-	vertical-align: middle;
-	margin-left: 5px;
-}
-
-@keyframes scanline {
-	0% {
-		transform: translateY(-100%);
-	}
-	100% {
-		transform: translateY(100%);
-	}
-}
-
-.tui-scanline {
-	position: absolute;
-	top: 0;
-	left: 0;
-	width: 100%;
-	height: 4px;
-	background: rgba(255, 255, 255, 0.015);
-	pointer-events: none;
-	z-index: 9999;
-	animation: scanline 12s linear infinite;
 }
 
 /* Page Entry Animation */

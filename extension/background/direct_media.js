@@ -1,21 +1,44 @@
+import {
+	CANDIDATE_MEDIA,
+	classifyMime,
+	FILE_TYPE_AUDIO,
+	FILE_TYPE_VIDEO,
+	isStreamSegmentUrl,
+	normalizeMime,
+} from "../lib/file_types.js";
+import { trackCandidate } from "./sniff_common.js";
+
+/**
+ * Classify progressive video/audio candidates from MIME only.
+ * Rejects HLS/DASH init/segment URLs even when Content-Type is video/*.
+ */
 export function classifyDirectMedia(url, contentType = "") {
-	const lowerUrl = url.toLowerCase();
-	const lowerType = (contentType || "").toLowerCase().split(";", 1)[0].trim();
-	const isMedia =
-		lowerType.startsWith("video/") || lowerType.startsWith("audio/");
+	const lowerType = normalizeMime(contentType);
+	if (!lowerType) return null;
 
-	if (isMedia) return "MEDIA";
-	return null;
-}
-
-function canonicalizeCandidateUrl(url) {
-	try {
-		const parsed = new URL(url);
-		parsed.hash = "";
-		return parsed.toString();
-	} catch {
-		return url;
+	// Never treat stream manifests or init/segment fragments as progressive MEDIA.
+	const lowerUrl = String(url || "").toLowerCase();
+	if (
+		isStreamSegmentUrl(url) ||
+		lowerUrl.includes(".m3u8") ||
+		lowerUrl.includes(".mpd") ||
+		lowerUrl.includes("/hls/") ||
+		lowerUrl.includes("/dash/") ||
+		lowerUrl.includes("media=hls")
+	) {
+		return null;
 	}
+
+	if (lowerType.startsWith("video/") || lowerType.startsWith("audio/")) {
+		return CANDIDATE_MEDIA;
+	}
+
+	const fileType = classifyMime(lowerType);
+	if (fileType === FILE_TYPE_VIDEO || fileType === FILE_TYPE_AUDIO) {
+		return CANDIDATE_MEDIA;
+	}
+
+	return null;
 }
 
 export function trackDirectMedia(
@@ -25,38 +48,12 @@ export function trackDirectMedia(
 	maxSniffedStreams,
 	contentType = "",
 ) {
-	const tabId = details.tabId;
-	if (tabId < 0 || !type) return null;
-	const url = canonicalizeCandidateUrl(details.url);
-
-	if (!sniffedStreamsMap.has(tabId)) {
-		sniffedStreamsMap.set(tabId, new Map());
-	}
-	const streamsMap = sniffedStreamsMap.get(tabId);
-	const existing = streamsMap.get(url);
-	const changed =
-		!existing ||
-		existing.type !== type ||
-		(contentType && existing.contentType !== contentType);
-
-	const streamInfo = {
-		...(existing || {}),
-		url,
+	return trackCandidate(
+		details,
 		type,
-		contentType: contentType || existing?.contentType || null,
-		timestamp: Date.now(),
-		frameId: details.frameId,
-		documentUrl: details.documentUrl || existing?.documentUrl || null,
-		initiator: details.initiator || existing?.initiator || null,
-		requestType: details.type || existing?.requestType || null,
-		confidence: 0.7,
-	};
-
-	streamsMap.set(url, streamInfo);
-	while (streamsMap.size > maxSniffedStreams) {
-		const oldestUrl = streamsMap.keys().next().value;
-		streamsMap.delete(oldestUrl);
-	}
-
-	return { streamInfo, isNew: !existing, changed };
+		sniffedStreamsMap,
+		maxSniffedStreams,
+		contentType,
+		0.7,
+	);
 }

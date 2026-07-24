@@ -5,6 +5,7 @@ from pydantic import BaseModel
 class FormatSummary(BaseModel):
     label: str
     height: int
+    width: int = 0
     fps: int
     codecFamily: str
     ext: str

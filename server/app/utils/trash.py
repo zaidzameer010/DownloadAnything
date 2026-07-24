@@ -1,6 +1,9 @@
 from pathlib import Path
 from send2trash import send2trash
-from app.utils.logger import logger
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 def send_to_trash(file_path: str) -> None:
     path = Path(file_path).resolve()
@@ -13,7 +16,7 @@ def send_to_trash(file_path: str) -> None:
             target_path = part_path
             
     if not target_path:
-        logger.info(f"send_to_trash: path does not exist: {file_path}")
+        logger.debug(f"send_to_trash: path does not exist: {file_path}")
         return
 
     logger.info(f"Moving to trash using send2trash: {target_path}")

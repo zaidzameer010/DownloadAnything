@@ -4,7 +4,7 @@
 			const candidates = currentSniffedStreams.filter(
 				(s) =>
 					(s.type === "HLS" || s.type === "DASH") &&
-					!fallbackUrlsTried.has(s.url),
+					!fallbackUrlsTried.has(s.key || s.url),
 			);
 
 			const isMultiRes = (url) => {
@@ -52,6 +52,15 @@
 			};
 
 			return [...candidates].sort((a, b) => {
+				// Prefer higher-confidence sniffed sources.
+				const confidenceA =
+					typeof a.confidence === "number" ? a.confidence : 0.5;
+				const confidenceB =
+					typeof b.confidence === "number" ? b.confidence : 0.5;
+				if (confidenceA !== confidenceB) {
+					return confidenceB - confidenceA;
+				}
+
 				const resA = getResolutionScore(a.url);
 				const resB = getResolutionScore(b.url);
 				if (resA !== resB) {

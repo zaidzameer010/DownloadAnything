@@ -1,8 +1,8 @@
 (() => {
+	const logger = window.__DMA_LOGGER__;
+
 	if (window.DownloadAnythingOverlayInjected) return;
 	window.DownloadAnythingOverlayInjected = true;
-
-	console.log("DownloadAnything Media Detector Injected.");
 
 	const observedMedia = new WeakSet();
 
@@ -11,22 +11,31 @@
 	let hideTimeout = null;
 	let scanScheduled = false;
 	let backendAvailable = true;
+	const MSG = window.DownloadAnythingMessaging;
+
+	function isExtensionContextValid() {
+		return MSG.isExtensionContextValid();
+	}
+
+	function safeSendMessage(message, callback) {
+		MSG.safeSendMessage("Overlay", message, callback);
+	}
 
 	function triggerDownloadFlow(targetUrl) {
-		chrome.runtime.sendMessage({ type: "PING_BACKEND" }, (response) => {
+		safeSendMessage({ type: "PING_BACKEND" }, (response) => {
 			if (response && response.available) {
 				if (window === window.top) {
 					if (window.DownloadAnythingModal) {
 						window.DownloadAnythingModal.show(targetUrl);
 					}
 				} else {
-					chrome.runtime.sendMessage({
+					safeSendMessage({
 						type: "SHOW_MODAL_IN_TOP_FRAME",
 						url: targetUrl,
 					});
 				}
 			} else {
-				console.warn(
+				logger.warn(
 					"[Overlay] Cannot show download modal, backend is offline.",
 				);
 				if (window === window.top && window.DownloadAnythingModal) {
@@ -35,7 +44,7 @@
 						true,
 					);
 				} else {
-					chrome.runtime.sendMessage({
+					safeSendMessage({
 						type: "SHOW_TOAST_IN_TOP_FRAME",
 						message:
 							"Backend service is offline. Please start the downloader app.",
@@ -135,6 +144,7 @@
 			const styleLink = document.createElement("link");
 			styleLink.rel = "stylesheet";
 			try {
+				if (!isExtensionContextValid()) return;
 				styleLink.href = chrome.runtime.getURL("content/styles.css");
 			} catch {
 				return;
@@ -261,7 +271,7 @@
 		if (observedMedia.has(el)) return;
 		observedMedia.add(el);
 
-		const onEnter = (e) => {
+		const onEnter = (_e) => {
 			if (!backendAvailable) return;
 			const rect = el.getBoundingClientRect();
 			if (rect.width <= 30 || rect.height <= 30) {
@@ -312,7 +322,6 @@
 			if (rect.width > 30 && rect.height > 30) {
 				activeMedia = el;
 				window.DownloadAnythingActiveMedia = el;
-				console.log("[Overlay] Active media updated on play event:", el);
 			}
 		});
 	}
@@ -355,7 +364,7 @@
 				if (window === window.top) {
 					window.DownloadAnythingModal.show(href);
 				} else {
-					chrome.runtime.sendMessage({
+					safeSendMessage({
 						type: "SHOW_MODAL_IN_TOP_FRAME",
 						url: href,
 					});
@@ -365,10 +374,9 @@
 		);
 	}
 
-	chrome.runtime.onMessage.addListener((message) => {
+	chrome.runtime.onMessage?.addListener?.((message) => {
 		if (message.type === "BACKEND_STATUS") {
 			backendAvailable = message.available;
-			console.log("[Overlay] Backend status updated:", backendAvailable);
 			if (!backendAvailable) {
 				if (overlayContainer) {
 					const wrapper = overlayContainer.shadowRoot?.querySelector(
@@ -380,7 +388,6 @@
 				scanForMedia();
 			}
 		} else if (message.type === "EXTENSION_ACTIVATED") {
-			console.log("Direct activation triggered via toolbar button.");
 			let targetUrl = window.location.href;
 			if (activeMedia) {
 				let src = activeMedia.currentSrc || activeMedia.src;
@@ -402,5 +409,12 @@
 	window.addEventListener("resize", reposition, { passive: true });
 	scanForMedia();
 	initObserver();
-	setInterval(scheduleScan, 2000);
+	const scanInterval = setInterval(() => {
+		if (!isExtensionContextValid()) {
+			clearInterval(scanInterval);
+			backendAvailable = false;
+			return;
+		}
+		scheduleScan();
+	}, 2000);
 })();

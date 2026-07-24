@@ -7,24 +7,124 @@ import shutil
 import subprocess
 import re
 import secrets
-from typing import Any, Dict, List, Optional
+import mimetypes
+import threading
+from typing import Any, BinaryIO, Dict, List, Optional, cast
 
 from app.engine import ytdlp_opts
-from app.config import get_app_data_dir, settings
-from app.api.settings import load_settings
-from app.engine.jobs import jobs_registry, DownloadPaused
-from app.engine.title_extractor import resolve_filename
-from app.utils.logger import logger, redact_url
+from app.config import get_app_data_dir
+from app.domain.exceptions import DownloadPaused
+from app.schemas.settings import AppSettings
+from app.engine.jobs import jobs_registry
+from app.engine.title_extractor import (
+    resolve_filename,
+    ResolvedFilename,
+    _extract_trailing_extension,
+    _strip_trailing_extension,
+    guess_file_extension,
+)
+from app.engine.stream_extractor import normalize_numeric_id_url
+from app.engine.media_classify import is_direct_file_url
+from app.engine.file_types import classify_mime, FILE_TYPE_VIDEO
+from app.services.interfaces import IDownloadEngine
+from app.utils.http import is_safe_url
+from app.utils.logger import get_logger, redact_url
+
+import mmap
+import struct
+
 import yt_dlp
+from yt_dlp.downloader import get_suitable_downloader
 from yt_dlp.downloader.external import Aria2cFD
 from yt_dlp.downloader import external as ytdlp_external
-from yt_dlp.utils import classproperty
+from yt_dlp.postprocessor.common import PostProcessor
+from yt_dlp.postprocessor.ffmpeg import FFmpegFixupM3u8PP, FFmpegFixupDuplicateMoovPP
+from yt_dlp.utils import prepend_extension
+
+logger = get_logger(__name__)
 
 
-def get_aria2_executable_path() -> Optional[Path]:
-    if sys.platform not in ["win32", "darwin"]:
-        return None
+class YtdlpDownloader(IDownloadEngine):
+    """Download video/audio/stream URLs with yt-dlp."""
 
+    def download(
+        self,
+        job_id: str,
+        url: str,
+        output_dir: Path,
+        **kwargs: Any,
+    ) -> str:
+        format_id = kwargs.get("format_id", "best")
+        loop = kwargs.get("loop")
+        event_queue = kwargs.get("event_queue")
+        conflict_resolution = kwargs.get("conflict_resolution", "replace")
+        referer = kwargs.get("referer")
+        settings = kwargs.get("settings")
+        if loop is None or event_queue is None or settings is None:
+            raise RuntimeError(
+                "YtdlpDownloader requires 'loop', 'event_queue', and 'settings'"
+            )
+        return download_video(
+            job_id=job_id,
+            url=url,
+            format_id=format_id,
+            output_dir=str(output_dir),
+            loop=loop,
+            event_queue=event_queue,
+            settings=settings,
+            conflict_resolution=conflict_resolution,
+            referer=referer,
+        )
+
+
+class DirectDownloader(IDownloadEngine):
+    """Download raw direct file URLs without yt-dlp."""
+
+    def download(
+        self,
+        job_id: str,
+        url: str,
+        output_dir: Path,
+        **kwargs: Any,
+    ) -> str:
+        # Direct file downloads are currently handled inside download_video.
+        # This class provides the IDownloadEngine interface for those paths.
+        return YtdlpDownloader().download(job_id, url, output_dir, **kwargs)
+
+
+def _raise_if_paused(job_id: str) -> None:
+    """Abort the current download thread if the job has been paused/removed."""
+    if jobs_registry.is_paused(job_id) or jobs_registry.get_job(job_id) is None:
+        logger.debug(f"Download job {job_id} is paused or removed; aborting early.")
+        raise DownloadPaused()
+
+
+# Strong signals that a direct or pre-signed URL has expired and needs to be
+# refreshed by the user. Generic 403/410 and transport errors are deliberately
+# excluded; they usually indicate auth, geo-blocking, or network issues.
+_EXPIRED_PHRASES = (
+    "has expired",
+    "link expired",
+    "url expired",
+    "download expired",
+    "request expired",
+    "invalid signature",
+    "invalid token",
+    "token expired",
+    "signature expired",
+    "signature does not match",
+    "presigned url",
+    "presigned request",
+)
+
+
+def is_expired_url_error(error_message: str) -> bool:
+    """Return True if an error message strongly suggests the URL expired."""
+    lowered = (error_message or "").lower()
+    return any(phrase in lowered for phrase in _EXPIRED_PHRASES)
+
+
+def get_aria2_next_executable_path() -> Optional[Path]:
     # 1. Generate list of directories to search
     possible_dirs: list[Path] = []
     if getattr(sys, "frozen", False):
@@ -41,15 +141,12 @@ def get_aria2_executable_path() -> Optional[Path]:
             ]
         )
 
-    # Priority 1: Search dynamically for any 'aria2-next-*' or 'aria2c-next-*' files matching the platform
+    # Priority 1: Search dynamically for any 'aria2-next-*' files matching the platform
     for d in possible_dirs:
         if d.exists():
             try:
                 for item in d.iterdir():
-                    if item.is_file() and (
-                        item.name.startswith("aria2-next-")
-                        or item.name.startswith("aria2c-next-")
-                    ):
+                    if item.is_file() and item.name.startswith("aria2-next-"):
                         if sys.platform == "win32" and (
                             item.name.endswith(".exe") or "windows" in item.name
                         ):
@@ -58,46 +155,42 @@ def get_aria2_executable_path() -> Optional[Path]:
                             "macos" in item.name or "darwin" in item.name
                         ):
                             return item
-            except Exception:
-                pass
+                        elif sys.platform not in ("win32", "darwin") and not item.name.endswith(".exe"):
+                            return item
+            except Exception as exc:
+                logger.warning(f"Failed to search {d} for aria2-next binary: {exc}")
 
-    # Priority 2: Check for exact 'aria2-next' / 'aria2c-next' / 'aria2-next.exe' / 'aria2c-next.exe' in possible dirs
-    next_names = (
-        ["aria2c-next.exe", "aria2-next.exe"]
-        if sys.platform == "win32"
-        else ["aria2c-next", "aria2-next"]
-    )
+    # Priority 2: Check for exact 'aria2-next' / 'aria2-next.exe' in possible dirs.
+    next_name = "aria2-next.exe" if sys.platform == "win32" else "aria2-next"
     for d in possible_dirs:
-        for name in next_names:
-            p = d / name
-            if p.exists():
-                return p
-
-    # Priority 3: Check for the exact 'aria2-next' / 'aria2-next.exe' alias
-    alias_name = "aria2-next.exe" if sys.platform == "win32" else "aria2-next"
-    for d in possible_dirs:
-        alias_path = d / alias_name
-        if alias_path.exists():
-            return alias_path
+        p = d / next_name
+        if p.exists():
+            return p
 
     return None
 
 
-def _validate_aria2_min_split_size(value: Any) -> str:
-    """Sanitize the aria2 --min-split-size argument.
+# Process-wide lock for aria2-next RPC port allocation and startup. This
+# eliminates intra-process races where two concurrent downloads could select
+# the same ephemeral port before aria2-next binds it.
+_ARIA2_PORT_LOCK = threading.Lock()
+
+
+def _validate_aria2_next_min_split_size(value: Any) -> str:
+    """Sanitize the aria2-next --min-split-size argument.
 
     Accepts a numeric value with an optional K/M/G/T suffix, matching
-    aria2c's documented format. Falls back to the default "1M" for
+    aria2-next's documented format. Falls back to the default "1M" for
     anything else so that malformed user settings cannot inject extra
-    arguments or crash aria2c.
+    arguments or crash aria2-next.
     """
     if isinstance(value, str) and re.fullmatch(r"^\d+[KMGTkmgt]?$", value.strip()):
         return value.strip()
-    logger.warning(f"Invalid aria2MinSplitSize {value!r}; using default '1M'")
+    logger.warning(f"Invalid aria2NextMinSplitSize {value!r}; using default '1M'")
     return "1M"
 
 
-class DMAAria2cFD(Aria2cFD):
+class DMAAria2NextFD(Aria2cFD):
     def report_error(self, msg: str) -> None:
         parent_report_error = getattr(super(), "report_error", None)
         if callable(parent_report_error):
@@ -109,9 +202,11 @@ class DMAAria2cFD(Aria2cFD):
             parent_hook_progress(status, info_dict)
 
     def _call_process(
-        self, cmd: List[Any], info_dict: Dict[str, Any]
+        self, cmd: list[str | bytes], info_dict: Dict[str, Any]
     ) -> tuple[str, str, int]:
-        import json
+        if self.params is None:
+            return "", "", 1
+        import orjson
         import socket
         import urllib.request
 
@@ -131,37 +226,36 @@ class DMAAria2cFD(Aria2cFD):
             rpc_url = f"http://127.0.0.1:{port}/jsonrpc"
 
             def rpc(method: str, *params: Any) -> Any:
-                body = json.dumps(
+                body = orjson.dumps(
                     {
                         "jsonrpc": "2.0",
                         "id": "dma",
                         "method": method,
                         "params": [f"token:{secret}", *params],
                     }
-                ).encode()
+                )
                 req = urllib.request.Request(
                     rpc_url,
                     data=body,
                     headers={"Content-Type": "application/json"},
                 )
                 with urllib.request.urlopen(req, timeout=2.0) as resp:
-                    result = json.loads(resp.read())
+                    result = orjson.loads(resp.read())
                 if "error" in result:
-                    raise RuntimeError(f"aria2 RPC error: {result['error']}")
+                    raise RuntimeError(f"aria2-next RPC error: {result['error']}")
                 return result["result"]
 
-            STRIP_EXACT = {"--quiet", "-q"}
             STRIP_PREFIX = (
-                "--console-log-level=",
+                "--console-log-level=warn",
                 "--summary-interval=",
                 "--enable-rpc",
                 "--rpc-listen-port=",
                 "--rpc-secret=",
             )
-            filtered_cmd = []
+            filtered_cmd: list[str | bytes] = []
             for arg in cmd:
                 s = arg.decode("utf-8") if isinstance(arg, bytes) else arg
-                if s in STRIP_EXACT or any(s.startswith(p) for p in STRIP_PREFIX):
+                if any(s.startswith(p) for p in STRIP_PREFIX):
                     continue
                 filtered_cmd.append(arg)
 
@@ -176,12 +270,10 @@ class DMAAria2cFD(Aria2cFD):
 
             is_bytes = bool(filtered_cmd) and isinstance(filtered_cmd[0], bytes)
 
-            def enc(v):
+            def enc(v: str) -> str | bytes:
                 return v.encode("utf-8") if is_bytes else v
 
             for opt in [
-                "--quiet=true",
-                "--console-log-level=error",
                 f"--rpc-secret={secret}",
                 f"--rpc-listen-port={port}",
                 "--enable-rpc=true",
@@ -192,35 +284,38 @@ class DMAAria2cFD(Aria2cFD):
                 a.decode("utf-8") if isinstance(a, bytes) else a for a in filtered_cmd
             ]
 
-            aria2_bin = get_aria2_executable_path()
-            if aria2_bin and str_cmd:
-                str_cmd[0] = str(aria2_bin)
+            aria2_next_bin = get_aria2_next_executable_path()
+            if aria2_next_bin and str_cmd:
+                str_cmd[0] = str(aria2_next_bin)
 
             return str_cmd, rpc
 
         max_attempts = 3
-        last_error: Optional[Exception] = None
         for attempt in range(max_attempts):
             p: Optional[subprocess.Popen] = None
             try:
-                # Allocate a fresh ephemeral port each attempt to avoid races
-                # where another process grabs the port between bind and aria2c start.
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _sock:
-                    _sock.bind(("127.0.0.1", 0))
-                    rpc_port = _sock.getsockname()[1]
+                # Allocate a fresh ephemeral port and spawn aria2-next under a
+                # process-wide lock. This removes intra-process races where two
+                # concurrent downloads could claim the same port before aria2-next
+                # binds it. Cross-process races are still mitigated by the bind
+                # check and the post-start RPC verification below.
+                with _ARIA2_PORT_LOCK:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _sock:
+                        _sock.bind(("127.0.0.1", 0))
+                        rpc_port = _sock.getsockname()[1]
 
-                rpc_secret = f"dma{secrets.token_hex(8)}"
-                str_cmd, rpc = _build_rpc_cmd(rpc_port, rpc_secret)
+                    rpc_secret = f"dma{secrets.token_hex(8)}"
+                    str_cmd, rpc = _build_rpc_cmd(rpc_port, rpc_secret)
 
-                try:
-                    p = subprocess.Popen(
-                        str_cmd,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                except OSError as err:
-                    self.report_error(f"Unable to run external downloader: {err}")
-                    return "", "", -1
+                    try:
+                        p = subprocess.Popen(
+                            str_cmd,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except OSError as err:
+                        self.report_error(f"Unable to run external downloader: {err}")
+                        return "", "", -1
 
                 # Wait for RPC to become available (up to 5 s)
                 rpc_ready = False
@@ -238,11 +333,11 @@ class DMAAria2cFD(Aria2cFD):
                     _terminate(p)
                     if attempt < max_attempts - 1:
                         logger.warning(
-                            f"[aria2 RPC] not ready on attempt {attempt + 1}; retrying with a new port"
+                            f"[aria2-next RPC] not ready on attempt {attempt + 1}; retrying with a new port"
                         )
                         continue
                     logger.warning(
-                        "[aria2 RPC] Could not connect — no live progress for this stream"
+                        "[aria2-next RPC] Could not connect — no live progress for this stream"
                     )
 
                 # Poll RPC at ~100 ms for realtime progress
@@ -252,6 +347,9 @@ class DMAAria2cFD(Aria2cFD):
 
                 try:
                     while p.poll() is None:
+                        job_id = self.params.get("job_id")
+                        if job_id:
+                            _raise_if_paused(job_id)
                         if rpc_ready:
                             try:
                                 active = rpc("aria2.tellActive", KEYS)
@@ -280,21 +378,21 @@ class DMAAria2cFD(Aria2cFD):
                                         )
                                 elif active_seen:
                                     logger.info(
-                                        "[aria2 RPC] Active download finished. Shutting down daemon..."
+                                        "[aria2-next RPC] Active download finished. Shutting down daemon..."
                                     )
                                     try:
                                         rpc("aria2.shutdown")
-                                    except Exception:
-                                        pass
+                                    except Exception as exc:
+                                        logger.warning(f"Failed to shut down aria2-next daemon via RPC: {exc}")
                                     break
                             except DownloadPaused:
                                 raise
                             except Exception as poll_err:
-                                logger.debug("[aria2 RPC] poll error: %s", poll_err)
+                                logger.debug("[aria2-next RPC] poll error: %s", poll_err)
 
                         time.sleep(0.1)
 
-                    # Emit a final "finished" hook once aria2c exits
+                    # Emit a final "finished" hook once aria2-next exits
                     if rpc_ready and last_gid:
                         try:
                             stat = rpc("aria2.tellStatus", last_gid, KEYS)
@@ -311,8 +409,8 @@ class DMAAria2cFD(Aria2cFD):
                                 },
                                 info_dict,
                             )
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning(f"Failed to emit final aria2 progress hook: {exc}")
 
                 except DownloadPaused:
                     _terminate(p)
@@ -324,7 +422,7 @@ class DMAAria2cFD(Aria2cFD):
                 try:
                     returncode = p.wait(timeout=5.0)
                 except subprocess.TimeoutExpired:
-                    logger.warning("aria2 process did not exit after shutdown; terminating it")
+                    logger.warning("aria2-next process did not exit after shutdown; terminating it")
                     _terminate(p)
                     try:
                         returncode = p.wait(timeout=2.0)
@@ -337,10 +435,9 @@ class DMAAria2cFD(Aria2cFD):
                 _terminate(p)
                 raise
             except Exception as exc:
-                last_error = exc
                 _terminate(p)
                 if attempt < max_attempts - 1:
-                    logger.warning(f"aria2 attempt {attempt + 1} failed: {exc}; retrying")
+                    logger.warning(f"aria2-next attempt {attempt + 1} failed: {exc}; retrying")
                     continue
                 raise
 
@@ -348,22 +445,25 @@ class DMAAria2cFD(Aria2cFD):
         return "", "", -1
 
 
-# Register DMAAria2cFD into yt-dlp's downloader registry
+# Register DMAAria2NextFD into yt-dlp's downloader registry
 external_downloader_registry = getattr(ytdlp_external, "_BY_NAME", None)
 if isinstance(external_downloader_registry, dict):
-    external_downloader_registry["aria2-next"] = DMAAria2cFD
+    external_downloader_registry["aria2-next"] = DMAAria2NextFD
     try:
-        aria2_bin = get_aria2_executable_path()
-        if aria2_bin:
-            external_downloader_registry[aria2_bin.stem] = DMAAria2cFD
-    except Exception:
-        pass
+        aria2_next_bin = get_aria2_next_executable_path()
+        if aria2_next_bin:
+            external_downloader_registry[aria2_next_bin.stem] = DMAAria2NextFD
+    except Exception as exc:
+        logger.warning(f"Failed to register aria2-next downloader: {exc}")
 
 
 def _probe_http_capabilities(url: str, referer: Optional[str]) -> Dict[str, Any]:
     """Perform a small, authenticated-context-free capability check for aria2."""
     import urllib.error
     import urllib.request
+
+    if not is_safe_url(url):
+        return {"status": 0, "supports_ranges": False, "content_length": None}
 
     headers = {"Accept": "*/*"}
     if referer:
@@ -395,16 +495,21 @@ def _validate_downloaded_format(
     requested_format_id: str,
     media_type: Optional[str] = None,
 ) -> None:
+    from app.engine.file_types import ENGINE_STREAM, is_direct_download_type
+
     if not requested_format_id or requested_format_id == "best":
         return
-    if media_type in ("stream", "file"):
+    if media_type == ENGINE_STREAM or is_direct_download_type(media_type):
         return
     requested_ids = set(requested_format_id.split("+"))
-    selected_ids = set()
+    selected_ids: set[str] = set()
     selected_format_id = info.get("format_id")
     if isinstance(selected_format_id, str):
         selected_ids.update(selected_format_id.split("+"))
-    for requested_format in info.get("requested_formats") or []:
+    requested_formats = cast(
+        List[Dict[str, Any]], info.get("requested_formats") or []
+    )
+    for requested_format in requested_formats:
         if isinstance(requested_format, dict) and isinstance(
             requested_format.get("format_id"), str
         ):
@@ -421,19 +526,154 @@ def _validate_downloaded_format(
         )
 
 
-def _sanitize_info_extensions(info: Dict[str, Any]) -> None:
+def _source_container_for_remux(target_ext: str) -> str:
+    """Return a safe source container that differs from the target mergeFormat.
+
+    Uses the stdlib mimetypes database so no video container extension is
+    hard-coded. The source container only needs to be different from the target
+    so FFmpegVideoRemuxer actually runs; ffmpeg auto-detects the real content.
+    """
+    clean_target = (target_ext or "").strip().lstrip(".").lower()
+    for mime in ("video/mp4", "video/x-matroska", "video/webm", "video/quicktime"):
+        ext = mimetypes.guess_extension(mime, strict=False)
+        if ext:
+            clean_ext = ext.lstrip(".").lower()
+            if clean_ext and clean_ext != clean_target:
+                return clean_ext
+    # Last resort: ask mimetypes for the most common video extension.
+    fallback_ext = mimetypes.guess_extension("video/mp4", strict=False)
+    return (fallback_ext or ".mp4").lstrip(".")
+
+
+class HlsPngTsWrapperStripPP(PostProcessor):
+    """Strip PNG wrappers from TikTok-style HLS segments.
+
+    Some HLS CDNs return each segment as a tiny PNG file with the real
+    MPEG-TS payload appended after the PNG IEND chunk. yt-dlp's native HLS
+    downloader concatenates these files unchanged, so ffmpeg probes the
+    result as a PNG image and produces a short black video. This postprocessor
+    removes the PNG wrappers and reassembles the raw TS stream, leaving the
+    file with its original .mp4 name so FFmpegFixupM3u8PP can then convert the
+    TS-in-MP4 to a proper MP4 before the final remuxer runs.
+    """
+
+    _PNG_SIG = b"\x89PNG\r\n\x1a\n"
+    _IEND = b"IEND"
+
+    @staticmethod
+    def _png_end_position(f: BinaryIO, start: int) -> int:
+        """Return the byte position right after the PNG IEND chunk."""
+        f.seek(start)
+        if f.read(8) != HlsPngTsWrapperStripPP._PNG_SIG:
+            return start
+        pos = start + 8
+        while True:
+            f.seek(pos)
+            length_bytes = f.read(4)
+            if len(length_bytes) < 4:
+                return pos
+            length = struct.unpack(">I", length_bytes)[0]
+            chunk_type = f.read(4)
+            if chunk_type == HlsPngTsWrapperStripPP._IEND:
+                return pos + 12
+            pos += 12 + length
+
+    def _strip_to_ts(self, src_path: str, dst_path: str) -> None:
+        with open(src_path, "rb") as src, open(dst_path, "wb") as dst, mmap.mmap(
+            src.fileno(), 0, access=mmap.ACCESS_READ
+        ) as mm:
+            png_starts: list[int] = []
+            start = 0
+            while True:
+                pos = mm.find(self._PNG_SIG, start)
+                if pos == -1:
+                    break
+                png_starts.append(pos)
+                start = pos + 1
+
+            prev_end = 0
+            for png_start in png_starts:
+                if png_start > prev_end:
+                    dst.write(mm[prev_end:png_start])
+                png_end = self._png_end_position(src, png_start)
+                prev_end = png_end
+
+            if prev_end < len(mm):
+                dst.write(mm[prev_end:])
+
+    def run(self, information: Any) -> Any:
+        info: Dict[str, Any] = information
+        path = info.get("filepath")
+        if not path or not os.path.exists(path):
+            return [], info
+
+        protocol = (info.get("protocol") or "").lower()
+        if not protocol.startswith("m3u8"):
+            return [], info
+
+        with open(path, "rb") as f:
+            header = f.read(len(self._PNG_SIG))
+        if header != self._PNG_SIG:
+            return [], info
+
+        logger.info(f"Stripping PNG wrappers from HLS stream: {path}")
+        temp_ts = prepend_extension(path, "ts")
+        try:
+            self._strip_to_ts(path, temp_ts)
+            if os.path.getsize(temp_ts) == 0:
+                logger.info("PNG-TS stripper produced empty output; skipping")
+                return [], info
+        except (OSError, ValueError) as e:
+            logger.info(f"PNG-TS stripper failed: {e}")
+            return [], info
+
+        # Keep the .mp4 filename: FFmpegFixupM3u8PP will detect the MPEG-TS
+        # payload inside and convert it to a valid MP4 before remuxing.
+        os.replace(temp_ts, path)
+        logger.info(f"PNG-TS stripper reassembled raw TS in {path}")
+        return [], info
+
+
+def _add_stream_fixup_postprocessors(
+    ydl: yt_dlp.YoutubeDL,
+    info: Dict[str, Any],
+) -> None:
+    """Add stream fixups so HLS/DASH streams survive the remuxer.
+
+    yt-dlp's process_video_result() makes a copy of the info dict and drops
+    the __postprocessors list, so we must add our fixups to ydl's actual
+    post_process chain instead. They are inserted at the front so they run
+    before any subtitle/thumbnail embedding and before FFmpegVideoRemuxer.
+    """
+    downloader_cls = get_suitable_downloader(info, ydl.params)
+    downloader_name = getattr(downloader_cls, "FD_NAME", None) if downloader_cls else None
+
+    post_process = ydl._pps.get("post_process")
+    if not post_process:
+        return
+
+    fixups: list[PostProcessor] = []
+    if downloader_name == "hlsnative":
+        fixups.append(HlsPngTsWrapperStripPP(ydl))
+        fixups.append(FFmpegFixupM3u8PP(ydl))
+    elif downloader_name == "dashsegments":
+        if info.get("is_live") or info.get("is_dash_periods"):
+            fixups.append(FFmpegFixupDuplicateMoovPP(ydl))
+
+    for pp in reversed(fixups):
+        pp.set_downloader(ydl)
+        post_process.insert(0, pp)
+
+
+def _sanitize_info_extensions(info: Dict[str, Any], preferred_ext: str = "") -> None:
     """Bypasses ffmpeg container errors on unsafe/non-media file extensions (like .php)."""
     UNSAFE_EXTS = {"php", "html", "htm", "js", "txt", "asp", "aspx", "jsp"}
+    clean_pref = (preferred_ext or "").strip().lstrip(".").lower()
 
     def sanitize_dict(d: Dict[str, Any]) -> None:
         ext = d.get("ext")
         if isinstance(ext, str) and ext.lower() in UNSAFE_EXTS:
-            vcodec = d.get("vcodec")
-            acodec = d.get("acodec")
-            if acodec and acodec != "none" and (not vcodec or vcodec == "none"):
-                d["ext"] = "m4a"
-            else:
-                d["ext"] = "mp4"
+            d["ext"] = clean_pref
 
     sanitize_dict(info)
     for fmt in info.get("formats") or []:
@@ -451,6 +691,7 @@ def download_video(
     output_dir: str,
     loop: asyncio.AbstractEventLoop,
     event_queue: asyncio.Queue[dict[str, object]],
+    settings: AppSettings,
     conflict_resolution: str = "replace",
     referer: Optional[str] = None,
 ) -> str:
@@ -461,27 +702,64 @@ def download_video(
     Must be run inside a threadpool.
     Returns the absolute path to the downloaded file.
     """
-    # Load settings from settings.json
-    settings_data = load_settings()
+    settings_data = settings
 
-    # Ensure the directory containing the bundled aria2c is in the PATH so yt-dlp can locate it
-    aria2_bin = get_aria2_executable_path()
-    if aria2_bin:
-        bin_dir = str(aria2_bin.parent)
+    # Abort immediately if the user already paused/removed this job before the
+    # thread started doing any network I/O.
+    _raise_if_paused(job_id)
+
+    # Ensure the directory containing the bundled aria2-next is in the PATH so yt-dlp can locate it
+    aria2_next_bin = get_aria2_next_executable_path()
+    if aria2_next_bin:
+        bin_dir = str(aria2_next_bin.parent)
         if bin_dir not in os.environ.get("PATH", ""):
             os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
         # Dynamically register the specific executable name in yt-dlp's downloader registry
         if isinstance(external_downloader_registry, dict):
-            external_downloader_registry[aria2_bin.stem] = DMAAria2cFD
+            external_downloader_registry[aria2_next_bin.stem] = DMAAria2NextFD
+
+    from app.engine.file_types import ENGINE_STREAM, is_direct_download_type
 
     job = jobs_registry.get_job(job_id)
+    job_media_type = getattr(job, "media_type", None) if job else None
+    is_direct_file = is_direct_download_type(job_media_type)
+    is_stream_or_file = job_media_type == ENGINE_STREAM or is_direct_file
+    is_non_native = is_direct_file
 
-    is_chrome_intercept = bool(job and getattr(job, "media_type", None) == "file")
-    skip_postprocessing = is_chrome_intercept
+    # Determine whether this is a video download so the output container can be
+    # forced to the UI-selected mergeFormat via ffmpeg remuxing.
+    is_video = False
+    if job:
+        selected_fmt = None
+        if job.formats and format_id:
+            for fmt in job.formats:
+                if isinstance(fmt, dict):
+                    fmt_dict = cast(Dict[str, Any], fmt)
+                    fmt_id = fmt_dict.get("formatId")
+                else:
+                    fmt_id = getattr(fmt, "formatId", None)
+                if str(fmt_id) == str(format_id):
+                    selected_fmt = fmt
+                    break
+        if not selected_fmt and job.formats:
+            selected_fmt = job.formats[0]
+        if selected_fmt:
+            if isinstance(selected_fmt, dict):
+                selected_fmt_dict = cast(Dict[str, Any], selected_fmt)
+                height = selected_fmt_dict.get("height") or 0
+                codec = selected_fmt_dict.get("codecFamily")
+            else:
+                height = getattr(selected_fmt, "height", 0)
+                codec = getattr(selected_fmt, "codecFamily", None)
+            is_video = bool(height and height > 0) or codec == "video"
+        if not is_video and classify_mime(getattr(job, "mime", None)) == FILE_TYPE_VIDEO:
+            is_video = True
+    is_direct_video = is_direct_file and is_video
+    skip_postprocessing = is_direct_file and not is_video
 
     # Overwrite download URL with direct stream/file URL if it's a fallback format
     download_url = url
-    if job and getattr(job, "media_type", None) in ("stream", "file") and job.formats and format_id:
+    if job and is_stream_or_file and job.formats and format_id:
         for fmt in job.formats:
             fmt_id = (
                 fmt.get("formatId")
@@ -496,7 +774,7 @@ def download_video(
                 )
                 if fmt_url:
                     download_url = fmt_url
-                    logger.info(f"Using direct format URL for download: {redact_url(download_url)}")
+                    logger.debug(f"Using direct format URL for download: {redact_url(download_url)}")
                 break
         
         # If format_id is "best" or not matched, fall back to the first format's url
@@ -509,39 +787,77 @@ def download_video(
             )
             if fmt_url:
                 download_url = fmt_url
-                logger.info(f"Using direct format URL for download (best): {redact_url(download_url)}")
+                logger.debug(f"Using direct format URL for download (best): {redact_url(download_url)}")
+
+    # Normalize trailing numeric ids with leading zeros (some APIs reject them).
+    download_url = normalize_numeric_id_url(download_url)
 
     # Resolve title/filename through title_extractor so no other module
     # duplicates extraction logic. Existing job hints are used when present;
     # network lookup only runs when local hints are missing or generic.
-    resolved_filename = resolve_filename(
-        url=download_url or url,
-        filename=getattr(job, "filename", None) if job else None,
-        mime=getattr(job, "mime", None) if job else None,
-        referer=referer,
-        page_title=job.title if job else None,
-        timeout=3.0,
-    )
-    if job:
-        job.title = resolved_filename.title
-        job.filename = resolved_filename.filename
-        jobs_registry.update_job(
-            job_id, title=resolved_filename.title, filename=resolved_filename.filename
-        )
+    _raise_if_paused(job_id)
+    resolved_filename = None
+    if is_non_native:
+        existing_filename = getattr(job, "filename", None) if job else None
+        existing_title = job.title if job else None
+
+        if existing_filename:
+            # Resume: reuse the existing filename so the partial file continues
+            # to the same temp file instead of being renamed on every restart.
+            base = os.path.basename(existing_filename)
+            ext = _extract_trailing_extension(base)
+            title = existing_title or _strip_trailing_extension(base) or "video"
+            resolved_filename = ResolvedFilename(
+                title=title,
+                extension=ext,
+                filename=base,
+                source="existing",
+            )
+        else:
+            preferred_ext = None
+            if job and job.formats and format_id:
+                for fmt in job.formats:
+                    fmt_id = (
+                        fmt.get("formatId")
+                        if isinstance(fmt, dict)
+                        else getattr(fmt, "formatId", None)
+                    )
+                    if str(fmt_id) == str(format_id):
+                        preferred_ext = (
+                            fmt.get("ext")
+                            if isinstance(fmt, dict)
+                            else getattr(fmt, "ext", None)
+                        )
+                        break
+            resolved_filename = resolve_filename(
+                url=download_url or url,
+                filename=existing_filename,
+                mime=getattr(job, "mime", None) if job else None,
+                referer=referer,
+                page_title=existing_title,
+                preferred_ext=preferred_ext,
+                timeout=3.0,
+            )
+        if job:
+            job.title = resolved_filename.title
+            job.filename = resolved_filename.filename
+            jobs_registry.update_job(
+                job_id, title=resolved_filename.title, filename=resolved_filename.filename
+            )
 
     embed_thumbnail = settings_data.embedThumbnail
     embed_subs = settings_data.embedSubs
     merge_format = settings_data.mergeFormat
     browser = settings_data.cookiesFromBrowser
-    use_aria2 = settings_data.useAria2
+    use_aria2_next = settings_data.useAria2Next
 
-    # aria2 configurations
-    aria2_max_connections = settings_data.aria2MaxConnections
-    aria2_split = settings_data.aria2Split
-    aria2_min_split_size = _validate_aria2_min_split_size(settings_data.aria2MinSplitSize)
-    aria2_preallocate = settings_data.aria2Preallocate
-    aria2_check_certificate = settings_data.aria2CheckCertificate
-    aria2_always_resume = settings_data.aria2AlwaysResume
+    # aria2-next configurations
+    aria2_next_max_connections = settings_data.aria2NextMaxConnections
+    aria2_next_split = settings_data.aria2NextSplit
+    aria2_next_min_split_size = _validate_aria2_next_min_split_size(settings_data.aria2NextMinSplitSize)
+    aria2_next_preallocate = settings_data.aria2NextPreallocate
+    aria2_next_check_certificate = settings_data.aria2NextCheckCertificate
+    aria2_next_always_resume = settings_data.aria2NextAlwaysResume
 
     # yt-dlp customization options
     concurrent_fragment_downloads = settings_data.concurrentFragmentDownloads
@@ -601,21 +917,26 @@ def download_video(
 
     # Simple format selector (avoiding multiple audio streams where possible)
     format_selector = format_id if format_id else "bestvideo+bestaudio/best"
-    if job and getattr(job, "media_type", None) in ("stream", "file"):
+    if job and is_stream_or_file:
         if not format_id or format_id == "best":
             format_selector = "best"
 
     # Build the output template from the single source of truth in title_extractor.
     # Escape percent signs so yt-dlp does not interpret them as template markers.
-    clean_title = resolved_filename.title.replace("%", "%%") or "video"
+    if resolved_filename:
+        clean_title = resolved_filename.title.replace("%", "%%") or "video"
+    else:
+        clean_title = (job.title if job and job.title else "video").replace("%", "%%")
 
     # Isolated temp template
-    if skip_postprocessing:
+    if skip_postprocessing and resolved_filename:
         out_tmpl = os.path.join(
             str(app_temp_dir),
             resolved_filename.filename.replace("%", "%%"),
         )
     else:
+        # For streams/yt-dlp, lock the output name to the resolved job title so
+        # generic manifest labels like "master" do not leak into the final file.
         out_tmpl = os.path.join(str(app_temp_dir), f"{clean_title}.%(ext)s")
 
     # Stream phase tracking – mutated from inside progress_hook closure.
@@ -651,7 +972,7 @@ def download_video(
     def progress_hook(d: Dict[str, Any]):
         nonlocal combined_dl, combined_total, download_finished, video_est, audio_est
         if jobs_registry.is_paused(job_id) or jobs_registry.get_job(job_id) is None:
-            logger.info(
+            logger.debug(
                 f"Pause or removal event detected in progress hook for job {job_id}"
             )
             raise DownloadPaused()
@@ -906,6 +1227,9 @@ def download_video(
             "buffersize": 1024 * 256,
             "socket_timeout": 10,
             "allow_multiple_audio_streams": False,
+            # Pass the job id down to the external downloader so it can abort
+            # early if the user pauses while aria2-next is still starting up.
+            "job_id": job_id,
         },
     )
 
@@ -926,12 +1250,34 @@ def download_video(
 
     # Thumbnail option
     if embed_thumbnail and not skip_postprocessing:
+        opts["writethumbnail"] = True
         opts.setdefault("postprocessors", []).append(
             {"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"}
         )
         opts.setdefault("postprocessors", []).append(
             {"key": "EmbedThumbnail", "already_have_thumbnail": False}
         )
+
+    # Remux videos to the UI-selected container only when the source container
+    # is known to differ. Avoids unnecessary ffmpeg passes and prevents forcing
+    # an already-correct container through a redundant remux.
+    if is_video and merge_format:
+        predicted_source = (
+            guess_file_extension(
+                filename=getattr(job, "filename", None),
+                mime=getattr(job, "mime", None),
+                url=download_url,
+            )
+            or ""
+        )
+        needs_remux = (
+            not predicted_source
+            or predicted_source.lower().strip(".") != merge_format.lower().strip(".")
+        )
+        if needs_remux:
+            opts.setdefault("postprocessors", []).append(
+                {"key": "FFmpegVideoRemuxer", "preferedformat": merge_format}
+            )
 
     # Embed Metadata postprocessor
     if not skip_postprocessing:
@@ -944,78 +1290,141 @@ def download_video(
             }
         )
 
-    # aria2 is useful for validated, range-capable direct files. It is not
-    # forced onto manifests, HTML pages, or servers that do not advertise ranges.
-    http_capabilities = (
-        _probe_http_capabilities(download_url, referer) if use_aria2 and not is_stream else {}
-    )
-    content_type = str(http_capabilities.get("content_type") or "")
-    aria2_eligible = (
-        use_aria2
-        and not is_stream
-        and aria2_bin is not None
-        and 200 <= int(http_capabilities.get("status") or 0) < 300
-        and bool(http_capabilities.get("supports_ranges"))
-        and not content_type.startswith("text/html")
-    )
-    if aria2_eligible:
-        opts["external_downloader"] = str(aria2_bin)
-        logger.debug(
-            "Using adaptive aria2 acceleration: ranges=%s content_length=%s",
-            http_capabilities.get("supports_ranges"),
-            http_capabilities.get("content_length"),
-        )
+    # Use aria2-next as yt-dlp's external downloader for every job when enabled.
+    # Native yt-dlp download is no longer used.
+    if use_aria2_next and aria2_next_bin is not None:
+        http_capabilities = _probe_http_capabilities(download_url, referer)
         content_length = http_capabilities.get("content_length")
+        opts["external_downloader"] = str(aria2_next_bin)
+        logger.debug(
+            "Using aria2-next as external downloader: content_length=%s",
+            content_length,
+        )
         if isinstance(content_length, int) and content_length < 8 * 1024 * 1024:
             connection_limit = 2
         else:
-            connection_limit = min(max(int(aria2_max_connections), 1), 16)
-        split_limit = min(max(int(aria2_split), 1), connection_limit)
+            connection_limit = min(max(int(aria2_next_max_connections), 1), 64)
+        split_limit = min(max(int(aria2_next_split), 1), 64)
 
-        aria2_args = [
+        aria2_next_args = [
             "-j",
             "1",
             "-x",
             str(connection_limit),
             "-s",
             str(split_limit),
-            f"--min-split-size={aria2_min_split_size}",
+            f"--min-split-size={aria2_next_min_split_size}",
         ]
 
-        if aria2_preallocate:
-            aria2_args.append("--file-allocation=prealloc")
+        # File allocation: falloc on Linux/Windows for fast space reservation;
+        # none on macOS (APFS) to avoid startup stalls. Prealloc is the fallback
+        # when falloc is unavailable or pre-allocation is disabled.
+        if aria2_next_preallocate:
+            if sys.platform == "darwin":
+                aria2_next_args.append("--file-allocation=none")
+            else:
+                aria2_next_args.append("--file-allocation=falloc")
         else:
-            aria2_args.append("--file-allocation=none")
+            aria2_next_args.append("--file-allocation=none")
 
-        if aria2_check_certificate:
-            aria2_args.append("--check-certificate=true")
+        # High-throughput tuning defaults (see aria2-next performance template).
+        aria2_next_args.extend(
+            [
+                "--disk-cache=64M",
+                "--summary-interval=0",
+                "--continue=true",
+                "--connect-timeout=10",
+                "--timeout=10",
+                "--retry-wait=2",
+                "--max-tries=5",
+                "--max-file-not-found=2",
+                "--enable-http-pipelining=true",
+                "--http-accept-gzip=true",
+                "--async-dns=true",
+            ]
+        )
+
+        if aria2_next_check_certificate:
+            aria2_next_args.append("--check-certificate=true")
             try:
                 import certifi
 
                 ca_path = certifi.where()
                 if ca_path and os.path.exists(ca_path):
-                    aria2_args.append(f"--ca-certificate={ca_path}")
+                    aria2_next_args.append(f"--ca-certificate={ca_path}")
             except ImportError:
                 pass
         else:
-            aria2_args.append("--check-certificate=false")
+            aria2_next_args.append("--check-certificate=false")
 
-        if aria2_always_resume:
-            aria2_args.append("--always-resume=true")
+        if aria2_next_always_resume:
+            aria2_next_args.append("--always-resume=true")
         else:
-            aria2_args.append("--always-resume=false")
+            aria2_next_args.append("--always-resume=false")
 
-        opts["external_downloader_args"] = {"default": aria2_args}
-    elif use_aria2 and not is_stream:
-        logger.debug("Using native downloader because HTTP range capability was not verified")
+        opts["external_downloader_args"] = {"default": aria2_next_args}
 
     active_opts = opts.copy()
 
     try:
         try:
             with yt_dlp.YoutubeDL(active_opts) as ydl:
-                info = ydl.extract_info(download_url, download=False)
-                _sanitize_info_extensions(info)
+                _raise_if_paused(job_id)
+                try:
+                    info = ydl.extract_info(download_url, download=False)
+                except Exception as extract_err:
+                    if is_direct_file_url(download_url) or is_direct_download_type(getattr(job, "media_type", None)):
+                        logger.info(
+                            f"yt-dlp extract_info failed for direct file URL {redact_url(download_url)}: {extract_err}; "
+                            f"using synthetic direct file info."
+                        )
+                        ext = guess_file_extension(
+                            filename=getattr(job, "filename", None),
+                            mime=getattr(job, "mime", None),
+                            url=download_url,
+                        ) or "bin"
+                        info = {
+                            "id": job_id,
+                            "title": (getattr(job, "title", None) or "file").replace("%", "%%"),
+                            "url": download_url,
+                            "ext": ext,
+                            "extractor": "generic",
+                            "extractor_key": "Generic",
+                            "protocol": "https" if download_url.startswith("https") else "http",
+                            "format_id": "0",
+                            "formats": [
+                                {
+                                    "format_id": "0",
+                                    "url": download_url,
+                                    "ext": ext,
+                                    "protocol": "https" if download_url.startswith("https") else "http",
+                                }
+                            ],
+                        }
+                    else:
+                        raise extract_err
+
+                if is_direct_video:
+                    # Lock the source extension for the temp file so ffmpeg remuxes
+                    # from the real container instead of the mergeFormat placeholder.
+                    source_ext = (
+                        guess_file_extension(
+                            filename=None,
+                            mime=getattr(job, "mime", None) or info.get("mime"),
+                            url=download_url,
+                        )
+                        or info.get("ext")
+                        or _source_container_for_remux(merge_format)
+                    )
+                    info["ext"] = source_ext
+                    # yt-dlp's generic extractor may not set a video codec for raw
+                    # file URLs. Make sure the remuxer postprocessor actually runs.
+                    if info.get("vcodec") in (None, "none"):
+                        info["vcodec"] = "copy"
+                _sanitize_info_extensions(info, merge_format)
+                if is_video:
+                    _add_stream_fixup_postprocessors(ydl, info)
+                _raise_if_paused(job_id)
                 _ = ydl.process_ie_result(info, download=True)
                 _validate_downloaded_format(info, format_id, media_type=getattr(job, "media_type", None))
                 final_filepath = ydl.prepare_filename(info)
@@ -1028,8 +1437,25 @@ def download_video(
                 )
                 active_opts.pop("cookiesfrombrowser", None)
                 with yt_dlp.YoutubeDL(active_opts) as ydl:
+                    _raise_if_paused(job_id)
                     info = ydl.extract_info(download_url, download=False)
-                    _sanitize_info_extensions(info)
+                    if is_direct_video:
+                        source_ext = (
+                            guess_file_extension(
+                                filename=None,
+                                mime=getattr(job, "mime", None) or info.get("mime"),
+                                url=download_url,
+                            )
+                            or info.get("ext")
+                            or _source_container_for_remux(merge_format)
+                        )
+                        info["ext"] = source_ext
+                        if info.get("vcodec") in (None, "none"):
+                            info["vcodec"] = "copy"
+                    _sanitize_info_extensions(info, merge_format)
+                    if is_video:
+                        _add_stream_fixup_postprocessors(ydl, info)
+                    _raise_if_paused(job_id)
                     _ = ydl.process_ie_result(info, download=True)
                     _validate_downloaded_format(info, format_id, media_type=getattr(job, "media_type", None))
                     final_filepath = ydl.prepare_filename(info)
@@ -1104,22 +1530,13 @@ def download_video(
         jobs_registry.update_job(job_id, status="paused")
         raise
     except Exception as e:
+        error_message = str(e)
         logger.error(f"Download job {job_id} failed: {e}", exc_info=True)
-        jobs_registry.update_job(job_id, status="failed", error=str(e))
+        error_category = "expired_url" if is_expired_url_error(error_message) else None
+        jobs_registry.update_job(
+            job_id,
+            status="failed",
+            error=error_message,
+            error_category=error_category,
+        )
         raise
-    finally:
-        # Isolated temp directory cleanup for failed jobs
-        snapshot = jobs_registry.get_job_snapshot(job_id)
-        if snapshot:
-            status, _ = snapshot
-            if status == "failed":
-                try:
-                    if os.path.exists(app_temp_dir):
-                        shutil.rmtree(app_temp_dir)
-                        logger.info(
-                            f"Successfully cleaned up isolated temp folder: {app_temp_dir}"
-                        )
-                except Exception as rmtree_err:
-                    logger.warning(
-                        f"Failed to clean up isolated temp folder {app_temp_dir}: {rmtree_err}"
-                    )

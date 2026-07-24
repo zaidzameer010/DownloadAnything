@@ -13,10 +13,10 @@ graph TD
     Browser[Chrome MV3 Extension] <-->|JSON WebSocket Handshake| Backend[FastAPI Python Server]
     TauriApp[Tauri Desktop Client] <-->|JSON WebSocket Handshake| Backend
     Backend <-->|Tuning Options / Engine Selection| ytdlp[yt-dlp Core Engine]
-    Backend <-->|Multi-threaded Chunks| ari2[ari2-next Downloader]
+    Backend <-->|Multi-threaded Chunks| aria2-next[aria2-next Downloader]
 ```
 
-### 1. The Desktop Client (Tauri + React + Vite + TypeScript)
+### 2. The Desktop Client (Tauri + React + Vite + TypeScript)
 - **Dashboard**: Track active, paused, completed, and failed downloads with high-frequency speed and ETA ticks.
 - **Unified Settings Hub**: A single, structured tab with dedicated panels for **General Preferences**, **Preset Paths**, **Downloader Engines**, and **Browser Extensions**.
 - **Interactive Prober**: Analyze pasted media URLs to select precise format container options before queuing downloads.
@@ -24,7 +24,7 @@ graph TD
 ### 3. The Backend Server (FastAPI + Python)
 - **High-Performance Metadata Parsing**: Resolves format metadata in 1-2 seconds by leveraging `check_formats: "cached"`, client targeting (`android`/`web`), and updating directly without remote GitHub scraping overhead.
 - **Resilient Multi-Phase Progress Manager**: Performs live stream-phase tracking for split video/audio feeds, merging progress cleanly without status jumps.
-- **Ari2-Next Integration**: Configurable multi-threaded downloading with aggressive split connection rules.
+- **aria2-next Integration**: Configurable multi-threaded downloading with aggressive split connection rules. Place the `aria2-next` binary on your `PATH` or in `server/app/binaries/`; it is auto-detected at runtime.
 
 ### 4. The Browser Extension (Manifest V3)
 - **Persistent Socket Life**: Uses a hidden `chrome.offscreen` document to host the WebSocket connection, ensuring Chrome doesn't interrupt active tracking when the Service Worker suspends.
@@ -37,16 +37,17 @@ graph TD
 
 ### Prerequisites
 You need the following installed on your machine:
-- **Node.js** (v18+)
-- **Python** (v3.10+)
+- **Node.js** (v18+) and **Bun**
+- **Python** (v3.10+) with **uv** or **conda**
 - **FFmpeg** (registered in System PATH or configured via Custom Settings)
-- **aria2c** (Optional, for multi-threaded chunk downloads)
+- **aria2-next** (optional, for multi-threaded chunk downloads)
 
 ### 1. Running the Backend Service
-From the workspace root, navigate to the server and boot the FastAPI gateway:
+From the workspace root, boot the WebSocket-only backend:
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies (uv example)
+uv pip install -r requirements.txt
+# or: conda run -n downloadanything pip install -r requirements.txt
 
 # Run the backend (defaults to ws://127.0.0.1:8765/ws)
 python server/app/main.py
@@ -56,10 +57,10 @@ python server/app/main.py
 In a new terminal window, boot the Tauri app dev environment:
 ```bash
 # Install node dependencies
-npm install
+bun install
 
 # Run tauri in development mode
-npm run tauri:dev
+bun run tauri:dev
 ```
 
 ### 3. Installing the Chrome Extension
@@ -74,5 +75,5 @@ npm run tauri:dev
 Under the **Settings** menu in the desktop application, you can fully adjust down-stream behaviors:
 - **Output Preferences**: Specify default container merges (`MKV` or `MP4`) and enable automated cookie loading from active browser profiles (Chrome, Brave, Safari, Edge, Firefox).
 - **Core Downloader Tuning**: Manage concurrent fragment downloads, network retries, and rate limits.
-- **Ari2-Next Connection Rules**: Toggle the `ari2-next` downloader to enable parallel chunk splits (up to 32 connections) for maximum throughput.
+- **aria2-next Connection Rules**: Toggle the aria2-next downloader to enable parallel chunk splits (up to 32 connections) for maximum throughput.
 - **Preset Folders**: Map custom folders (e.g. `Movies`, `Music`) to automatically route downloads on selection.

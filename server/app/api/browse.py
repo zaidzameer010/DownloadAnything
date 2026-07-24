@@ -1,18 +1,24 @@
 import asyncio
-import json
+import orjson
 import os
 import sys
+from pathlib import Path
 from typing import Optional
-from pydantic import BaseModel
-from app.utils.logger import logger
+from app.services.interfaces import IDirectoryPicker
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
-class DirectoryItem(BaseModel):
-    name: str
-    absolutePath: str
+class DirectoryPicker(IDirectoryPicker):
+    """Native system directory selection dialog gateway."""
+
+    async def pick(self, initial_dir: Optional[Path] = None) -> Optional[Path]:
+        result = await pick_system_directory(str(initial_dir) if initial_dir else None)
+        return Path(result) if result else None
 
 
-async def pick_directory_system(initial_dir: Optional[str] = None) -> Optional[str]:
+async def pick_system_directory(initial_dir: Optional[str] = None) -> Optional[str]:
     """
     Opens a native system directory selection dialog.
     Tries AppleScript on macOS first, falls back to Tkinter.
@@ -25,7 +31,7 @@ async def pick_directory_system(initial_dir: Optional[str] = None) -> Optional[s
         if sys.platform == "darwin":
             try:
                 default_path = initial_dir or os.path.expanduser("~")
-                script_path = json.dumps(default_path)
+                script_path = orjson.dumps(default_path).decode()
                 script = f'POSIX path of (choose folder with prompt "Select Download Destination" default location POSIX file {script_path})'
                 res = subprocess.run(
                     ["osascript", "-e", script],
@@ -54,7 +60,7 @@ async def pick_directory_system(initial_dir: Optional[str] = None) -> Optional[s
             try:
                 root.withdraw()
                 root.focus_force()
-                root.attributes("-topmost", True)
+                root.attributes(topmost=True)
                 selected = filedialog.askdirectory(
                     initialdir=initial_dir or os.path.expanduser("~"),
                     title="Select Download Destination",

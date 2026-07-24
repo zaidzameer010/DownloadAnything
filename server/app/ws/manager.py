@@ -1,8 +1,11 @@
 import asyncio
 import threading
 from typing import Dict
+import orjson
 from fastapi import WebSocket, WebSocketDisconnect
-from app.utils.logger import logger
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class ConnectionManager:
@@ -66,11 +69,12 @@ class ConnectionManager:
             send_lock = self._send_locks.get(tab_id)
         if websocket:
             try:
+                payload = orjson.dumps(message).decode()
                 if send_lock is None:
-                    await websocket.send_json(message)
+                    await websocket.send_text(payload)
                 else:
                     async with send_lock:
-                        await websocket.send_json(message)
+                        await websocket.send_text(payload)
             except Exception as error:
                 logger.error(f"Failed to send message to tab {tab_id}: {error}")
                 if self._is_dead_socket_error(error):
@@ -81,14 +85,16 @@ class ConnectionManager:
             targets = list(self.active_connections.items())
             send_locks = {tab_id: self._send_locks.get(tab_id) for tab_id, _ in targets}
 
+        payload = orjson.dumps(message).decode()
+
         async def _send(tab_id: int, websocket: WebSocket) -> None:
             try:
                 send_lock = send_locks.get(tab_id)
                 if send_lock is None:
-                    await websocket.send_json(message)
+                    await websocket.send_text(payload)
                 else:
                     async with send_lock:
-                        await websocket.send_json(message)
+                        await websocket.send_text(payload)
             except Exception as error:
                 logger.error(f"Failed to broadcast to tab {tab_id}: {error}")
                 if self._is_dead_socket_error(error):

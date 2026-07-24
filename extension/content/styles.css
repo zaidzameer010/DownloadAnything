@@ -28,6 +28,7 @@
 	--radius-lg: 8px;
 	--radius-md: 6px;
 	--radius-sm: 4px;
+	--transition-smooth: background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
@@ -201,7 +202,16 @@
 	padding: 4px;
 	border-radius: var(--radius-sm);
 	display: flex;
-	transition: all 0.2s ease;
+	align-items: center;
+	justify-content: center;
+	transition:
+		color 0.2s ease,
+		background-color 0.2s ease,
+		transform 0.2s ease;
+}
+
+.close-btn:active {
+	transform: scale(0.96);
 }
 
 .close-btn:hover {
@@ -305,6 +315,12 @@
 	background: rgba(245, 158, 11, 0.06);
 	border-color: rgba(245, 158, 11, 0.15);
 	color: #f59e0b; /* Amber */
+}
+
+.meta-badge-chip.engine.browser {
+	background: rgba(168, 85, 247, 0.06);
+	border-color: rgba(168, 85, 247, 0.15);
+	color: #c084fc; /* Violet */
 }
 
 /* Vertical Stream List Layout (Premium Grid Table) */
@@ -414,12 +430,18 @@
 	padding: 12px;
 }
 
-.output-row label {
+.output-row label,
+.section-label {
 	font-size: 9px;
 	font-weight: 700;
 	color: var(--text-muted);
 	text-transform: uppercase;
 	letter-spacing: 0.05em;
+}
+
+.section-label {
+	font-size: 10px;
+	margin-bottom: 6px;
 }
 
 .category-select {
@@ -433,7 +455,9 @@
 	outline: none;
 	cursor: pointer;
 	width: 100%;
-	transition: all 0.2s ease;
+	transition:
+		border-color 0.2s ease,
+		box-shadow 0.2s ease;
 }
 
 .category-select:focus {
@@ -570,7 +594,16 @@
 	background: rgba(255, 255, 255, 0.02);
 	color: var(--text-secondary);
 	font-family: inherit;
-	transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+	transition:
+		background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+		border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+		color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+		transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+		box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.footer-btn:active {
+	transform: scale(0.96);
 }
 
 .footer-btn.cancel {
@@ -599,7 +632,7 @@
 }
 
 .footer-btn.download:active:not(:disabled) {
-	transform: translateY(0);
+	transform: translateY(0) scale(0.96);
 }
 
 .footer-btn.download:disabled {

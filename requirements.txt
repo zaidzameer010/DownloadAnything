@@ -6,8 +6,8 @@ pydantic
 pydantic-settings
 pyinstaller
 orjson
-uvloop; sys_platform != 'win32'
 aiohttp
 m3u8
 libtorrent
 send2trash
+structlog

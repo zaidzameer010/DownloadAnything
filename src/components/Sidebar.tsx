@@ -22,6 +22,7 @@ export function Sidebar({ downloader }: SidebarProps) {
 				<nav className="sidebar-section">
 					<h2 className="sidebar-title">Downloads</h2>
 					<button
+						type="button"
 						className={`tab-btn ${activeTab === "downloads" ? "active" : ""}`}
 						onClick={() => setActiveTab("downloads")}
 					>
@@ -29,10 +30,9 @@ export function Sidebar({ downloader }: SidebarProps) {
 						<span>Dashboard</span>
 					</button>
 
-					<h2 className="sidebar-title" style={{ marginTop: "16px" }}>
-						Configuration
-					</h2>
+					<h2 className="sidebar-title">Configuration</h2>
 					<button
+						type="button"
 						className={`tab-btn ${activeTab === "settings" ? "active" : ""}`}
 						onClick={() => {
 							setActiveTab("settings");

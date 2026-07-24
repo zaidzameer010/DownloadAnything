@@ -1,8 +1,11 @@
-import json
+import logging
+import orjson
 import os
 import sys
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -17,7 +20,9 @@ class Settings(BaseSettings):
     # Defaults to the user's Downloads directory
     DEFAULT_OUTPUT_DIR: str = str(Path.home() / "Downloads")
 
+    # Valid values: DEBUG, INFO, WARNING, ERROR, CRITICAL
     LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = "auto"  # "auto" | "json" | "text"
 
 
 settings = Settings()
@@ -51,15 +56,15 @@ def get_config_file_path(filename: str) -> Path:
                 import shutil
 
                 shutil.copy2(old_path, new_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(f"Failed to migrate {old_path} to {new_path}: {exc}")
     return new_path
 
 
 def write_json_atomic(path: Path, payload: object) -> None:
     tmp_path = path.with_name(f"{path.name}.tmp")
-    with open(tmp_path, "w") as file:
-        json.dump(payload, file, indent=2)
+    with open(tmp_path, "wb") as file:
+        file.write(orjson.dumps(payload, option=orjson.OPT_INDENT_2))
         file.flush()
         os.fsync(file.fileno())
     tmp_path.replace(path)
@@ -77,10 +82,8 @@ def get_app_version() -> str:
             Path(__file__).resolve().parent.parent.parent / "package.json"
         )
         if package_json_path.exists():
-            import json
-
             with open(package_json_path, "r") as f:
-                version = json.load(f).get("version")
+                version = orjson.loads(f.read()).get("version")
                 if version:
                     return version
     except Exception:

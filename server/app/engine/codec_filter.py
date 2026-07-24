@@ -1,9 +1,15 @@
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Set, Tuple, cast
+
+from app.engine.file_types import ENGINE_TORRENT, is_direct_download_type
 from app.schemas.formats import FormatSummary
-from app.utils.logger import logger
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
-def get_vcodec_family(vcodec: Optional[str]) -> str:
+
+def get_video_codec_family(vcodec: Optional[str]) -> str:
     if not vcodec or vcodec.lower() == "none":
         return "none"
     vcodec = vcodec.lower()
@@ -27,7 +33,7 @@ def get_vcodec_family(vcodec: Optional[str]) -> str:
     return "other"
 
 
-def get_acodec_pref(acodec: Optional[str]) -> int:
+def get_audio_codec_preference(acodec: Optional[str]) -> int:
     if not acodec or acodec.lower() == "none":
         return -1
     acodec = acodec.lower()
@@ -40,7 +46,17 @@ def get_acodec_pref(acodec: Optional[str]) -> int:
     return 1
 
 
-def format_size(bytes_val: Optional[float]) -> str:
+def _audio_rank(fmt: Dict[str, Any]) -> Tuple[int, int, int, int]:
+    """Unified audio quality/language ranking key for sorting."""
+    return (
+        get_audio_language_preference(fmt),
+        get_audio_codec_preference(fmt.get("acodec")),
+        fmt.get("abr") or fmt.get("tbr") or 0,
+        fmt.get("filesize") or fmt.get("filesize_approx") or 0,
+    )
+
+
+def format_file_size(bytes_val: Optional[float]) -> str:
     if not bytes_val:
         return "Unknown size"
     for unit in ["B", "KB", "MB", "GB", "TB"]:
@@ -50,7 +66,7 @@ def format_size(bytes_val: Optional[float]) -> str:
     return f"{bytes_val:.1f} PB"
 
 
-def is_original_audio(fmt: Dict[str, Any]) -> bool:
+def has_original_audio(fmt: Dict[str, Any]) -> bool:
     """
     Returns True if the format is the original audio track, False if it is a translated/dubbed track.
     yt-dlp sets language_preference to negative values (typically -1) for translation dubs on YouTube.
@@ -87,7 +103,7 @@ def is_stream_format(fmt: Dict[str, Any]) -> bool:
     return any(p in protocol for p in ["m3u8", "dash", "http_dash_segments", "hls"])
 
 
-def get_stream_type(fmt: Dict[str, Any]) -> Optional[str]:
+def get_stream_protocol(fmt: Dict[str, Any]) -> Optional[str]:
     protocol = (fmt.get("protocol") or "").lower()
     if "m3u8" in protocol or "hls" in protocol:
         return "hls"
@@ -117,32 +133,30 @@ def get_safe_fps(fmt: Dict[str, Any]) -> int:
 
 
 def _summarize_audio_formats(
-    audio_only: List[Dict[str, Any]], duration: Optional[float] = None
+    audio_only: List[Dict[str, Any]],
+    duration: Optional[float] = None,
+    preferred_ext: Optional[str] = None,
 ) -> List[FormatSummary]:
     if not audio_only:
         return []
 
     # Filter to keep only original audio tracks
-    original_audio = [f for f in audio_only if is_original_audio(f)]
+    original_audio = [f for f in audio_only if has_original_audio(f)]
     if not original_audio:
         original_audio = audio_only
 
     audio_only_sorted = sorted(
         original_audio,
-        key=lambda x: (
-            get_audio_language_preference(x),
-            get_acodec_pref(x.get("acodec")),
-            x.get("abr") or x.get("tbr") or 0,
-            x.get("filesize") or x.get("filesize_approx") or 0,
-        ),
+        key=_audio_rank,
         reverse=True,
     )
 
-    summaries = []
+    summaries: List[FormatSummary] = []
+    clean_pref = (preferred_ext or "").strip().lstrip(".").lower()
     for f in audio_only_sorted:
         fid = f["format_id"]
         acodec = f.get("acodec", "audio")
-        ext = f.get("ext", "webm")
+        ext = f.get("ext") or clean_pref
         abr = f.get("abr") or f.get("tbr") or 0
 
         size = f.get("filesize") or f.get("filesize_approx")
@@ -150,10 +164,10 @@ def _summarize_audio_formats(
             size = int(abr * 1000 * duration / 8)
 
         is_stream = is_stream_format(f)
-        stream_type = get_stream_type(f)
+        stream_type = get_stream_protocol(f)
         stream_suffix = f" · {stream_type.upper()}" if stream_type else ""
 
-        size_str = format_size(size) if size else "Unknown size"
+        size_str = format_file_size(size) if size else "Unknown size"
         label = (
             f"Audio ({acodec}) · {int(abr)} kbps · ~{size_str}{stream_suffix}"
             if abr
@@ -164,6 +178,7 @@ def _summarize_audio_formats(
             FormatSummary(
                 label=label,
                 height=0,
+                width=0,
                 fps=0,
                 codecFamily=acodec,
                 ext=ext,
@@ -182,7 +197,9 @@ def _summarize_audio_formats(
 
 
 def filter_and_summarize_formats(
-    formats: List[Dict[str, Any]], duration: Optional[float] = None
+    formats: List[Dict[str, Any]],
+    duration: Optional[float] = None,
+    preferred_ext: Optional[str] = None,
 ) -> List[FormatSummary]:
     if not formats:
         return []
@@ -216,9 +233,9 @@ def filter_and_summarize_formats(
 
     # 2. Determine dominant family across all video-bearing formats
     video_bearing = video_only + combined
-    families_present = set()
+    families_present: Set[str] = set()
     for f in video_bearing:
-        families_present.add(get_vcodec_family(f.get("vcodec")))
+        families_present.add(get_video_codec_family(f.get("vcodec")))
 
     dominant_family = "none"
     if "av1" in families_present:
@@ -236,53 +253,60 @@ def filter_and_summarize_formats(
 
     # If media is audio-only
     if not video_bearing:
-        return _summarize_audio_formats(audio_only, duration)
+        return _summarize_audio_formats(audio_only, duration, preferred_ext)
 
-    audio_summaries = _summarize_audio_formats(audio_only, duration)
+    audio_summaries = _summarize_audio_formats(audio_only, duration, preferred_ext)
 
     # Filter video-bearing formats to keep only the dominant/priority family
     # (av1 -> vp9 -> avc -> hevc -> other) and exclude other codecs.
     filtered_video = [
         f
         for f in video_bearing
-        if get_vcodec_family(f.get("vcodec")) == dominant_family
-        or get_vcodec_family(f.get("vcodec")) == "none"
+        if get_video_codec_family(f.get("vcodec")) == dominant_family
+        or get_video_codec_family(f.get("vcodec")) == "none"
     ]
 
     # Find the best audio stream to pair with video-only streams
     best_audio = None
     if audio_only:
         # Filter to keep only original audio tracks
-        original_audio = [f for f in audio_only if is_original_audio(f)]
+        original_audio = [f for f in audio_only if has_original_audio(f)]
         if not original_audio:
             original_audio = audio_only
 
         # Sort audio-only descending by quality/language preference
         audio_only_sorted = sorted(
             original_audio,
-            key=lambda x: (
-                get_audio_language_preference(x),
-                get_acodec_pref(x.get("acodec")),
-                x.get("abr") or x.get("tbr") or 0,
-                x.get("filesize") or x.get("filesize_approx") or 0,
-            ),
+            key=_audio_rank,
             reverse=True,
         )
         best_audio = audio_only_sorted[0]
 
     # Preserve meaningful variants instead of collapsing everything at one height.
-    buckets: Dict[tuple[int, str, int, str], List[Dict[str, Any]]] = {}
+    # Include width in the key so manifests that report width but not height
+    # (e.g. HLS variants with "426x?" resolution) do not collapse.
+    buckets: Dict[tuple[int, int, str, int, str], List[Dict[str, Any]]] = {}
     for f in filtered_video:
         height = f.get("height") or 0
-        family = get_vcodec_family(f.get("vcodec"))
+        width = f.get("width") or 0
+        family = get_video_codec_family(f.get("vcodec"))
+        # HLS/DASH manifests often omit vcodec. Assume they match the dominant codec
+        # family so they collapse with progressive variants of the same resolution
+        # instead of appearing as duplicate "VIDEO" entries without filesize.
+        if family == "none" and is_stream_format(f) and dominant_family != "none":
+            family = dominant_family
         dynamic_range = get_dynamic_range(f) or "SDR"
-        bucket_key = (height, family, get_safe_fps(f), dynamic_range)
+        # Only differentiate by width when height is missing; otherwise width
+        # differences split HLS manifests from progressive files that share the
+        # same resolution.
+        bucket_width = width if height == 0 else 0
+        bucket_key = (height, bucket_width, family, get_safe_fps(f), dynamic_range)
         buckets.setdefault(bucket_key, []).append(f)
 
-    summaries = []
+    summaries: List[FormatSummary] = []
 
     # 4. For each bucket, pick the single best format
-    for (height, bucket_family, bucket_fps, bucket_dynamic_range), formats_in_bucket in buckets.items():
+    for (height, bucket_width, bucket_family, bucket_fps, bucket_dynamic_range), formats_in_bucket in buckets.items():
         # Separate video-only and combined in the bucket
         bucket_video_only = [f for f in formats_in_bucket if f in video_only]
         bucket_combined = [f for f in formats_in_bucket if f in combined]
@@ -368,12 +392,12 @@ def filter_and_summarize_formats(
         is_stream = is_stream_format(chosen_format) or (
             audio_pair is not None and is_stream_format(audio_pair)
         )
-        stream_type = get_stream_type(chosen_format)
+        stream_type = get_stream_protocol(chosen_format)
         if stream_type is None and audio_pair is not None:
-            stream_type = get_stream_type(audio_pair)
+            stream_type = get_stream_protocol(audio_pair)
         stream_suffix = f" · {stream_type.upper()}" if stream_type else ""
 
-        size_str = f" · ~{format_size(size)}" if size else ""
+        size_str = f" · ~{format_file_size(size)}" if size else ""
 
         # Flags: HDR, etc.
         dynamic_range = get_dynamic_range(chosen_format)
@@ -381,18 +405,30 @@ def filter_and_summarize_formats(
         hdr_str = f" · {dynamic_range}" if hdr else ""
 
         codec_family_label = "VIDEO" if bucket_family == "none" else bucket_family.upper()
-        ext = (
-            chosen_format.get("ext", "mp4") if is_combined_format else "mkv"
-        )  # paired usually merges to mkv
+        # Respect the UI output-format preference; fall back to the source ext.
+        clean_pref = (preferred_ext or "").strip().lstrip(".").lower()
+        if clean_pref and re.fullmatch(r"[a-z0-9]{1,8}", clean_pref):
+            ext = clean_pref
+        else:
+            ext = chosen_format.get("ext") or clean_pref
 
+        # Some HLS/DASH manifests report width without height (e.g. "426x?").
+        # Use width as the display dimension when height is missing.
+        if height > 0:
+            dim_label = f"{height}p{fps}"
+        elif bucket_width > 0:
+            dim_label = f"{bucket_width}w{fps}"
+        else:
+            dim_label = f"{fps}fps"
         label = (
-            f"{height}p{fps} · {codec_family_label}{hdr_str}{size_str}{stream_suffix}"
+            f"{dim_label} · {codec_family_label}{hdr_str}{size_str}{stream_suffix}"
         )
 
         summaries.append(
             FormatSummary(
                 label=label,
-                height=height,
+                height=chosen_format.get("height") or 0,
+                width=chosen_format.get("width") or 0,
                 fps=fps,
                 codecFamily=bucket_family,
                 ext=ext,
@@ -428,15 +464,48 @@ def filter_and_summarize_formats(
                 or None,
                 dynamicRange=dynamic_range,
                 compatibility=(
-                    "compatible"
-                    if bucket_family == "avc" and ext in {"mp4", "m4v"}
-                    else "advanced"
+                    "compatible" if bucket_family == "avc" else "advanced"
                 ),
             )
         )
-    # Sort final summaries descending by height
+    # Sort final summaries descending by height, then width, then quality traits
     summaries.sort(
-        key=lambda x: (x.height, x.compatibility == "compatible", x.fps, x.hdr),
+        key=lambda x: (x.height, x.width, x.compatibility == "compatible", x.fps, x.hdr),
         reverse=True,
     )
     return summaries + audio_summaries
+
+
+def process_probe_formats(
+    info: Dict[str, Any],
+    preferred_ext: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Normalize probe-result formats for service responses and format-id selection."""
+    formats_val = info.get("formats", [])
+    media_type = info.get("mediaType", "ytdlp")
+
+    if is_direct_download_type(media_type) and isinstance(formats_val, list):
+        formats_json: List[Dict[str, Any]] = [
+            fmt if isinstance(fmt, dict) else cast(FormatSummary, fmt).model_dump()
+            for fmt in formats_val
+        ]
+    elif media_type in {ENGINE_TORRENT, "torrent"}:
+        formats_json = []
+    else:
+        formats_list_arg = (
+            cast(List[Dict[str, object]], formats_val)
+            if isinstance(formats_val, list)
+            else []
+        )
+        duration_arg = cast(Optional[float], info.get("duration"))
+        formats_json = [
+            f.model_dump()
+            for f in filter_and_summarize_formats(
+                formats_list_arg, duration_arg, preferred_ext=preferred_ext
+            )
+        ]
+
+    format_ids = [
+        str(fmt.get("formatId")) for fmt in formats_json if fmt.get("formatId")
+    ]
+    return formats_json, format_ids

@@ -1,4 +1,12 @@
-import { FileX, FolderOpen, Info, Pause, Play, Trash2 } from "lucide-react";
+import {
+	FileX,
+	FolderOpen,
+	Info,
+	Link,
+	Pause,
+	Play,
+	Trash2,
+} from "lucide-react";
 import type { UseDownloaderReturn } from "../hooks/useDownloader";
 
 interface ContextMenuProps {
@@ -16,6 +24,7 @@ export function ContextMenu({ downloader }: ContextMenuProps) {
 		handleRevealFile,
 		handleDeleteFile,
 		setPropertiesJobId,
+		setUrlRefreshJobId,
 	} = downloader;
 
 	if (!contextMenu) return null;
@@ -23,9 +32,11 @@ export function ContextMenu({ downloader }: ContextMenuProps) {
 	const job = jobs[contextMenu.jobId];
 	if (!job) return null;
 
-	const isActive = ["downloading", "queued", "postprocessing"].includes(
+	const isRunning = ["downloading", "queued", "postprocessing"].includes(
 		job.status,
 	);
+	const isOngoing = isRunning || job.status === "seeding";
+	const canResume = job.status === "paused" || job.status === "failed";
 	const isMac = navigator.userAgent.toLowerCase().includes("mac");
 	const revealLabel = isMac ? "Reveal in Finder" : "Reveal in Explorer";
 
@@ -35,7 +46,7 @@ export function ContextMenu({ downloader }: ContextMenuProps) {
 			style={{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }}
 			onClick={(e) => e.stopPropagation()}
 		>
-			{isActive && (
+			{isOngoing && (
 				<div
 					className="context-menu-item"
 					onClick={() => {
@@ -47,7 +58,7 @@ export function ContextMenu({ downloader }: ContextMenuProps) {
 					<span>Pause Task</span>
 				</div>
 			)}
-			{job.status === "paused" && (
+			{canResume && (
 				<div
 					className="context-menu-item"
 					onClick={() => {
@@ -59,7 +70,19 @@ export function ContextMenu({ downloader }: ContextMenuProps) {
 					<span>Resume Task</span>
 				</div>
 			)}
-			{!isActive && (
+			{job.status === "failed" && job.error_category === "expired_url" && (
+				<div
+					className="context-menu-item"
+					onClick={() => {
+						setUrlRefreshJobId(job.job_id);
+						setContextMenu(null);
+					}}
+				>
+					<Link size={14} />
+					<span>Refresh expired link</span>
+				</div>
+			)}
+			{!isRunning && (
 				<div
 					className="context-menu-item"
 					onClick={() => {
@@ -71,7 +94,7 @@ export function ContextMenu({ downloader }: ContextMenuProps) {
 					<span>Remove from List</span>
 				</div>
 			)}
-			{job.status === "completed" && job.file_path && (
+			{job.file_path && (
 				<div
 					className="context-menu-item"
 					onClick={() => {

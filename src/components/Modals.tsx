@@ -79,10 +79,14 @@ export function Modals({ downloader }: ModalsProps) {
 		isLoadingBrowsers,
 		handleInstallForBrowser,
 		selectedFormatId,
+		urlRefreshJobId,
+		setUrlRefreshJobId,
 	} = downloader;
 
 	const confirmJob = deleteFileConfirm ? jobs[deleteFileConfirm] : null;
 	const isTorrent = confirmJob?.media_type === "torrent";
+
+	const urlRefreshJob = urlRefreshJobId ? jobs[urlRefreshJobId] : null;
 
 	return (
 		<>
@@ -578,6 +582,71 @@ export function Modals({ downloader }: ModalsProps) {
 						</div>
 					)}
 				</div>
+			</Modal>
+
+			<Modal
+				isOpen={!!urlRefreshJobId}
+				title="Download link expired"
+				onClose={() => setUrlRefreshJobId(null)}
+				size="md"
+				footer={
+					<button
+						type="button"
+						className="action-btn-secondary"
+						onClick={() => setUrlRefreshJobId(null)}
+					>
+						Cancel
+					</button>
+				}
+			>
+				{urlRefreshJob ? (
+					<div
+						style={{
+							display: "flex",
+							flexDirection: "column",
+							gap: "14px",
+						}}
+					>
+						<p
+							style={{
+								fontSize: "13px",
+								color: "var(--text-secondary)",
+								lineHeight: 1.5,
+							}}
+						>
+							The download link for{" "}
+							<strong>{urlRefreshJob.title || "this task"}</strong> has expired.
+							Return to the source page in your browser and start the download
+							again. The extension will capture the new link and resume this
+							task automatically.
+						</p>
+						{urlRefreshJob.page_url && (
+							<a
+								href={urlRefreshJob.page_url}
+								target="_blank"
+								rel="noopener noreferrer"
+								style={{
+									fontSize: "12px",
+									color: "var(--accent)",
+									wordBreak: "break-all",
+									fontFamily: "monospace",
+								}}
+							>
+								{urlRefreshJob.page_url}
+							</a>
+						)}
+						<p
+							style={{
+								fontSize: "12px",
+								color: "var(--text-muted)",
+							}}
+						>
+							Listening for a new download URL from the extension...
+						</p>
+					</div>
+				) : (
+					<p>Task not found.</p>
+				)}
 			</Modal>
 		</>
 	);

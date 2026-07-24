@@ -7,30 +7,12 @@ use tauri_plugin_updater::UpdaterExt;
 #[cfg(not(debug_assertions))]
 struct BackendChild(std::sync::Mutex<std::process::Child>);
 
-#[tauri::command]
-fn open_browser_extension_folder(app: tauri::AppHandle) -> Result<(), String> {
-  let extension_path = app
-    .path()
-    .resolve("browser-extension", BaseDirectory::Resource)
-    .map_err(|err| err.to_string())?;
-  let extension_path = extension_path.to_string_lossy().to_string();
-  let command = if cfg!(target_os = "macos") {
-    std::process::Command::new("open").arg(&extension_path).spawn()
-  } else {
-    std::process::Command::new("explorer").arg(&extension_path).spawn()
-  };
-  command.map_err(|err| err.to_string())?;
-  Ok(())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
-    .plugin(tauri_plugin_shell::init())
     .plugin(tauri_plugin_updater::Builder::new().build())
     .plugin(tauri_plugin_dialog::init())
     .invoke_handler(tauri::generate_handler![
-      open_browser_extension_folder,
       detect_installed_browsers,
       install_extension_for_browser
     ])
@@ -140,7 +122,7 @@ pub fn run() {
         }
       }
 
-      // Spawn background auto-updater task
+      // Spawn background auto-updater task (non-blocking dialogs)
       let handle = app.handle().clone();
       tauri::async_runtime::spawn(async move {
         log::info!("Checking for updates...");
@@ -154,12 +136,16 @@ pub fn run() {
                     "A new version ({}) is available. Would you like to download and install it now?",
                     update.version
                 );
-                let confirmed = handle.dialog()
+                let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+                handle.dialog()
                     .message(&message)
                     .title("Update Available")
                     .kind(tauri_plugin_dialog::MessageDialogKind::Info)
                     .buttons(tauri_plugin_dialog::MessageDialogButtons::YesNo)
-                    .blocking_show();
+                    .show(move |confirmed| {
+                      let _ = tx.send(confirmed);
+                    });
+                let confirmed = rx.await.unwrap_or(false);
 
                 if confirmed {
                     log::info!("User confirmed update. Downloading and installing...");
@@ -171,18 +157,22 @@ pub fn run() {
                       log::info!("Update downloaded, installing...");
                     }).await {
                       log::error!("Failed to download and install update: {:?}", e);
-                      let _ = handle.dialog()
-                          .message(&format!("Failed to install update: {:?}", e))
+                      let (txe, rxe) = tokio::sync::oneshot::channel::<bool>();
+                      handle.dialog()
+                          .message(format!("Failed to install update: {:?}", e))
                           .title("Update Error")
                           .kind(tauri_plugin_dialog::MessageDialogKind::Error)
-                          .blocking_show();
+                          .show(move |_| { let _ = txe.send(true); });
+                      let _ = rxe.await;
                     } else {
                       log::info!("Update successfully installed! Relaunching app...");
-                      let _ = handle.dialog()
+                      let (txs, rxs) = tokio::sync::oneshot::channel::<bool>();
+                      handle.dialog()
                           .message("Update installed successfully. The application will now restart.")
                           .title("Update Success")
                           .kind(tauri_plugin_dialog::MessageDialogKind::Info)
-                          .blocking_show();
+                          .show(move |_| { let _ = txs.send(true); });
+                      let _ = rxs.await;
                       handle.restart();
                     }
                 }
@@ -210,6 +200,37 @@ pub fn run() {
                 use tauri_plugin_dialog::DialogExt;
                 use tauri_plugin_updater::UpdaterExt;
 
+                async fn ask_yes_no(handle: &tauri::AppHandle, title: &str, message: &str) -> bool {
+                    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+                    handle.dialog()
+                        .message(message)
+                        .title(title)
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                        .buttons(tauri_plugin_dialog::MessageDialogButtons::YesNo)
+                        .show(move |confirmed| { let _ = tx.send(confirmed); });
+                    rx.await.unwrap_or(false)
+                }
+
+                async fn show_info(handle: &tauri::AppHandle, title: &str, message: &str) {
+                    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+                    handle.dialog()
+                        .message(message)
+                        .title(title)
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                        .show(move |_| { let _ = tx.send(true); });
+                    let _ = rx.await;
+                }
+
+                async fn show_error(handle: &tauri::AppHandle, title: &str, message: &str) {
+                    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+                    handle.dialog()
+                        .message(message)
+                        .title(title)
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                        .show(move |_| { let _ = tx.send(true); });
+                    let _ = rx.await;
+                }
+
                 match handle.updater() {
                     Ok(updater) => {
                         match updater.check().await {
@@ -218,52 +239,27 @@ pub fn run() {
                                     "A new version ({}) is available. Would you like to download and install it now?",
                                     update.version
                                 );
-                                let confirmed = handle.dialog()
-                                    .message(&message)
-                                    .title("Update Available")
-                                    .kind(tauri_plugin_dialog::MessageDialogKind::Info)
-                                    .buttons(tauri_plugin_dialog::MessageDialogButtons::YesNo)
-                                    .blocking_show();
+                                let confirmed = ask_yes_no(&handle, "Update Available", &message).await;
 
                                 if confirmed {
                                     if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
-                                        let _ = handle.dialog()
-                                            .message(&format!("Failed to install update: {:?}", e))
-                                            .title("Update Error")
-                                            .kind(tauri_plugin_dialog::MessageDialogKind::Error)
-                                            .blocking_show();
+                                        show_error(&handle, "Update Error", &format!("Failed to install update: {:?}", e)).await;
                                     } else {
-                                        let _ = handle.dialog()
-                                            .message("Update installed successfully. The application will now restart.")
-                                            .title("Update Success")
-                                            .kind(tauri_plugin_dialog::MessageDialogKind::Info)
-                                            .blocking_show();
-                                        let _ = handle.restart();
+                                        show_info(&handle, "Update Success", "Update installed successfully. The application will now restart.").await;
+                                        handle.restart();
                                     }
                                 }
                             }
                             Ok(None) => {
-                                let _ = handle.dialog()
-                                    .message("You are already running the latest version.")
-                                    .title("No Updates Available")
-                                    .kind(tauri_plugin_dialog::MessageDialogKind::Info)
-                                    .blocking_show();
+                                show_info(&handle, "No Updates Available", "You are already running the latest version.").await;
                             }
                             Err(e) => {
-                                let _ = handle.dialog()
-                                    .message(&format!("Failed to check for updates: {:?}", e))
-                                    .title("Update Error")
-                                    .kind(tauri_plugin_dialog::MessageDialogKind::Error)
-                                    .blocking_show();
+                                show_error(&handle, "Update Error", &format!("Failed to check for updates: {:?}", e)).await;
                             }
                         }
                     }
                     Err(e) => {
-                        let _ = handle.dialog()
-                            .message(&format!("Failed to retrieve updater instance: {:?}", e))
-                            .title("Update Error")
-                            .kind(tauri_plugin_dialog::MessageDialogKind::Error)
-                            .blocking_show();
+                        show_error(&handle, "Update Error", &format!("Failed to retrieve updater instance: {:?}", e)).await;
                     }
                 }
             });
@@ -276,7 +272,38 @@ pub fn run() {
             #[cfg(not(debug_assertions))]
             if let Some(child_state) = _app_handle.try_state::<BackendChild>() {
                 if let Ok(mut child) = child_state.0.lock() {
-                    let _ = child.kill();
+                    // Graceful stop: try SIGTERM on Unix, wait briefly, then SIGKILL.
+                    #[cfg(unix)]
+                    {
+                        let pid = child.id();
+                        if pid != 0 {
+                            unsafe {
+                                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                            }
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = child.kill();
+                    }
+                    match child.try_wait() {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            // Wait up to ~2s for exit.
+                            for _ in 0..20 {
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                                if let Ok(Some(_)) = child.try_wait() {
+                                    break;
+                                }
+                            }
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        Err(_) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                    }
                 }
             }
         }

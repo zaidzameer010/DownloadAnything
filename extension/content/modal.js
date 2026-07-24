@@ -1,8 +1,8 @@
 (() => {
+	const logger = window.__DMA_LOGGER__;
+
 	if (window.DownloadAnythingModalInjected) return;
 	window.DownloadAnythingModalInjected = true;
-
-	console.log("DownloadAnything Modal Injected.");
 
 	const escapeHtml = (s) =>
 		String(s == null ? "" : s).replace(
@@ -53,12 +53,49 @@
 		return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 	};
 
-	const getEngineBadge = (mediaType) => {
+	const getEngineBadge = (mediaType, fileType) => {
+		// Prefer high-level file type labels when present (video/audio/installer/…).
+		if (fileType) {
+			const labels = {
+				video: "Video",
+				audio: "Audio",
+				image: "Image",
+				document: "Document",
+				archive: "Archive",
+				installer: "Installer",
+				font: "Font",
+				text: "Text",
+				stream: "Stream",
+				torrent: "Torrent",
+				other: "File",
+			};
+			const cls =
+				fileType === "stream"
+					? "stream"
+					: fileType === "torrent"
+						? "torrent"
+						: "file";
+			return { label: labels[fileType] || "File", cls };
+		}
 		switch (mediaType) {
 			case "stream":
 				return { label: "Stream", cls: "stream" };
+			case "file":
+			case "direct":
+			case "video":
+			case "audio":
+			case "image":
+			case "document":
+			case "archive":
+			case "installer":
+			case "font":
+			case "text":
+			case "other":
+				return { label: "Direct", cls: "file" };
 			case "torrent":
 				return { label: "Torrent", cls: "torrent" };
+			case "ytdlp":
+				return { label: "yt-dlp", cls: "ytdlp" };
 			default:
 				return { label: "yt-dlp", cls: "ytdlp" };
 		}
@@ -82,6 +119,60 @@
 		return `${prefix}_${Date.now().toString(36)}`;
 	};
 
+	const MSG = window.DownloadAnythingMessaging;
+
+	function isExtensionContextValid() {
+		return MSG.isExtensionContextValid();
+	}
+
+	function safeSendMessage(message, callback) {
+		MSG.safeSendMessage("Modal", message, callback);
+	}
+
+	function safeGetURL(path) {
+		if (!isExtensionContextValid()) return "";
+		try {
+			return chrome.runtime.getURL(path);
+		} catch {
+			return "";
+		}
+	}
+
+	function safeStorageLocalGet(keys, callback) {
+		if (
+			!isExtensionContextValid() ||
+			!chrome.storage ||
+			!chrome.storage.local
+		) {
+			if (typeof callback === "function") callback({});
+			return;
+		}
+		try {
+			chrome.storage.local.get(keys, (res) => {
+				if (chrome.runtime.lastError) {
+					logger.warn(
+						"[Modal] storage error:",
+						chrome.runtime.lastError.message,
+					);
+					if (typeof callback === "function") callback({});
+					return;
+				}
+				if (typeof callback === "function") callback(res || {});
+			});
+		} catch (err) {
+			logger.warn("[Modal] storage get threw:", err);
+			if (typeof callback === "function") callback({});
+		}
+	}
+
+	function _applySettings(res) {
+		if (res?.settings?.mergeFormat) {
+			userMergeFormat = res.settings.mergeFormat;
+		}
+	}
+
+	safeStorageLocalGet(["settings"], _applySettings);
+
 	let modalElement = null;
 	let shadowRoot = null;
 	let currentJobId = null;
@@ -92,16 +183,22 @@
 	const initiatedJobIds = new Set();
 
 	let currentTitle = "";
+	// Resolved basename from probe_result (title + ext). Display uses currentTitle.
+	let currentFilename = "";
 	let selectedFormatId = "";
 	let currentSniffedStreams = [];
 	let interceptedData = null;
 	let currentFormats = [];
+	let currentTorrentFiles = [];
+	// UI-selected output container; populated from storage/settings_data.
+	let userMergeFormat = "";
+	let selectedTorrentFiles = new Set();
 	let fallbackStage = "native"; // "native" | "stream" | "direct" | "done"
 	let fallbackQueue = [];
 	const fallbackUrlsTried = new Set();
 
 	// Load last output dir from storage
-	chrome.storage.local.get(["lastOutputDir"], (res) => {
+	safeStorageLocalGet(["lastOutputDir"], (res) => {
 		if (res.lastOutputDir) lastOutputDir = res.lastOutputDir;
 	});
 
@@ -116,7 +213,7 @@
 			fallbackUrlsTried.clear();
 
 			// Get sniffed streams first (just to keep our registry current)
-			chrome.runtime.sendMessage({ type: "GET_SNIFFED_STREAMS" }, (res) => {
+			safeSendMessage({ type: "GET_SNIFFED_STREAMS" }, (res) => {
 				if (!modalElement) return;
 				currentSniffedStreams = Array.isArray(res?.streams) ? res.streams : [];
 
@@ -127,7 +224,7 @@
 				currentJobId = generateJobId("job_probe");
 
 				// Start probing; pass the page title so the backend can use it as a filename hint.
-				chrome.runtime.sendMessage({
+				safeSendMessage({
 					type: "PROBE_MEDIA",
 					jobId: currentJobId,
 					url: initialUrl,
@@ -143,7 +240,17 @@
 			interceptedData = download;
 			currentJobId = generateJobId("job_intercept");
 
-			currentTitle = download.filename || "downloaded_file";
+			// Display title only — never the full path Chrome may put in item.filename.
+			// Final basename is resolved on the backend from raw hints.
+			const rawName = (download.filename || "").split(/[/\\]/).pop() || "";
+			const stem = rawName.includes(".")
+				? rawName.slice(0, rawName.lastIndexOf("."))
+				: rawName;
+			const extGuess = rawName.includes(".")
+				? rawName.slice(rawName.lastIndexOf(".") + 1)
+				: "";
+			currentTitle = stem || document.title || "downloaded_file";
+			currentFilename = "";
 			mediaUrl = download.url;
 
 			const content = shadowRoot.getElementById("modalContent");
@@ -168,12 +275,10 @@
           <img class="media-thumb" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='88' height='50' viewBox='0 0 88 50'><rect width='88' height='50' fill='%231f2937' rx='4'/><g transform='translate(32, 13)' fill='none' stroke='%23a855f7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/><polyline points='14 2 14 8 20 8'/><line x1='16' y1='13' x2='8' y2='13'/><line x1='16' y1='17' x2='8' y2='17'/><polyline points='10 9 9 9 8 9'/></g></svg>" alt="" />
           <div class="media-details">
             <div class="media-title" title="${escapeHtml(currentTitle)}">${escapeHtml(currentTitle)}</div>
-            <div class="media-meta">
-              <span>Size: ${sizeStr}</span>
-              <span>•</span>
-              <span>Type: ${escapeHtml(download.mime || "Unknown")}</span>
-              <span>•</span>
-              <span class="badge engine browser-engine" style="border-color: #a855f7; color: #a855f7;">Browser Intercept</span>
+            <div class="meta-badges-row">
+              <span class="meta-badge-chip">${sizeStr}</span>
+              <span class="meta-badge-chip">${escapeHtml(download.mime || "Unknown")}</span>
+              <span class="meta-badge-chip engine browser">Browser Intercept</span>
             </div>
           </div>
         </div>
@@ -181,14 +286,21 @@
 
 			const formatsHtml = `
         <div class="format-list">
-          <label class="format-item">
-            <input type="radio" name="videoFormat" value="best" checked>
-            <div class="format-label-group">
-              <span class="format-label">Original File (Direct Download)</span>
-              <div class="format-badges">
-                <span class="badge muxed" style="border-color: #a855f7; color: #a855f7;">direct</span>
-              </div>
+          <div class="format-list-header">
+            <div class="format-list-radio-col"></div>
+            <div class="format-list-label-col">Format</div>
+            <div class="format-list-ext-col">Ext</div>
+            <div class="format-list-size-col">Size</div>
+          </div>
+          <label class="format-list-row selected">
+            <div class="format-list-radio-col">
+              <input type="radio" name="videoFormat" value="best" data-ext="${escapeHtml(extGuess)}" checked>
             </div>
+            <div class="format-list-label-col">
+              <span class="format-list-label">Original File (Direct Download)</span>
+            </div>
+            <div class="format-list-ext-col">${escapeHtml(extGuess || "—")}</div>
+            <div class="format-list-size-col">${sizeStr}</div>
           </label>
         </div>
       `;
@@ -206,7 +318,7 @@
 
 			content.innerHTML = `
         ${mediaHtml}
-        <div style="font-size: 10px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;">Download Info</div>
+        <div class="section-label">Download Info</div>
         ${formatsHtml}
         ${outputHtml}
       `;
@@ -215,7 +327,7 @@
 			shadowRoot.getElementById("btnFooterDownload").disabled = false;
 
 			// Load categories list and populate
-			chrome.runtime.sendMessage({ type: "GET_CATEGORIES" });
+			safeSendMessage({ type: "GET_CATEGORIES" });
 		},
 
 		create() {
@@ -230,11 +342,9 @@
 			// Injected Stylesheet
 			const styleLink = document.createElement("link");
 			styleLink.rel = "stylesheet";
-			try {
-				styleLink.href = chrome.runtime.getURL("content/styles.css");
-			} catch {
-				return;
-			}
+			const styleHref = safeGetURL("content/styles.css");
+			if (!styleHref) return;
+			styleLink.href = styleHref;
 			shadowRoot.appendChild(styleLink);
 
 			// Backdrop
@@ -291,7 +401,7 @@
 			document.removeEventListener("keydown", this.handleEsc);
 
 			if (currentJobId && !initiatedJobIds.has(currentJobId)) {
-				chrome.runtime.sendMessage({
+				safeSendMessage({
 					type: "CANCEL_PROBE",
 					jobId: currentJobId,
 				});
@@ -304,6 +414,8 @@
 			}
 			currentJobId = null;
 			interceptedData = null;
+			currentTorrentFiles = [];
+			selectedTorrentFiles = new Set();
 		},
 
 		handleEsc(e) {
@@ -319,7 +431,7 @@
 			if (mediaUrl === newUrl) return;
 
 			if (currentJobId) {
-				chrome.runtime.sendMessage({
+				safeSendMessage({
 					type: "CANCEL_PROBE",
 					jobId: currentJobId,
 				});
@@ -328,7 +440,7 @@
 			currentJobId = generateJobId("job_probe");
 			mediaUrl = newUrl;
 			this.setProbingState();
-			chrome.runtime.sendMessage({
+			safeSendMessage({
 				type: "PROBE_MEDIA",
 				jobId: currentJobId,
 				url: newUrl,
@@ -397,7 +509,7 @@
 					.addEventListener("click", () => {
 						this.setProbingState();
 						currentJobId = generateJobId("job_probe");
-						chrome.runtime.sendMessage({
+						safeSendMessage({
 							type: "PROBE_MEDIA",
 							jobId: currentJobId,
 							url: mediaUrl,
@@ -424,7 +536,12 @@
 			`;
 
 			const filtered = formatsList.filter((f) => {
-				const isVideo = (f.height && f.height > 0) || f.formatId === "best";
+				const hasDimension =
+					(f.height && f.height > 0) || (f.width && f.width > 0);
+				const isVideo =
+					hasDimension ||
+					f.formatId === "best" ||
+					(f.codecFamily === "video" && !f.isStream);
 				return activeTab === "video" ? isVideo : !isVideo;
 			});
 
@@ -449,7 +566,7 @@
 								<span class="format-list-label" title="${escapeHtml(f.label || "")}">${escapeHtml(f.label || "")}</span>
 							</div>
 							<div class="format-list-ext-col">
-								<span class="format-list-ext">${escapeHtml((f.ext || "").toUpperCase())}</span>
+								<span class="format-list-ext">${escapeHtml((f.ext || "—").toUpperCase())}</span>
 							</div>
 							<div class="format-list-size-col">
 								<span class="format-list-size">${sizeStr}</span>
@@ -465,7 +582,9 @@
 		populateFormats(data) {
 			currentJobId = data.jobId;
 			currentTitle = data.title || "video";
+			currentFilename = data.filename || "";
 			currentMediaType = data.mediaType;
+			mediaUrl = data.url || mediaUrl;
 			const content = shadowRoot.getElementById("modalContent");
 			if (!content) return;
 
@@ -495,7 +614,10 @@
 								data.mediaType
 									? (
 											() => {
-												const badge = getEngineBadge(data.mediaType);
+												const badge = getEngineBadge(
+													data.mediaType,
+													data.fileType,
+												);
 												return `<span class="meta-badge-chip engine ${badge.cls}">${escapeHtml(badge.label)}</span>`;
 											}
 										)()
@@ -530,12 +652,106 @@
 			`;
 
 			if (data.mediaType === "torrent" && data.torrent) {
+				currentTorrentFiles = data.torrent.files || [];
+				selectedTorrentFiles = new Set(currentTorrentFiles.map((f) => f.index));
+
+				const totalSize = data.torrent.totalSize || 0;
+				const fileListHtml = currentTorrentFiles
+					.map(
+						(file) => `
+							<label class="torrent-file-row" for="torrent-file-${file.index}">
+								<input type="checkbox" id="torrent-file-${file.index}" class="torrent-file-checkbox" data-index="${file.index}" checked>
+								<span title="${escapeHtml(file.path)}">${escapeHtml(file.path)}</span>
+								<small>${formatBytes(file.size)}</small>
+							</label>
+						`,
+					)
+					.join("");
+
 				content.innerHTML = `
 					${mediaHtml}
 					<div class="torrent-summary">${formatBytes(data.torrent.totalSize)} · ${data.torrent.pieceCount} pieces · ${escapeHtml(data.torrent.infoHash)}</div>
+					<div style="font-size: 10px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 16px 0 6px;">Select Files to Download</div>
+					<div class="torrent-file-list" id="torrentFileList">
+						<div class="torrent-file-row" style="font-weight: 600; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 4px;">
+							<input type="checkbox" id="torrentSelectAll" checked>
+							<span>File name</span>
+							<small id="torrentSelectedSize">${formatBytes(totalSize)} / ${formatBytes(totalSize)}</small>
+						</div>
+						${fileListHtml}
+					</div>
 					${outputHtml}
 				`;
-				shadowRoot.getElementById("btnFooterDownload").disabled = false;
+				shadowRoot.getElementById("btnFooterDownload").disabled =
+					selectedTorrentFiles.size === 0;
+
+				const updateSelectedSize = () => {
+					const selectedSize = currentTorrentFiles
+						.filter((f) => selectedTorrentFiles.has(f.index))
+						.reduce((sum, f) => sum + (f.size || 0), 0);
+					const el = shadowRoot.getElementById("torrentSelectedSize");
+					if (el) {
+						el.textContent = `${formatBytes(selectedSize)} / ${formatBytes(totalSize)}`;
+					}
+				};
+
+				const updateSelectAllState = () => {
+					const selectAllEl = shadowRoot.getElementById("torrentSelectAll");
+					if (!selectAllEl) return;
+					const allSelected =
+						currentTorrentFiles.length > 0 &&
+						selectedTorrentFiles.size === currentTorrentFiles.length;
+					const someSelected = selectedTorrentFiles.size > 0 && !allSelected;
+					selectAllEl.checked = allSelected;
+					selectAllEl.indeterminate = someSelected;
+				};
+
+				const updateDownloadButton = () => {
+					const btn = shadowRoot.getElementById("btnFooterDownload");
+					if (btn) btn.disabled = selectedTorrentFiles.size === 0;
+				};
+
+				const selectAllEl = shadowRoot.getElementById("torrentSelectAll");
+				if (selectAllEl) {
+					selectAllEl.addEventListener("change", () => {
+						if (selectAllEl.checked) {
+							selectedTorrentFiles = new Set(
+								currentTorrentFiles.map((f) => f.index),
+							);
+							shadowRoot
+								.querySelectorAll(".torrent-file-checkbox")
+								.forEach((cb) => {
+									cb.checked = true;
+								});
+						} else {
+							selectedTorrentFiles = new Set();
+							shadowRoot
+								.querySelectorAll(".torrent-file-checkbox")
+								.forEach((cb) => {
+									cb.checked = false;
+								});
+						}
+						updateSelectedSize();
+						updateDownloadButton();
+					});
+				}
+
+				const fileListEl = shadowRoot.getElementById("torrentFileList");
+				if (fileListEl) {
+					fileListEl.addEventListener("change", (e) => {
+						if (
+							!e.target ||
+							!e.target.classList.contains("torrent-file-checkbox")
+						)
+							return;
+						const idx = parseInt(e.target.getAttribute("data-index"), 10);
+						if (e.target.checked) selectedTorrentFiles.add(idx);
+						else selectedTorrentFiles.delete(idx);
+						updateSelectAllState();
+						updateSelectedSize();
+						updateDownloadButton();
+					});
+				}
 
 				// Bind Torrent output events
 				const btnBrowse = shadowRoot.getElementById("btnBrowseDir");
@@ -543,7 +759,7 @@
 					btnBrowse.addEventListener("click", () => {
 						const select = shadowRoot.getElementById("selCategory");
 						const initialDir = customOutputDir || (select ? select.value : "");
-						chrome.runtime.sendMessage({
+						safeSendMessage({
 							type: "REQUEST_BROWSE",
 							initialDir: initialDir,
 						});
@@ -570,7 +786,7 @@
 					});
 				}
 
-				chrome.runtime.sendMessage({ type: "GET_CATEGORIES" });
+				safeSendMessage({ type: "GET_CATEGORIES" });
 				return;
 			}
 
@@ -580,7 +796,7 @@
 					{
 						formatId: "best",
 						label: "Best Available (Original Quality)",
-						ext: "mp4",
+						ext: userMergeFormat,
 						estSizeBytes: 0,
 					},
 				];
@@ -659,7 +875,7 @@
 				btnBrowse.addEventListener("click", () => {
 					const select = shadowRoot.getElementById("selCategory");
 					const initialDir = customOutputDir || (select ? select.value : "");
-					chrome.runtime.sendMessage({
+					safeSendMessage({
 						type: "REQUEST_BROWSE",
 						initialDir: initialDir,
 					});
@@ -690,7 +906,7 @@
 			shadowRoot.getElementById("btnFooterDownload").disabled = false;
 
 			// Load categories list and populate
-			chrome.runtime.sendMessage({ type: "GET_CATEGORIES" });
+			safeSendMessage({ type: "GET_CATEGORIES" });
 		},
 
 		startDownload() {
@@ -699,18 +915,24 @@
 			if (!currentJobId) return;
 
 			if (currentMediaType === "torrent") {
+				if (selectedTorrentFiles.size === 0) {
+					Modal.showToast("Select at least one file to download", true);
+					return;
+				}
 				const select = shadowRoot.getElementById("selCategory");
 				const outputDir =
 					customOutputDir || (select ? select.value : lastOutputDir);
 				initiatedJobIds.add(currentJobId);
-				chrome.runtime.sendMessage({
+				safeSendMessage({
 					type: "START_DOWNLOAD",
 					jobId: currentJobId,
 					formatId: "torrent",
 					outputDir,
 					conflictResolution: "replace",
+					torrentSelectedFileIndices: Array.from(selectedTorrentFiles),
 					url: mediaUrl,
 					title: currentTitle,
+					pageUrl: window.location.href,
 				});
 				Modal.showToast("Torrent download started...");
 				this.close();
@@ -732,25 +954,43 @@
 			lastOutputDir = outputDir;
 			chrome.storage.local.set({ lastOutputDir: outputDir }).catch(() => {});
 
-			// Let the backend resolve the final filename; send only the raw hints.
+			// Let the backend resolve the final filename; send only raw hints.
+			// title  = display/page title (never a full path)
+			// filename = browser's original download name (intercept path only)
+			// ext     = preferred format extension from the selected radio
 			const checkMsg = {
 				type: "CHECK_FILE_EXISTS",
 				path: outputDir,
 				jobId: currentJobId,
-				title: interceptedData ? document.title || "" : currentTitle || "",
+				title: currentTitle || document.title || "",
 				ext: ext,
 				url: interceptedData ? interceptedData.url : mediaUrl,
 				mime: interceptedData ? interceptedData.mime : null,
 			};
 			if (interceptedData && interceptedData.filename) {
+				// Raw Chrome download item.filename (may include directories).
 				checkMsg.filename = interceptedData.filename;
+			} else if (currentFilename) {
+				// Already-resolved basename from probe_result.
+				checkMsg.filename = currentFilename;
 			}
 
-			chrome.runtime.sendMessage(checkMsg);
+			safeSendMessage(checkMsg);
 		},
 
-		proceedWithDownload(jobId, formatId, outputDir, conflictResolution) {
+		proceedWithDownload(
+			jobId,
+			formatId,
+			outputDir,
+			conflictResolution,
+			resolvedFilename,
+		) {
 			initiatedJobIds.add(jobId);
+
+			const selectedFormat = currentFormats.find(
+				(f) => f.formatId === formatId,
+			);
+			const selectedUrl = selectedFormat?.url || mediaUrl;
 
 			const msg = {
 				type: "START_DOWNLOAD",
@@ -762,18 +1002,24 @@
 
 			if (interceptedData) {
 				msg.url = interceptedData.url;
-				// Let the backend resolve the title from the page title and the
-				// original filename; do not assemble the filename here.
-				msg.title = document.title || "";
-				msg.filename = interceptedData.filename;
+				// Raw hints only — backend resolve_filename is the single source of truth.
+				// Prefer the already-resolved basename from file_exists_result when present.
+				msg.title = currentTitle || document.title || "";
+				msg.filename = resolvedFilename || interceptedData.filename;
 				msg.referer = interceptedData.referrer;
 				msg.fileSize = interceptedData.fileSize;
 				msg.mime = interceptedData.mime;
 			} else {
+				// Probed path: title is the display stem from probe_result.
+				msg.url = selectedUrl;
 				msg.title = currentTitle;
+				if (resolvedFilename) {
+					msg.filename = resolvedFilename;
+				}
 			}
 
-			chrome.runtime.sendMessage(msg);
+			msg.pageUrl = window.location.href;
+			safeSendMessage(msg);
 
 			Modal.showToast("Download started...");
 			this.close();
@@ -878,7 +1124,13 @@
 					class: "cancel",
 					onClick: (closeAlert) => {
 						closeAlert();
-						this.proceedWithDownload(jobId, selectedFormatId, path, "rename");
+						this.proceedWithDownload(
+							jobId,
+							selectedFormatId,
+							path,
+							"rename",
+							filename,
+						);
 					},
 				},
 				{
@@ -886,7 +1138,13 @@
 					class: "download",
 					onClick: (closeAlert) => {
 						closeAlert();
-						this.proceedWithDownload(jobId, selectedFormatId, path, "replace");
+						this.proceedWithDownload(
+							jobId,
+							selectedFormatId,
+							path,
+							"replace",
+							filename,
+						);
 					},
 				},
 			]);
@@ -930,7 +1188,7 @@
 					shadowRoot.getElementById("btnCancelDownload").innerText =
 						"Stopping...";
 					shadowRoot.getElementById("btnCancelDownload").disabled = true;
-					chrome.runtime.sendMessage({
+					safeSendMessage({
 						type: "CANCEL_DOWNLOAD",
 						jobId: currentJobId,
 					});
@@ -1039,7 +1297,7 @@
 	};
 
 	// Listen to messages from background worker
-	chrome.runtime.onMessage.addListener((message) => {
+	chrome.runtime.onMessage?.addListener?.((message) => {
 		if (message.type === "SHOW_MODAL") {
 			Modal.show(message.url);
 			return;
@@ -1108,8 +1366,9 @@
 				break;
 			}
 			case "STREAM_SNIFFED": {
+				const identity = message.stream.key || message.stream.url;
 				const existingIndex = currentSniffedStreams.findIndex(
-					(stream) => stream.url === message.stream.url,
+					(stream) => (stream.key || stream.url) === identity,
 				);
 				message.stream.title = "Stream";
 				if (existingIndex >= 0) {
@@ -1139,6 +1398,9 @@
 				}
 				break;
 			}
+			case "settings_data":
+				_applySettings(message);
+				break;
 			case "probe_started":
 				if (message.jobId === currentJobId) {
 					Modal.setProbingState();
@@ -1152,6 +1414,14 @@
 			case "probe_failed":
 				if (message.jobId !== currentJobId) break;
 				{
+					// When the server tells us this is a dedicated yt-dlp site, do not
+					// fall back to sniffed stream/direct URLs — those are for generic pages.
+					if (message.skipFallback) {
+						fallbackStage = "done";
+						Modal.showError(message.error, message.suggestion);
+						break;
+					}
+
 					if (fallbackStage === "native") {
 						// Transition to stream stage and populate HLS/DASH candidates
 						fallbackStage = "stream";
@@ -1169,19 +1439,15 @@
 						let nextCandidate = null;
 						while (fallbackQueue.length > 0) {
 							const candidate = fallbackQueue.shift();
-							if (!fallbackUrlsTried.has(candidate.url)) {
+							if (!fallbackUrlsTried.has(candidate.key || candidate.url)) {
 								nextCandidate = candidate;
 								break;
 							}
 						}
 
 						if (nextCandidate) {
-							console.log(
-								"[Fallback] Probing failed. Trying stream extraction:",
-								nextCandidate.url,
-							);
 							Modal.showToast("Probing failed. Trying stream extraction...");
-							fallbackUrlsTried.add(nextCandidate.url);
+							fallbackUrlsTried.add(nextCandidate.key || nextCandidate.url);
 							Modal.changeSource(
 								nextCandidate.url,
 								nextCandidate.documentUrl || nextCandidate.initiator,
@@ -1205,21 +1471,17 @@
 						let nextCandidate = null;
 						while (fallbackQueue.length > 0) {
 							const candidate = fallbackQueue.shift();
-							if (!fallbackUrlsTried.has(candidate.url)) {
+							if (!fallbackUrlsTried.has(candidate.key || candidate.url)) {
 								nextCandidate = candidate;
 								break;
 							}
 						}
 
 						if (nextCandidate) {
-							console.log(
-								"[Fallback] Probing failed. Trying direct media extraction:",
-								nextCandidate.url,
-							);
 							Modal.showToast(
 								"Probing failed. Trying direct media extraction...",
 							);
-							fallbackUrlsTried.add(nextCandidate.url);
+							fallbackUrlsTried.add(nextCandidate.key || nextCandidate.url);
 							Modal.changeSource(
 								nextCandidate.url,
 								nextCandidate.documentUrl || nextCandidate.initiator,
@@ -1255,11 +1517,11 @@
 						selectedFormatId,
 						message.path,
 						"replace",
+						message.filename,
 					);
 				}
 				break;
 			case "download_queued":
-				console.log("Download queued on server path:", message.outputPath);
 				break;
 			case "download_progress":
 				if (message.jobId === currentJobId) {

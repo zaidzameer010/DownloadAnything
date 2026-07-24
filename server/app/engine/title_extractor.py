@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import html
-import json
+import orjson
 import mimetypes
 import re
-import ssl
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -16,65 +15,25 @@ from email.message import Message
 from html.parser import HTMLParser
 from typing import Any
 
-from app.utils.logger import logger, redact_url
+from app.utils.http import build_headers, create_ssl_context, is_safe_url
+from app.utils.logger import get_logger, redact_url
 
-# Known media/container extensions we strip from candidate titles.
-_MEDIA_EXTENSIONS = {
-    "mp4",
-    "m4v",
-    "mkv",
-    "webm",
-    "mov",
-    "avi",
-    "flv",
-    "wmv",
-    "mpg",
-    "mpeg",
-    "m2ts",
-    "ts",
-    "m3u8",
-    "mpd",
-    "ism",
-    "f4m",
-    "m4s",
-    "mp3",
-    "m4a",
-    "aac",
-    "wav",
-    "flac",
-    "ogg",
-    "opus",
-    "wma",
-}
+logger = get_logger(__name__)
 
-# Substrings that make a URL/path look like media rather than an HTML page.
-_MEDIA_URL_INDICATORS = (
+
+# Path tokens that strongly suggest a non-HTML resource (stream manifests etc.).
+# Used only to decide whether to fetch HTML metadata from a URL — not an allowlist.
+_NON_HTML_PATH_TOKENS = (
     "/manifest",
     ".m3u8",
     ".mpd",
     ".ism",
     ".f4m",
-    ".m4s",
-    ".ts",
-    ".mp4",
-    ".m4v",
-    ".mkv",
-    ".webm",
-    ".mov",
-    ".m4a",
-    ".mp3",
-    ".aac",
-    ".wav",
-    ".flac",
-    ".ogg",
-    ".opus",
-    ".wma",
-    ".avi",
-    ".flv",
-    ".wmv",
-    ".mpg",
-    ".mpeg",
 )
+
+# Trailing file extension pattern (2–8 alphanumerics). Used to strip any ext
+# from titles — not a curated type map.
+_TRAILING_EXT_RE = re.compile(r"\.([A-Za-z0-9]{1,8})$")
 
 _GARBAGE_TITLES = {
     "",
@@ -95,11 +54,20 @@ _GARBAGE_TITLES = {
     "playlist",
     "manifest",
     "master",
+    "loading",
+    "loader",
     "chunklist",
     "chunk",
     "segment",
     "init",
     "video_1",
+    # Common CDN/script handler names that should never become titles.
+    "remote_control",
+    "remote",
+    "control",
+    "handler",
+    "proxy",
+    "gateway",
 }
 
 # Common segment/init filenames produced by HLS/DASH packagers (e.g. index-v1-a1.m4s).
@@ -200,8 +168,8 @@ class _TitleHTMLParser(HTMLParser):
 def _extract_jsonld_name(script_text: str) -> str | None:
     """Pull a name/headline from JSON-LD, preferring video-like objects."""
     try:
-        data = json.loads(script_text)
-    except json.JSONDecodeError:
+        data = orjson.loads(script_text)
+    except orjson.JSONDecodeError:
         return None
 
     video_types = {"videoobject", "movie", "mediaobject", "tvseries", "tvepisode"}
@@ -245,28 +213,6 @@ def _extract_jsonld_name(script_text: str) -> str | None:
     return None
 
 
-def _create_ssl_context() -> ssl.SSLContext:
-    """Return a verifying SSL context with legacy-renegotiation workaround."""
-    context = ssl.create_default_context()
-    if hasattr(ssl, "OP_LEGACY_SERVER_CONNECT"):
-        context.options |= ssl.OP_LEGACY_SERVER_CONNECT
-    return context
-
-
-def _build_headers(referer: str | None, accept: str = "*/*") -> dict[str, str]:
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": accept,
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    if referer:
-        headers["Referer"] = referer
-    return headers
-
-
 def _parse_content_disposition(header: str) -> str | None:
     """Return the filename* or filename parameter from a Content-Disposition header."""
     if not header:
@@ -283,18 +229,22 @@ def _parse_content_disposition(header: str) -> str | None:
     return None
 
 
-def _strip_media_extension(name: str) -> str:
-    """Remove trailing known media extensions recursively so they can be re-added by yt-dlp."""
+def _strip_trailing_extension(name: str) -> str:
+    """Remove trailing file extension(s) so they can be re-added from MIME/filename.
+
+    Strips at most two trailing extensions (e.g. archive.tar.gz → archive).
+    """
     if not name:
         return name
     name = name.rstrip().rstrip(".")
-    # Match extension case-insensitively.
-    pattern = r"\.(" + "|".join(re.escape(ext) for ext in _MEDIA_EXTENSIONS) + r")$"
-    while True:
-        stripped = re.sub(pattern, "", name, flags=re.IGNORECASE)
-        if stripped == name:
+    for _ in range(2):
+        match = _TRAILING_EXT_RE.search(name)
+        if not match:
             break
-        name = stripped.rstrip(".")
+        base = name[: match.start()]
+        if not base:
+            break
+        name = base.rstrip(".")
     return name
 
 
@@ -305,58 +255,132 @@ def _extract_trailing_extension(name: str) -> str | None:
     base, ext = name.rsplit(".", 1)
     if not base or not ext:
         return None
+    # Reject spaces / very long "extensions".
+    if " " in ext or len(ext) > 8 or not re.fullmatch(r"[A-Za-z0-9]+", ext):
+        return None
     return ext
 
 
 def _extract_basename(name: str) -> str:
-    """Return the last path segment of a filename, discarding directories/queries."""
+    """Return the last path segment of a filename, discarding directories/queries/fragments."""
     if not name:
         return ""
-    # Normalize Windows and URL separators to a common split character.
-    normalized = name.replace("\\", "/")
-    basename = normalized.split("/")[-1]
-    # Drop query/fragment if somehow present.
-    return basename.split("?")[0].split("#")[0]
+    # Use urllib.parse for URLs, or fall back to path splitting.
+    try:
+        parsed = urllib.parse.urlparse(name)
+        if parsed.path:
+            path = parsed.path
+        else:
+            # No scheme/path — treat as a bare filename or Windows path.
+            path = name.replace("\\", "/")
+    except Exception:
+        path = name.replace("\\", "/")
+    return path.split("/")[-1].split("?")[0].split("#")[0]
 
 
-def guess_media_extension(
+# Explicit MIME → extension overrides for common/ambiguous types.
+# Values are extension strings *without* the leading dot.
+COMMON_MIME_OVERRIDES: dict[str, str] = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "application/vnd.apple.mpegurl": "m3u8",
+    "application/x-mpegurl": "m3u8",
+    "application/dash+xml": "mpd",
+    "application/x-apple-diskimage": "dmg",
+    "application/x-msi": "msi",
+    "application/x-msdownload": "exe",
+    "application/x-debian-package": "deb",
+    "application/x-redhat-package-manager": "rpm",
+    "application/vnd.android.package-archive": "apk",
+    "application/x-7z-compressed": "7z",
+    "application/x-rar-compressed": "rar",
+    "application/vnd.rar": "rar",
+}
+
+# Generic binary types that tell us nothing about the real extension.
+# Skip mimetypes.guess_extension for these and trust filename/URL instead.
+_GENERIC_BINARY_MIMES = frozenset({
+    "application/octet-stream",
+    "binary/octet-stream",
+    "application/force-download",
+    "application/download",
+})
+
+
+def _mime_to_extension(mime: str) -> str | None:
+    """Return a clean extension for a MIME type, with overrides and normalization."""
+    clean = mime.split(";", 1)[0].strip().lower()
+    if clean in _GENERIC_BINARY_MIMES:
+        return None
+    if clean in COMMON_MIME_OVERRIDES:
+        return COMMON_MIME_OVERRIDES[clean]
+    guessed = mimetypes.guess_extension(clean, strict=False)
+    if not guessed:
+        return None
+    ext = guessed.lstrip(".").lower()
+    # Normalize a few common mimetypes quirks.
+    if ext == "jpe":
+        ext = "jpg"
+    return ext
+
+
+def guess_file_extension(
     filename: str | None,
     mime: str | None,
     url: str,
 ) -> str | None:
     """
-    Determine a safe media extension for a direct download.
+    Determine a file extension for a direct download.
 
     Order of preference:
-      1. Explicit filename extension (if it is a known media type).
-      2. MIME type mapping (if it maps to a known media extension).
-      3. URL path extension.
+      1. Explicit filename extension.
+      2. MIME type → extension (overrides + stdlib mimetypes).
+      3. Query parameter filename (e.g. remote_control.php?file=.../id_720p.mp4).
+      4. URL path extension.
+    No curated extension allowlist — any plausible trailing token is accepted.
     """
     if filename:
-        ext = _extract_trailing_extension(filename)
-        if ext and ext.lower() in _MEDIA_EXTENSIONS:
+        ext = _extract_trailing_extension(_extract_basename(filename))
+        if ext:
             return ext.lower()
 
     if mime:
-        # mimetypes may return None or a generic extension like .bin; reject generics.
-        clean_mime = mime.split(";")[0].strip().lower()
-        guessed = mimetypes.guess_extension(clean_mime)
-        if guessed:
-            ext = guessed.lstrip(".").lower()
-            if ext in _MEDIA_EXTENSIONS:
-                return ext
+        ext = _mime_to_extension(mime)
+        if ext:
+            return ext
 
     try:
         parsed = urllib.parse.urlparse(url)
+        query = urllib.parse.parse_qs(parsed.query)
+        for key in ("file", "filename", "path", "media", "url", "src", "video"):
+            for val in query.get(key, []):
+                if not val:
+                    continue
+                decoded = urllib.parse.unquote(val)
+                part = (
+                    decoded.split("/")[-1]
+                    .split("\\")[-1]
+                    .split("?")[0]
+                    .split("#")[0]
+                )
+                ext = _extract_trailing_extension(part)
+                if ext:
+                    return ext.lower()
+
         path = urllib.parse.unquote(parsed.path)
         basename = path.split("/")[-1].split("?")[0].split("#")[0]
         ext = _extract_trailing_extension(basename)
-        if ext and ext.lower() in _MEDIA_EXTENSIONS:
+        if ext:
             return ext.lower()
     except Exception:
         pass
 
     return None
+
+
+# Back-compat alias used by older call sites.
+guess_media_extension = guess_file_extension
+_strip_media_extension = _strip_trailing_extension
 
 
 def sanitize_title(title: str, max_length: int = 120) -> str:
@@ -402,16 +426,13 @@ def sanitize_title(title: str, max_length: int = 120) -> str:
     return title
 
 
-def _is_garbage_title(title: str, url: str) -> bool:
-    """Reject placeholders, URLs, hostnames, raw filenames, and stream segments."""
+def _is_unusable_stem(title: str) -> bool:
+    """Reject placeholders, bare URLs, stream segment names, and opaque IDs."""
     if not title or not title.strip():
         return True
 
     lowered = title.strip().lower()
     if lowered in _GARBAGE_TITLES:
-        return True
-
-    if lowered in _MEDIA_EXTENSIONS:
         return True
 
     if lowered.startswith("http://") or lowered.startswith("https://"):
@@ -421,34 +442,90 @@ def _is_garbage_title(title: str, url: str) -> bool:
     if _SEGMENT_NAME_RE.match(lowered):
         return True
 
-    # Strip known extensions recursively before checking for digit/hex garbage patterns
-    lowered_stripped = _strip_media_extension(lowered)
+    lowered_stripped = _strip_trailing_extension(lowered)
 
-    # Reject generic database IDs (numeric strings of length >= 8)
-    if lowered_stripped.isdigit() and len(lowered_stripped) >= 8:
+    # Reject generic database IDs (numeric strings of length >= 8).
+    # Some sites prefix ids with a leading minus (e.g. beeg.com URLs).
+    numeric_stripped = lowered_stripped.lstrip("-")
+    if numeric_stripped.isdigit() and len(numeric_stripped) >= 8:
         return True
 
-    # Reject hex-like/hash-like titles of length >= 12
-    if re.match(r"^[0-9a-f]{12,}$", lowered_stripped):
+    # Reject hex-like/hash-like titles of length >= 12.
+    if re.match(r"^[0-9a-f]{12,}$", numeric_stripped):
         return True
+
+    # Reject numeric-id based filenames like "586907_720p", "12345_hd".
+    if re.match(r"^\d{3,}[-_](720p|1080p|480p|360p|240p|720|1080|hd|sd|fullhd|fhd|uhd|4k)$", lowered_stripped, re.IGNORECASE):
+        return True
+    # Reject bare resolution tokens like "720p" or "1080p".
+    if re.match(r"^\d{3,}p$", lowered_stripped):
+        return True
+
+    return False
+
+
+def _url_basenames(url: str) -> set[str]:
+    """Return candidate basenames derived from a URL's path and query params.
+
+    Some CDNs serve media through a handler like ``remote_control.php`` and put
+    the real filename in a query parameter (``file=.../586907_720p.mp4``).
+    """
+    basenames: set[str] = set()
+    if not url:
+        return basenames
+    try:
+        parsed = urllib.parse.urlparse(url)
+        path = urllib.parse.unquote(parsed.path or "")
+        basename = path.split("/")[-1]
+        if basename:
+            basenames.add(basename.lower())
+            basenames.add(_strip_trailing_extension(basename).lower())
+
+        query = urllib.parse.parse_qs(parsed.query)
+        for key in ("file", "filename", "path", "media", "url", "src", "video"):
+            for val in query.get(key, []):
+                if not val:
+                    continue
+                decoded = urllib.parse.unquote(val)
+                # The value may itself be a URL or a path.
+                part = (
+                    decoded.split("/")[-1]
+                    .split("\\")[-1]
+                    .split("?")[0]
+                    .split("#")[0]
+                )
+                if part:
+                    basenames.add(part.lower())
+                    basenames.add(_strip_trailing_extension(part).lower())
+    except Exception:
+        pass
+    return basenames
+
+
+def _is_garbage_title(title: str, url: str) -> bool:
+    """Reject page/network titles that are hostnames or bare CDN path basenames.
+
+    Explicit browser/filename hints use ``_is_unusable_stem`` only — matching the
+    URL basename is normal and desirable for direct downloads.
+    """
+    if _is_unusable_stem(title):
+        return True
+
+    lowered = title.strip().lower()
 
     try:
         parsed = urllib.parse.urlparse(url)
         hostname = parsed.netloc.lower().lstrip("www.")
         if lowered == hostname or lowered == parsed.netloc.lower():
             return True
+        host_first = hostname.split(".")[0]
+        if host_first and lowered == host_first:
+            return True
 
-        path = parsed.path
-        basename = path.split("/")[-1]
-        if lowered == path.lower() or lowered == path.lower().lstrip("/"):
+        # Reject titles that are exactly the URL's own basename, including
+        # filenames hidden in query parameters (e.g. remote_control.php?file=.../id_720p.mp4).
+        if lowered in _url_basenames(url):
             return True
-        if basename and lowered == basename.lower():
-            return True
-        # Reject if it is exactly the URL basename with or without extension.
-        basename_lower = basename.lower()
-        for ext in _MEDIA_EXTENSIONS:
-            if lowered == f"{basename_lower.rsplit('.', 1)[0]}.{ext}".lower():
-                return True
     except Exception:
         pass
 
@@ -461,8 +538,10 @@ def _fetch_headers(
     timeout: float,
 ) -> urllib.error.HTTPMessage | None:
     """Fetch response headers, falling back from HEAD to a tiny GET on 405."""
-    headers = _build_headers(referer, accept="*/*")
-    ssl_ctx = _create_ssl_context()
+    if not is_safe_url(url):
+        return None
+    headers = build_headers(referer, accept="*/*")
+    ssl_ctx = create_ssl_context()
     try:
         req = urllib.request.Request(url, method="HEAD", headers=headers)
         with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
@@ -489,8 +568,10 @@ def _fetch_html(
     max_bytes: int,
 ) -> str | None:
     """Fetch the start of an HTML page and decode it."""
-    headers = _build_headers(referer, accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-    ssl_ctx = _create_ssl_context()
+    if not is_safe_url(url):
+        return None
+    headers = build_headers(referer, accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+    ssl_ctx = create_ssl_context()
     try:
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
@@ -512,30 +593,105 @@ def _fetch_html(
 
 
 def _extract_from_url(url: str) -> str | None:
-    """Derive a title from the last path segment of a URL."""
+    """Derive a title from the last path segment of a URL and its query params."""
     try:
-        parsed = urllib.parse.urlparse(url)
-        path = urllib.parse.unquote(parsed.path)
-        basename = path.split("/")[-1]
-        if not basename:
-            return None
-        # Drop query/fragment if somehow present.
-        basename = basename.split("?")[0].split("#")[0]
-        stripped = _strip_media_extension(basename)
-        if not stripped:
-            return None
-        # If what remains is generic, treat it as garbage at the resolve step.
-        return stripped
+        # Prefer a basename that looks like a real media filename. Many CDN
+        # handlers put the actual filename in a query parameter (file=.../id_720p.mp4).
+        basenames = sorted(_url_basenames(url), key=len, reverse=True)
+        for b in basenames:
+            stripped = _strip_trailing_extension(b)
+            if stripped and not _is_unusable_stem(stripped):
+                return stripped
+        return None
     except Exception:
         return None
 
 
-def _looks_like_media_url(url: str) -> bool:
-    """Heuristic to avoid fetching a binary manifest as if it were an HTML page."""
+def _looks_like_binary_url(url: str) -> bool:
+    """Heuristic to avoid fetching stream manifests / binary URLs as HTML pages."""
     lower = url.lower()
-    parsed = urllib.parse.urlparse(lower)
-    path = parsed.path
-    return any(ind in path or lower.endswith(ind) for ind in _MEDIA_URL_INDICATORS)
+    try:
+        parsed = urllib.parse.urlparse(lower)
+        path = parsed.path or ""
+    except Exception:
+        path = lower
+    if any(token in path or lower.endswith(token) for token in _NON_HTML_PATH_TOKENS):
+        return True
+    # If the last path segment has a file extension, treat as non-HTML.
+    basename = path.rsplit("/", 1)[-1]
+    return bool(_extract_trailing_extension(basename))
+
+
+def _clean_page_title(page_title: str, url: str | None = None) -> str | None:
+    """Extract the media title from a browser tab/page title.
+
+    Many sites format tabs as ``Performer | Title | Site`` or ``Title - Site``.
+    This strips the site/hostname segment and returns the most likely media title.
+    """
+    if not page_title:
+        return None
+    title = page_title.strip()
+    if not title:
+        return None
+
+    hostname = None
+    host_first = None
+    if url:
+        try:
+            hostname = urllib.parse.urlparse(url).netloc.lower().lstrip("www.")
+            host_first = hostname.split(".")[0]
+        except Exception:
+            pass
+
+    # Common separators used to combine title with performer/site.
+    separators = (" | ", " - ", " – ", " — ", " // ")
+    for sep in separators:
+        if sep not in title:
+            continue
+        parts = [p.strip() for p in title.split(sep)]
+        filtered = []
+        for p in parts:
+            lowered = p.lower()
+            if hostname and lowered == hostname:
+                continue
+            if host_first and lowered == host_first:
+                continue
+            if _is_unusable_stem(p):
+                continue
+            filtered.append(p)
+        if filtered:
+            # Prefer the longest remaining segment; in "Performer | Title | Site"
+            # arrangements the actual media title is usually the longest.
+            filtered.sort(key=len, reverse=True)
+            candidate = sanitize_title(filtered[0])
+            if candidate and not _is_garbage_title(candidate, url or ""):
+                return candidate
+
+    # No known separator; sanitize the whole thing and reject pure site names.
+    candidate = sanitize_title(title)
+    if candidate:
+        if host_first and candidate.lower() == host_first:
+            return None
+        if not _is_garbage_title(candidate, url or ""):
+            return candidate
+    return None
+
+
+def _title_contains_url_id(title: str, url: str) -> bool:
+    """Return True when ``title`` contains the long numeric id from ``url``."""
+    if not title or not url:
+        return False
+    try:
+        path = urllib.parse.urlparse(url).path
+        part = path.split("/")[-1]
+        if not part:
+            return False
+        stem = _strip_trailing_extension(part).lstrip("-")
+        if stem.isdigit() and len(stem) >= 8:
+            return stem in title
+    except Exception:
+        pass
+    return False
 
 
 def _extract_title_from_html(html_text: str, url: str) -> str | None:
@@ -580,38 +736,43 @@ def resolve_title(
             if cd:
                 filename = _parse_content_disposition(cd)
                 if filename:
-                    candidate = sanitize_title(_strip_media_extension(filename), max_length)
+                    candidate = sanitize_title(_strip_trailing_extension(filename), max_length)
                     if candidate and not _is_garbage_title(candidate, url):
                         return candidate
     except Exception as e:
         logger.debug(f"Title Content-Disposition lookup failed for {redact_url(url)}: {e}")
 
     # 2. Page metadata. Prefer the referer; if absent, try the URL itself only when
-    #    it looks like it may be an HTML page.
+    #    it looks like it may be an HTML page. Validate the extracted title against
+    #    the page URL, not the media URL, so a site-only title like "Beeg" is
+    #    rejected when it comes from the referer page.
     page_url = referer or url
-    if page_url and not _looks_like_media_url(page_url):
+    if page_url and not _looks_like_binary_url(page_url):
         try:
             html_text = _fetch_html(page_url, referer, timeout, max_html_bytes)
             if html_text:
-                candidate = _extract_title_from_html(html_text, url)
+                candidate = _extract_title_from_html(html_text, page_url)
                 if candidate:
                     candidate = sanitize_title(candidate, max_length)
-                    if candidate and not _is_garbage_title(candidate, url):
+                    if candidate and not _is_garbage_title(candidate, page_url):
                         return candidate
         except Exception as e:
             logger.debug(f"Title HTML lookup failed for {redact_url(page_url)}: {e}")
 
     # 3. Browser / page title.
     if page_title:
-        candidate = sanitize_title(page_title, max_length)
-        if candidate and not _is_garbage_title(candidate, url):
+        candidate = _clean_page_title(page_title, referer or url)
+        if candidate:
             return candidate
 
     # 4. URL basename.
+    # Use _is_unusable_stem here (not _is_garbage_title): a title derived from
+    # the URL's own basename will always match the basename, so the broader
+    # _is_garbage_title check would reject every legitimate fallback.
     url_title = _extract_from_url(url)
     if url_title:
         candidate = sanitize_title(url_title, max_length)
-        if candidate and not _is_garbage_title(candidate, url):
+        if candidate and not _is_unusable_stem(candidate):
             return candidate
 
     return "video"
@@ -623,6 +784,7 @@ def resolve_filename(
     mime: str | None = None,
     referer: str | None = None,
     page_title: str | None = None,
+    preferred_ext: str | None = None,
     timeout: float = 5.0,
     max_length: int = 120,
     allow_network: bool = True,
@@ -636,32 +798,28 @@ def resolve_filename(
 
     Resolution order for the title:
       1. A provided filename hint (basename stripped of extension).
-      2. A provided page/tab title.
-      3. Network sources (Content-Disposition, HTML metadata, URL basename)
+      2. Network sources (Content-Disposition, HTML metadata, URL basename)
          (only if ``allow_network`` is True).
+      3. A provided page/tab title (cleaned and used as a fallback).
       4. Fallback "video".
 
-    The extension is guessed from the original filename, MIME type, or URL path.
+    Extension order:
+      1. preferred_ext (format chosen by the client, e.g. mp4/mkv).
+      2. Extension from filename / MIME / URL path.
     """
     source = "fallback"
     title: str | None = None
 
     # 1. Provided filename hint.
+    # Use milder validation — matching the URL basename is fine for direct files.
     if filename:
         basename = _extract_basename(filename)
-        candidate = sanitize_title(_strip_media_extension(basename), max_length)
-        if candidate and not _is_garbage_title(candidate, url):
+        candidate = sanitize_title(_strip_trailing_extension(basename), max_length)
+        if candidate and not _is_unusable_stem(candidate):
             title = candidate
             source = "filename"
 
-    # 2. Browser / page title.
-    if title is None and page_title:
-        candidate = sanitize_title(page_title, max_length)
-        if candidate and not _is_garbage_title(candidate, url):
-            title = candidate
-            source = "page_title"
-
-    # 3. Network sources.
+    # 2. Network sources (page-extracted title, Content-Disposition, URL basename).
     if title is None and allow_network:
         title = resolve_title(
             url,
@@ -670,13 +828,29 @@ def resolve_filename(
             timeout=timeout,
             max_length=max_length,
         )
-        source = "network" if title != "video" else "fallback"
+        if title != "video":
+            source = "network"
+        else:
+            title = None
+
+    # 3. Browser / page title.
+    if title is None and page_title:
+        candidate = _clean_page_title(page_title, referer or url)
+        if candidate:
+            title = candidate
+            source = "page_title"
 
     # Always fall back to a safe title.
     title = title or "video"
 
-    # Resolve the best extension for this media.
-    ext = guess_media_extension(filename, mime, url)
+    # Extension: preferred_ext (chosen format) wins, then filename/MIME/URL.
+    ext: str | None = None
+    if preferred_ext:
+        clean_pref = preferred_ext.lstrip(".").strip().lower()
+        if clean_pref and re.fullmatch(r"[a-z0-9]{1,8}", clean_pref):
+            ext = clean_pref
+    if not ext:
+        ext = guess_file_extension(filename, mime, url)
 
     full_filename = f"{title}.{ext}" if ext else title
     return ResolvedFilename(
