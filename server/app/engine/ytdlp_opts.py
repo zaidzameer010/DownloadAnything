@@ -1,6 +1,7 @@
 """Shared, explicit yt-dlp options for probing and downloading."""
 
 from typing import Any, Dict, Optional
+import re
 
 from app.utils.http import DEFAULT_USER_AGENT
 
@@ -33,12 +34,16 @@ def build_ytdlp_options(
         "retries": 10,
         "fragment_retries": 10,
         "skip_unavailable_fragments": True,
-        "compat_options": ["allow-unsafe-ext"],
+        "compat_options": ["allow-unsafe-ext", "manifest-filesize-approx"],
         "extractor_args": {
             "youtube": {
                 "skip": ["translated_subs"],
             },
         },
+        # yt-dlp blocks some previously-supported domains in KnownPiracyIE and
+        # KnownDRMIE. Remove those extractors so the generic extractor can still
+        # handle the direct media URLs the extension captures.
+        "allowed_extractors": ["default", "-Piracy", "-DRM"],
     }
     # Bypasses basic bot protections
     headers = {
@@ -73,3 +78,17 @@ def build_ytdlp_options(
         opts.update(extra_opts)
 
     return opts
+
+
+# yt-dlp blocks some previously-supported sites in ``KnownPiracyIE`` with a
+# hard ``[Piracy]`` error before any network request. When we hit that block,
+# fall back to the generic extractor; the caller already passed the real media
+# URL or the extension captured the stream directly.
+_PIRACY_ERROR_RE = re.compile(r"\[\s*Piracy\s*\]", re.IGNORECASE)
+
+
+def is_piracy_block_error(exc: BaseException) -> bool:
+    """Return True when yt-dlp rejected a URL because it is in KnownPiracyIE."""
+    if not exc:
+        return False
+    return bool(_PIRACY_ERROR_RE.search(str(exc)))

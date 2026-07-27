@@ -972,6 +972,141 @@
 	margin-right: 8px;
 }
 
+/* Playlist drawer + dashboard styles */
+.playlist-metadata-panel {
+	margin-top: 20px;
+	border: 1px solid var(--border-dim);
+	border-radius: var(--radius-md);
+	padding: 16px;
+}
+
+.playlist-summary-grid {
+	display: grid;
+	grid-template-columns: repeat(4, 1fr);
+	gap: 8px 16px;
+	margin-bottom: 18px;
+	font-size: 11.5px;
+	color: var(--text-secondary);
+}
+
+.playlist-summary-grid strong {
+	color: #ffffff;
+}
+
+.playlist-entry-row {
+	display: grid;
+	grid-template-columns: auto 44px minmax(0, 1fr) auto;
+	gap: 10px;
+	align-items: center;
+	padding: 8px 0;
+	font-size: 12.5px;
+	cursor: pointer;
+}
+
+.playlist-entry-row span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.playlist-entry-row small {
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+.playlist-entry-row input {
+	cursor: pointer;
+}
+
+.playlist-entry-thumb,
+.playlist-entry-thumb-placeholder {
+	width: 44px;
+	height: 25px;
+	border-radius: var(--radius-sm);
+	object-fit: cover;
+	background: rgba(0, 0, 0, 0.4);
+}
+
+.playlist-expand-btn {
+	background: none;
+	border: none;
+	color: var(--text-secondary);
+	cursor: pointer;
+	padding: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.playlist-expand-btn:hover {
+	color: #ffffff;
+}
+
+.job-title-name-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+.playlist-count-badge {
+	font-size: 10px;
+	font-weight: 700;
+	color: var(--text-muted);
+	background: rgba(255, 255, 255, 0.05);
+	border: 1px solid var(--border-dim);
+	border-radius: var(--radius-sm);
+	padding: 1px 6px;
+	white-space: nowrap;
+}
+
+.playlist-inline-meta {
+	color: var(--text-secondary);
+	margin-right: 8px;
+}
+
+.playlist-child-tr {
+	background: rgba(255, 255, 255, 0.01);
+	transition: background-color 0.15s ease;
+}
+
+.playlist-child-tr:hover {
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.playlist-child-tr td {
+	border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.playlist-child-tr:last-child td {
+	border-bottom: 1px solid var(--border-dim);
+}
+
+.playlist-child-title-cell .job-title-cell {
+	padding-left: 24px;
+}
+
+.playlist-child-progress-cell {
+	min-width: 120px;
+	max-width: 220px;
+}
+
+.playlist-child-progress-cell .progress-bar-bg {
+	height: 4px;
+	background: rgba(255, 255, 255, 0.06);
+}
+
+@media (max-width: 768px) {
+	.playlist-child-tr .job-title-cell {
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 4px;
+	}
+	.playlist-child-tr .job-title-cell > div:first-child {
+		display: none;
+	}
+}
+
 /* Downloader Engines Tab Layout */
 .engines-layout {
 	display: flex;

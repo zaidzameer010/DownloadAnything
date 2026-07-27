@@ -233,7 +233,13 @@ export function Modals({ downloader }: ModalsProps) {
 
 			<Modal
 				isOpen={!!duplicateJobAlert}
-				title="Link Already In List"
+				title={
+					duplicateJobAlert?.reason === "filename"
+						? "Filename Already Queued"
+						: duplicateJobAlert?.reason === "title"
+							? "Name Already In List"
+							: "Link Already In List"
+				}
 				onClose={() => setDuplicateJobAlert(null)}
 				footer={
 					<>
@@ -268,8 +274,11 @@ export function Modals({ downloader }: ModalsProps) {
 						}}
 					>
 						<div style={{ fontSize: "13px", color: "var(--text-secondary)" }}>
-							This media link has already been submitted and exists in the task
-							registry.
+							{duplicateJobAlert.reason === "filename"
+								? "A download with the same filename is already queued for this destination."
+								: duplicateJobAlert.reason === "title"
+									? "A download with the same name is already active in the task registry."
+									: "This media link has already been submitted and exists in the task registry."}
 						</div>
 						<div
 							className="media-info"
@@ -284,17 +293,33 @@ export function Modals({ downloader }: ModalsProps) {
 							}}
 						>
 							<div style={{ fontWeight: 700, fontSize: "12.5px" }}>
-								{duplicateJobAlert.title}
+								{duplicateJobAlert.reason === "filename"
+									? (duplicateJobAlert.filename || duplicateJobAlert.title)
+									: duplicateJobAlert.title}
 							</div>
-							<div
-								style={{
-									fontSize: "11px",
-									color: "var(--text-muted)",
-									wordBreak: "break-all",
-								}}
-							>
-								{duplicateJobAlert.url}
-							</div>
+							{duplicateJobAlert.reason === "filename" && (
+								<div
+									style={{
+										fontSize: "11px",
+										color: "var(--text-muted)",
+										wordBreak: "break-all",
+									}}
+								>
+									Destination: {duplicateJobAlert.outputDir}
+								</div>
+							)}
+							{duplicateJobAlert.reason !== "title" &&
+								duplicateJobAlert.reason !== "filename" && (
+									<div
+										style={{
+											fontSize: "11px",
+											color: "var(--text-muted)",
+											wordBreak: "break-all",
+										}}
+									>
+										{duplicateJobAlert.url}
+									</div>
+								)}
 							<div
 								style={{
 									fontSize: "11px",

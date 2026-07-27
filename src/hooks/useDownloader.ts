@@ -154,6 +154,16 @@ export function useDownloader() {
 		_setSelectedTorrentFiles(next);
 	}, []);
 
+	const [selectedPlaylistEntries, _setSelectedPlaylistEntries] = useState<
+		Set<number>
+	>(new Set());
+	const selectedPlaylistEntriesRef = useRef<Set<number>>(new Set());
+
+	const setSelectedPlaylistEntries = useCallback((next: Set<number>) => {
+		selectedPlaylistEntriesRef.current = next;
+		_setSelectedPlaylistEntries(next);
+	}, []);
+
 	useEffect(() => {
 		if (probedInfo?.torrent?.files) {
 			const all = new Set(probedInfo.torrent.files.map((f) => f.index));
@@ -162,6 +172,17 @@ export function useDownloader() {
 		} else {
 			selectedTorrentFilesRef.current = new Set();
 			_setSelectedTorrentFiles(new Set());
+		}
+	}, [probedInfo]);
+
+	useEffect(() => {
+		if (probedInfo?.playlist?.entries) {
+			const all = new Set(probedInfo.playlist.entries.map((e) => e.index));
+			selectedPlaylistEntriesRef.current = all;
+			_setSelectedPlaylistEntries(all);
+		} else {
+			selectedPlaylistEntriesRef.current = new Set();
+			_setSelectedPlaylistEntries(new Set());
 		}
 	}, [probedInfo]);
 
@@ -184,6 +205,29 @@ export function useDownloader() {
 	const deselectAllTorrentFiles = useCallback(() => {
 		selectedTorrentFilesRef.current = new Set();
 		_setSelectedTorrentFiles(new Set());
+	}, []);
+
+	const togglePlaylistEntry = useCallback((index: number) => {
+		_setSelectedPlaylistEntries((prev) => {
+			const next = new Set(prev);
+			if (next.has(index)) next.delete(index);
+			else next.add(index);
+			selectedPlaylistEntriesRef.current = next;
+			return next;
+		});
+	}, []);
+
+	const selectAllPlaylistEntries = useCallback(() => {
+		const all = new Set(
+			probedInfo?.playlist?.entries.map((e) => e.index) ?? [],
+		);
+		selectedPlaylistEntriesRef.current = all;
+		_setSelectedPlaylistEntries(all);
+	}, [probedInfo]);
+
+	const deselectAllPlaylistEntries = useCallback(() => {
+		selectedPlaylistEntriesRef.current = new Set();
+		_setSelectedPlaylistEntries(new Set());
 	}, []);
 
 	// Alerts
@@ -290,26 +334,31 @@ export function useDownloader() {
 	});
 
 	// WebSocket helpers
-	const updateLocalJob = useCallback((jobId: string, updates: Partial<Job>) => {
-		setJobs((prev) => {
-			const existing = prev[jobId] || {
-				job_id: jobId,
-				url: "",
-				status: "queued",
-				progress: 0,
-				downloaded_bytes: 0,
-				total_bytes: 0,
-				audio_downloaded_bytes: 0,
-				audio_total_bytes: 0,
-				combined_downloaded_bytes: 0,
-				combined_total_bytes: 0,
-				stream_phase: "single",
-				speed: 0,
-				eta: 0,
-			};
-			return { ...prev, [jobId]: { ...existing, ...updates } };
-		});
-	}, []);
+	const updateLocalJob = useCallback(
+		(jobId: string, updates: Partial<Job>, createIfMissing = false) => {
+			setJobs((prev) => {
+				const existing = prev[jobId];
+				if (!existing && !createIfMissing) return prev;
+				const base = existing || {
+					job_id: jobId,
+					url: "",
+					status: "queued",
+					progress: 0,
+					downloaded_bytes: 0,
+					total_bytes: 0,
+					audio_downloaded_bytes: 0,
+					audio_total_bytes: 0,
+					combined_downloaded_bytes: 0,
+					combined_total_bytes: 0,
+					stream_phase: "single",
+					speed: 0,
+					eta: 0,
+				};
+				return { ...prev, [jobId]: { ...base, ...updates } };
+			});
+		},
+		[],
+	);
 
 	const fetchJobsList = useCallback(() => {
 		if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -440,11 +489,50 @@ export function useDownloader() {
 		[],
 	);
 
+	const handleRefreshUrl = useCallback(
+		(jobId: string, url: string, referer?: string) => {
+			if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+				wsRef.current.send(
+					JSON.stringify({
+						type: "refresh_url",
+						jobId,
+						url,
+						referer,
+					}),
+				);
+			}
+			setUrlRefreshJobId(null);
+			updateLocalJob(jobId, {
+				status: "queued",
+				url,
+				referer,
+				error: undefined,
+				error_category: undefined,
+			});
+		},
+		[updateLocalJob, setUrlRefreshJobId],
+	);
+
 	const connectWebSocket = useCallback(() => {
+		if (reconnectTimeoutRef.current) {
+			clearTimeout(reconnectTimeoutRef.current);
+			reconnectTimeoutRef.current = null;
+		}
+
+		if (
+			wsRef.current &&
+			(wsRef.current.readyState === WebSocket.OPEN ||
+				wsRef.current.readyState === WebSocket.CONNECTING)
+		) {
+			return;
+		}
+
 		if (wsRef.current) {
-			wsRef.current.onclose = null;
-			wsRef.current.onerror = null;
-			wsRef.current.close();
+			const oldWs = wsRef.current;
+			wsRef.current = null;
+			oldWs.onclose = null;
+			oldWs.onerror = null;
+			oldWs.close();
 		}
 
 		const wsUrl = serverUrlRef.current;
@@ -536,19 +624,23 @@ export function useDownloader() {
 							break;
 
 						case "download_queued":
-							updateLocalJob(msg.jobId, {
-								job_id: msg.jobId,
-								url: msg.url || "",
-								status: "downloading",
-								speed: 0,
-								eta: 0,
-								output_dir: msg.outputPath,
-								title: msg.title || undefined,
-								duration: msg.duration || undefined,
-								thumbnail: msg.thumbnail || undefined,
-								uploader: msg.uploader || undefined,
-								media_type: msg.mediaType || undefined,
-							});
+							updateLocalJob(
+								msg.jobId,
+								{
+									job_id: msg.jobId,
+									url: msg.url || "",
+									status: "downloading",
+									speed: 0,
+									eta: 0,
+									output_dir: msg.outputPath,
+									title: msg.title || undefined,
+									duration: msg.duration || undefined,
+									thumbnail: msg.thumbnail || undefined,
+									uploader: msg.uploader || undefined,
+									media_type: msg.mediaType || undefined,
+								},
+								true,
+							);
 							break;
 
 						case "download_progress": {
@@ -625,29 +717,67 @@ export function useDownloader() {
 						}
 
 						case "jobs_list": {
-							// Merge server baseline into local state; never overwrite fresher
-							// progress fields with stale baseline values.
+							// Replace local state with the server baseline so removed jobs
+							// disappear, but keep live transient fields when the client is
+							// ahead of the baseline (e.g. a download_progress event arrived
+							// before this jobs_list snapshot).
+							const stableStatuses = new Set([
+								"completed",
+								"failed",
+								"canceled",
+								"paused",
+								"postprocessing",
+							]);
 							setJobs((prev) => {
-								const merged = { ...prev };
+								const merged: Record<string, Job> = {};
 								for (const job of msg.jobs as Job[]) {
-									const existing = merged[job.job_id];
-									if (existing) {
-										// Prefer local progress if it is ahead of the baseline.
-										const keepProgress =
-											(existing.combined_downloaded_bytes ?? 0) >
-											(job.combined_downloaded_bytes ?? 0);
+									const existing = prev[job.job_id];
+									if (!existing) {
+										merged[job.job_id] = job;
+										continue;
+									}
+									const localTerminal = [
+										"completed",
+										"failed",
+										"canceled",
+									].includes(existing.status);
+									const serverWins =
+										stableStatuses.has(job.status) && !localTerminal;
+									const localAhead =
+										(existing.combined_downloaded_bytes ?? 0) >
+										(job.combined_downloaded_bytes ?? 0);
+
+									if (serverWins || !localAhead) {
+										merged[job.job_id] = job;
+									} else {
+										// Keep the server's stable metadata but preserve live progress.
 										merged[job.job_id] = {
 											...job,
-											downloaded_bytes: keepProgress
-												? existing.downloaded_bytes
-												: job.downloaded_bytes,
-											combined_downloaded_bytes: keepProgress
-												? existing.combined_downloaded_bytes
-												: job.combined_downloaded_bytes,
-											progress: keepProgress ? existing.progress : job.progress,
+											status: existing.status,
+											progress: existing.progress,
+											downloaded_bytes: existing.downloaded_bytes,
+											total_bytes: existing.total_bytes || job.total_bytes,
+											audio_downloaded_bytes: existing.audio_downloaded_bytes,
+											audio_total_bytes:
+												existing.audio_total_bytes || job.audio_total_bytes,
+											combined_downloaded_bytes:
+												existing.combined_downloaded_bytes,
+											combined_total_bytes:
+												existing.combined_total_bytes ||
+												job.combined_total_bytes,
+											stream_phase: existing.stream_phase,
+											speed: existing.speed,
+											eta: existing.eta,
+											fragment_index: existing.fragment_index,
+											fragment_count: existing.fragment_count,
+											file_path: existing.file_path || job.file_path,
+											torrent_peers: existing.torrent_peers,
+											torrent_seeds: existing.torrent_seeds,
+											torrent_availability: existing.torrent_availability,
+											torrent_completed_pieces:
+												existing.torrent_completed_pieces,
+											torrent_piece_count: existing.torrent_piece_count,
 										};
-									} else {
-										merged[job.job_id] = job;
 									}
 								}
 								return merged;
@@ -688,6 +818,9 @@ export function useDownloader() {
 								url: msg.url,
 								title: msg.title,
 								status: msg.status,
+								reason: msg.reason || "url",
+								filename: msg.filename,
+								outputDir: msg.outputDir,
 							});
 							break;
 
@@ -763,6 +896,9 @@ export function useDownloader() {
 			};
 
 			ws.onclose = () => {
+				// Ignore close events from sockets that are no longer the current one.
+				if (wsRef.current !== ws) return;
+				wsRef.current = null;
 				logger.debug("WebSocket closed");
 				setIsConnected(false);
 				if (heartbeatIntervalRef.current)
@@ -790,17 +926,25 @@ export function useDownloader() {
 		setSelectedCategoryPath,
 		setMyProbingJobId,
 		setAmProbingUrl,
+		setUrlRefreshJobId,
+		handleRefreshUrl,
 		proceedWithDownload,
 	]);
 
 	useEffect(() => {
 		connectWebSocket();
 		return () => {
-			if (wsRef.current) wsRef.current.close();
 			if (reconnectTimeoutRef.current)
 				clearTimeout(reconnectTimeoutRef.current);
 			if (heartbeatIntervalRef.current)
 				clearInterval(heartbeatIntervalRef.current);
+			const ws = wsRef.current;
+			if (ws) {
+				wsRef.current = null;
+				ws.onclose = null;
+				ws.onerror = null;
+				ws.close();
+			}
 		};
 	}, [connectWebSocket]);
 
@@ -827,58 +971,96 @@ export function useDownloader() {
 		}
 	}, [inputUrl, jobs, setAmProbingUrl]);
 
-	const handleChooseFormat = useCallback(() => {
-		if (
-			!probedInfo ||
-			(probedInfo.mediaType !== "torrent" && !selectedFormatId)
-		)
-			return;
-		const finalDest = drawerCustomPath || selectedCategoryPath;
-		if (probedInfo.mediaType === "torrent" && probedInfo.torrent) {
-			if (selectedTorrentFilesRef.current.size === 0) return;
-			if (wsRef.current?.readyState === WebSocket.OPEN) {
+	const handleChooseFormat = useCallback(
+		(mode?: "video" | "playlist") => {
+			if (!probedInfo) return;
+			const finalDest = drawerCustomPath || selectedCategoryPath;
+
+			const isPlaylistMode =
+				mode === "playlist" ||
+				(probedInfo.mediaType === "playlist" &&
+					probedInfo.playlist &&
+					mode !== "video");
+
+			if (isPlaylistMode) {
+				if (selectedPlaylistEntriesRef.current.size === 0) return;
+				if (wsRef.current?.readyState === WebSocket.OPEN) {
+					wsRef.current.send(
+						JSON.stringify({
+							type: "choose",
+							jobId: probedInfo.jobId,
+							formatId: "best",
+							outputDir: finalDest,
+							conflictResolution: "replace",
+							playlistSelectedFileIndices: Array.from(
+								selectedPlaylistEntriesRef.current,
+							),
+						}),
+					);
+				}
+				setShowFormatDrawer(false);
+				setProbedInfo(null);
+				setInputUrl("");
+				selectedPlaylistEntriesRef.current = new Set();
+				_setSelectedPlaylistEntries(new Set());
+				return;
+			}
+
+			if (probedInfo.mediaType === "torrent" && probedInfo.torrent) {
+				if (selectedTorrentFilesRef.current.size === 0) return;
+				if (wsRef.current?.readyState === WebSocket.OPEN) {
+					wsRef.current.send(
+						JSON.stringify({
+							type: "choose",
+							jobId: probedInfo.jobId,
+							formatId: "torrent",
+							outputDir: finalDest,
+							conflictResolution: "replace",
+							torrentSelectedFileIndices: Array.from(
+								selectedTorrentFilesRef.current,
+							),
+						}),
+					);
+				}
+				setShowFormatDrawer(false);
+				setProbedInfo(null);
+				setInputUrl("");
+				selectedTorrentFilesRef.current = new Set();
+				_setSelectedTorrentFiles(new Set());
+				return;
+			}
+
+			if (!selectedFormatId) return;
+			const chosenFormatObj = probedInfo.formats.find(
+				(f) => f.formatId === selectedFormatId,
+			);
+			const estimatedExt = chosenFormatObj?.ext || mergeFormat;
+
+			selectedFormatIdRef.current = selectedFormatId;
+
+			if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
 				wsRef.current.send(
 					JSON.stringify({
-						type: "choose",
+						// Raw hints only — backend resolve_filename is the source of truth.
+						type: "check_file_exists",
+						path: finalDest,
 						jobId: probedInfo.jobId,
-						formatId: "torrent",
-						outputDir: finalDest,
-						conflictResolution: "replace",
-						torrentSelectedFileIndices: Array.from(
-							selectedTorrentFilesRef.current,
-						),
+						title: probedInfo.title || "video",
+						ext: estimatedExt,
+						filename: probedInfo.filename || undefined,
+						mime: probedInfo.mime || undefined,
 					}),
 				);
 			}
-			setShowFormatDrawer(false);
-			setProbedInfo(null);
-			setInputUrl("");
-			selectedTorrentFilesRef.current = new Set();
-			_setSelectedTorrentFiles(new Set());
-			return;
-		}
-		const chosenFormatObj = probedInfo.formats.find(
-			(f) => f.formatId === selectedFormatId,
-		);
-		const estimatedExt = chosenFormatObj?.ext || "mp4";
-
-		selectedFormatIdRef.current = selectedFormatId;
-
-		if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-			wsRef.current.send(
-				JSON.stringify({
-					// Raw hints only — backend resolve_filename is the source of truth.
-					type: "check_file_exists",
-					path: finalDest,
-					jobId: probedInfo.jobId,
-					title: probedInfo.title || "video",
-					ext: estimatedExt,
-					filename: probedInfo.filename || undefined,
-					mime: probedInfo.mime || undefined,
-				}),
-			);
-		}
-	}, [probedInfo, selectedFormatId, drawerCustomPath, selectedCategoryPath]);
+		},
+		[
+			probedInfo,
+			selectedFormatId,
+			drawerCustomPath,
+			selectedCategoryPath,
+			mergeFormat,
+		],
+	);
 
 	const handleAddCategory = useCallback(() => {
 		if (!newCatName.trim() || !newCatPath.trim()) return;
@@ -913,7 +1095,9 @@ export function useDownloader() {
 	);
 
 	const counts = useMemo(() => {
-		const list = Object.values(jobs).filter((j) => j.status !== "probing");
+		const list = Object.values(jobs).filter(
+			(j) => j.status !== "probing" && !j.parent_job_id,
+		);
 		return {
 			all: list.length,
 			downloading: list.filter((j) =>
@@ -928,7 +1112,9 @@ export function useDownloader() {
 	}, [jobs]);
 
 	const displayJobs = useMemo(() => {
-		const list = Object.values(jobs).filter((j) => j.status !== "probing");
+		const list = Object.values(jobs).filter(
+			(j) => j.status !== "probing" && !j.parent_job_id,
+		);
 		if (filterTab === "all") return list;
 		if (filterTab === "downloading") {
 			return list.filter((j) =>
@@ -988,30 +1174,6 @@ export function useDownloader() {
 				wsRef.current.send(JSON.stringify({ type: "resume", jobId }));
 			}
 			updateLocalJob(jobId, { status: "queued" });
-		},
-		[updateLocalJob],
-	);
-
-	const handleRefreshUrl = useCallback(
-		(jobId: string, url: string, referer?: string) => {
-			if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-				wsRef.current.send(
-					JSON.stringify({
-						type: "refresh_url",
-						jobId,
-						url,
-						referer,
-					}),
-				);
-			}
-			setUrlRefreshJobId(null);
-			updateLocalJob(jobId, {
-				status: "queued",
-				url,
-				referer,
-				error: undefined,
-				error_category: undefined,
-			});
 		},
 		[updateLocalJob],
 	);
@@ -1232,6 +1394,11 @@ export function useDownloader() {
 		selectAllTorrentFiles,
 		deselectAllTorrentFiles,
 		setSelectedTorrentFiles,
+		selectedPlaylistEntries,
+		togglePlaylistEntry,
+		selectAllPlaylistEntries,
+		deselectAllPlaylistEntries,
+		setSelectedPlaylistEntries,
 		selectedCategoryPath,
 		setSelectedCategoryPath,
 		drawerCustomPath,

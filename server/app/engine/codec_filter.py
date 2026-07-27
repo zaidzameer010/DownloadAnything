@@ -1,3 +1,4 @@
+import math
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
@@ -7,6 +8,52 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+
+
+def _as_positive_bytes(value: Any) -> Optional[int]:
+    """Return a positive byte count, treating yt-dlp's NA/nan/0/negative as None."""
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, (int, float)) and value > 0:
+        return int(value)
+    return None
+
+
+def format_size_bytes(
+    fmt: Any, duration: Optional[float] = None
+) -> Optional[int]:
+    """Return the best available byte size for a yt-dlp format dict.
+
+    Prefer exact ``filesize``, then ``filesize_approx``. If neither is available
+    and ``duration`` is provided, fall back to a bitrate-based estimate.
+    """
+    if not isinstance(fmt, dict):
+        return None
+    fmt_dict = cast(Dict[str, Any], fmt)
+    size = _as_positive_bytes(fmt_dict.get("filesize")) or _as_positive_bytes(
+        fmt_dict.get("filesize_approx")
+    )
+    if size is not None or not duration:
+        return size
+
+    tbr = fmt_dict.get("tbr") or 0
+    abr = fmt_dict.get("abr") or 0
+    vbr = fmt_dict.get("vbr") or 0
+
+    if abr and vbr:
+        rate = abr + vbr
+    elif tbr:
+        rate = tbr
+    elif abr:
+        rate = abr
+    elif vbr:
+        rate = vbr
+    else:
+        return None
+
+    return int(rate * 1000 * duration / 8) if rate > 0 else None
 
 
 def get_video_codec_family(vcodec: Optional[str]) -> str:
@@ -52,7 +99,7 @@ def _audio_rank(fmt: Dict[str, Any]) -> Tuple[int, int, int, int]:
         get_audio_language_preference(fmt),
         get_audio_codec_preference(fmt.get("acodec")),
         fmt.get("abr") or fmt.get("tbr") or 0,
-        fmt.get("filesize") or fmt.get("filesize_approx") or 0,
+        format_size_bytes(fmt) or 0,
     )
 
 
@@ -64,6 +111,24 @@ def format_file_size(bytes_val: Optional[float]) -> str:
             return f"{bytes_val:.1f} {unit}"
         bytes_val /= 1024.0
     return f"{bytes_val:.1f} PB"
+
+
+def _video_format_rank(
+    fmt: Dict[str, Any],
+    duration: Optional[float] = None,
+    primary_rate: str = "tbr",
+) -> Tuple[bool, bool, float, int]:
+    """Sort key: prefer formats with known size/bitrate, then progressive, then quality."""
+    size = format_size_bytes(fmt, duration) or 0
+    rate = (
+        fmt.get(primary_rate)
+        or fmt.get("tbr")
+        or fmt.get("vbr")
+        or fmt.get("abr")
+        or 0
+    )
+    has_quality = bool(size or rate)
+    return (has_quality, not is_stream_format(fmt), rate, size)
 
 
 def has_original_audio(fmt: Dict[str, Any]) -> bool:
@@ -159,9 +224,7 @@ def _summarize_audio_formats(
         ext = f.get("ext") or clean_pref
         abr = f.get("abr") or f.get("tbr") or 0
 
-        size = f.get("filesize") or f.get("filesize_approx")
-        if not size and abr and duration:
-            size = int(abr * 1000 * duration / 8)
+        size = format_size_bytes(f, duration)
 
         is_stream = is_stream_format(f)
         stream_type = get_stream_protocol(f)
@@ -290,10 +353,10 @@ def filter_and_summarize_formats(
         height = f.get("height") or 0
         width = f.get("width") or 0
         family = get_video_codec_family(f.get("vcodec"))
-        # HLS/DASH manifests often omit vcodec. Assume they match the dominant codec
-        # family so they collapse with progressive variants of the same resolution
-        # instead of appearing as duplicate "VIDEO" entries without filesize.
-        if family == "none" and is_stream_format(f) and dominant_family != "none":
+        # Formats with missing codec info (common for HLS/DASH manifests and some
+        # progressive fallbacks) should collapse with the dominant family so they do
+        # not create duplicate "VIDEO" buckets for the same resolution.
+        if family == "none" and dominant_family != "none":
             family = dominant_family
         dynamic_range = get_dynamic_range(f) or "SDR"
         # Only differentiate by width when height is missing; otherwise width
@@ -318,11 +381,7 @@ def filter_and_summarize_formats(
         if bucket_video_only and best_audio:
             # Sort by progressive preference, then total/video bitrate descending
             bucket_video_only.sort(
-                key=lambda x: (
-                    not is_stream_format(x),
-                    x.get("vbr") or x.get("tbr") or 0,
-                    x.get("filesize") or x.get("filesize_approx") or 0,
-                ),
+                key=lambda x: _video_format_rank(x, duration, "vbr"),
                 reverse=True,
             )
             chosen_format = bucket_video_only[0]
@@ -330,11 +389,7 @@ def filter_and_summarize_formats(
             is_combined_format = False
         elif bucket_combined:
             bucket_combined.sort(
-                key=lambda x: (
-                    not is_stream_format(x),
-                    x.get("tbr") or x.get("vbr") or 0,
-                    x.get("filesize") or x.get("filesize_approx") or 0,
-                ),
+                key=lambda x: _video_format_rank(x, duration, "tbr"),
                 reverse=True,
             )
             chosen_format = bucket_combined[0]
@@ -342,11 +397,7 @@ def filter_and_summarize_formats(
         elif bucket_video_only:
             # No audio available, pick video only
             bucket_video_only.sort(
-                key=lambda x: (
-                    not is_stream_format(x),
-                    x.get("vbr") or x.get("tbr") or 0,
-                    x.get("filesize") or x.get("filesize_approx") or 0,
-                ),
+                key=lambda x: _video_format_rank(x, duration, "vbr"),
                 reverse=True,
             )
             chosen_format = bucket_video_only[0]
@@ -364,24 +415,16 @@ def filter_and_summarize_formats(
         else:
             format_id = chosen_format["format_id"]
 
-        # Calculate estimated size
-        size = None
-        video_size = chosen_format.get("filesize") or chosen_format.get(
-            "filesize_approx"
+        # Prefer reported sizes; fall back to bitrate-duration estimates
+        video_size = format_size_bytes(chosen_format, duration)
+        audio_size = (
+            format_size_bytes(audio_pair, duration)
+            if audio_pair and not is_combined_format
+            else None
         )
-        if not video_size and duration:
-            vbr = chosen_format.get("vbr") or chosen_format.get("tbr") or 0
-            if vbr > 0:
-                video_size = int(vbr * 1000 * duration / 8)
 
-        audio_size = None
+        size = None
         if audio_pair and not is_combined_format:
-            audio_size = audio_pair.get("filesize") or audio_pair.get("filesize_approx")
-            if not audio_size and duration:
-                abr = audio_pair.get("abr") or audio_pair.get("tbr") or 0
-                if abr > 0:
-                    audio_size = int(abr * 1000 * duration / 8)
-
             if video_size and audio_size:
                 size = video_size + audio_size
             elif video_size:

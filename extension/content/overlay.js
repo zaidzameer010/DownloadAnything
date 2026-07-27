@@ -21,6 +21,70 @@
 		MSG.safeSendMessage("Overlay", message, callback);
 	}
 
+	function getMediaSourceUrl(mediaElement) {
+		if (!mediaElement) return null;
+		let src = mediaElement.currentSrc || mediaElement.src;
+		if (!src && mediaElement.getElementsByTagName) {
+			const sources = mediaElement.getElementsByTagName("source");
+			if (sources.length > 0) src = sources[0].src;
+		}
+		if (src && !src.startsWith("blob:") && src.startsWith("http")) return src;
+		return null;
+	}
+
+	function findLatestMediaResourceUrl(baseUrl) {
+		if (typeof window.performance === "undefined") return null;
+		try {
+			const entries = window.performance.getEntriesByType("resource");
+			if (!entries.length) return null;
+			const base = baseUrl || window.location.href;
+			let baseDomain = "";
+			try {
+				baseDomain = new URL(base).hostname;
+			} catch {
+				// ignore
+			}
+			const candidates = [];
+			for (const entry of entries) {
+				const url = entry.name;
+				if (!url || url.startsWith("blob:") || !url.startsWith("http"))
+					continue;
+				if (url === base) continue;
+				let domain = "";
+				try {
+					domain = new URL(url).hostname;
+				} catch {
+					continue;
+				}
+				if (baseDomain && domain !== baseDomain) continue;
+				const lower = url.toLowerCase();
+				const hasMediaExt =
+					/(\\.(vid|mp4|webm|mkv|mov|ogv|m3u8|mpd))($|[?#])/.test(lower);
+				const isMediaInitiator = [
+					"video",
+					"audio",
+					"other",
+					"xmlhttprequest",
+					"fetch",
+				].includes(entry.initiatorType);
+				if (!hasMediaExt && !isMediaInitiator) continue;
+				candidates.push(entry);
+			}
+			if (!candidates.length) return null;
+			candidates.sort((a, b) => {
+				const timeA = a.responseEnd || 0;
+				const timeB = b.responseEnd || 0;
+				if (timeB !== timeA) return timeB - timeA;
+				const directA = /\\.(vid|mp4|webm|mkv)($|[?#])/i.test(a.name) ? 1 : 0;
+				const directB = /\\.(vid|mp4|webm|mkv)($|[?#])/i.test(b.name) ? 1 : 0;
+				return directB - directA;
+			});
+			return candidates[0].name;
+		} catch {
+			return null;
+		}
+	}
+
 	function triggerDownloadFlow(targetUrl) {
 		safeSendMessage({ type: "PING_BACKEND" }, (response) => {
 			if (response && response.available) {
@@ -186,14 +250,10 @@
 			btn.addEventListener("click", (e) => {
 				e.stopPropagation();
 				if (activeMedia) {
-					let mediaUrl = activeMedia.src;
-					if (
-						!mediaUrl ||
-						mediaUrl.startsWith("blob:") ||
-						!mediaUrl.startsWith("http")
-					) {
-						mediaUrl = window.location.href;
-					}
+					let mediaUrl = getMediaSourceUrl(activeMedia);
+					const actualUrl = findLatestMediaResourceUrl(mediaUrl);
+					if (actualUrl) mediaUrl = actualUrl;
+					if (!mediaUrl) mediaUrl = window.location.href;
 					triggerDownloadFlow(mediaUrl);
 				}
 			});
@@ -390,16 +450,9 @@
 		} else if (message.type === "EXTENSION_ACTIVATED") {
 			let targetUrl = window.location.href;
 			if (activeMedia) {
-				let src = activeMedia.currentSrc || activeMedia.src;
-				if (!src && activeMedia.getElementsByTagName) {
-					const sources = activeMedia.getElementsByTagName("source");
-					if (sources.length > 0) {
-						src = sources[0].src;
-					}
-				}
-				if (src && !src.startsWith("blob:") && src.startsWith("http")) {
-					targetUrl = src;
-				}
+				const mediaUrl = getMediaSourceUrl(activeMedia);
+				const actualUrl = findLatestMediaResourceUrl(mediaUrl);
+				targetUrl = actualUrl || mediaUrl || window.location.href;
 			}
 			triggerDownloadFlow(targetUrl);
 		}

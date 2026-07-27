@@ -105,8 +105,10 @@ class FileService:
         ext: Optional[str] = None,
         url: Optional[str] = None,
         mime: Optional[str] = None,
-    ) -> dict:
+    ) -> dict[str, object]:
         check_filename = filename or ""
+        resolved_title = title or ""
+        resolved_path = path
         exists = False
         try:
             allowed_roots = await self.get_allowed_output_roots()
@@ -116,6 +118,7 @@ class FileService:
                 raise ValueError(f"Rejected file existence check for disallowed path: {path}")
 
             base_path = Path(path).expanduser().resolve()
+            resolved_path = str(base_path)
 
             if filename or title or ext or url:
                 resolved = await asyncio.to_thread(
@@ -129,6 +132,7 @@ class FileService:
                     allow_network=False,
                 )
                 check_filename = resolved.filename
+                resolved_title = resolved.title
 
             if any(sep in check_filename for sep in ("/", "\\", "..")):
                 raise ValueError(
@@ -147,7 +151,9 @@ class FileService:
             "type": "file_exists_result",
             "exists": exists,
             "filename": check_filename,
+            "title": resolved_title,
             "path": path,
+            "resolvedPath": resolved_path,
             "jobId": job_id,
         }
 

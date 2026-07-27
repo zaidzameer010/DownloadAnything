@@ -38,6 +38,7 @@ class TorrentProber(IProbeEngine):
         referer: Optional[str] = None,
         page_title: Optional[str] = None,
         mime_hint: Optional[str] = None,
+        stream_url: Optional[str] = None,
     ) -> dict[str, Any]:
         return probe_magnet(url)
 

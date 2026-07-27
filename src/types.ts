@@ -14,6 +14,22 @@ export interface TorrentMetadata {
 	infoHash: string;
 }
 
+export interface PlaylistEntry {
+	index: number;
+	title?: string;
+	url: string;
+	duration?: number;
+	thumbnail?: string;
+	uploader?: string;
+	size?: number;
+}
+
+export interface PlaylistMetadata {
+	title?: string;
+	entries: PlaylistEntry[];
+	total_size?: number;
+}
+
 export interface Job {
 	job_id: string;
 	url: string;
@@ -50,6 +66,11 @@ export interface Job {
 	torrent_seeds?: number;
 	torrent_availability?: number;
 	torrent_completed_pieces?: number;
+	// Playlist support
+	playlist_entries?: PlaylistEntry[];
+	playlist_selected_indices?: number[];
+	playlist_child_job_ids?: string[];
+	parent_job_id?: string;
 }
 
 export interface Category {
@@ -86,6 +107,7 @@ export interface ProbedInfo {
 	fileType?: string;
 	mime?: string;
 	torrent?: TorrentMetadata;
+	playlist?: PlaylistMetadata;
 }
 
 export interface ServerInfo {
@@ -98,6 +120,10 @@ export interface DuplicateJobAlert {
 	url: string;
 	title: string;
 	status: string;
+	reason?: "url" | "title" | "filename";
+	forJobId?: string;
+	filename?: string;
+	outputDir?: string;
 }
 
 export interface DuplicateFileAlert {

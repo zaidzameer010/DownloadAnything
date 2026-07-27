@@ -13,7 +13,8 @@ import urllib.request
 from dataclasses import dataclass
 from email.message import Message
 from html.parser import HTMLParser
-from typing import Any
+from http.client import HTTPMessage
+from typing import Any, cast
 
 from app.utils.http import build_headers, create_ssl_context, is_safe_url
 from app.utils.logger import get_logger, redact_url
@@ -30,6 +31,18 @@ _NON_HTML_PATH_TOKENS = (
     ".ism",
     ".f4m",
 )
+
+# Extensions that commonly indicate an HTML page and should still be fetched for metadata.
+_HTML_EXTENSIONS = {
+    "html",
+    "htm",
+    "xhtml",
+    "php",
+    "asp",
+    "aspx",
+    "jsp",
+    "cgi",
+}
 
 # Trailing file extension pattern (2–8 alphanumerics). Used to strip any ext
 # from titles — not a curated type map.
@@ -61,6 +74,9 @@ _GARBAGE_TITLES = {
     "segment",
     "init",
     "video_1",
+    # Common HLS/DASH packager output basenames (e.g. ts.m3u8, av.mp4).
+    "ts",
+    "av",
     # Common CDN/script handler names that should never become titles.
     "remote_control",
     "remote",
@@ -177,20 +193,22 @@ def _extract_jsonld_name(script_text: str) -> str | None:
     def pick_name(obj: Any) -> str | None:
         if not isinstance(obj, dict):
             return None
+        obj = cast(dict[str, Any], obj)
         # Prefer explicit video-like entries in @graph.
         graph = obj.get("@graph")
         if isinstance(graph, list):
             for item in graph:
                 if not isinstance(item, dict):
                     continue
-                type_val = (item.get("@type") or "").lower()
+                item = cast(dict[str, Any], item)
+                type_val = str(item.get("@type") or "").lower()
                 if type_val in video_types or type_val == "webpage":
                     for key in ("name", "headline"):
                         val = item.get(key)
                         if isinstance(val, str) and val.strip():
                             return val.strip()
         # Top-level name/headline.
-        type_val = (obj.get("@type") or "").lower()
+        type_val = str(obj.get("@type") or "").lower()
         for key in ("name", "headline"):
             val = obj.get(key)
             if isinstance(val, str) and val.strip():
@@ -454,6 +472,16 @@ def _is_unusable_stem(title: str) -> bool:
     if re.match(r"^[0-9a-f]{12,}$", numeric_stripped):
         return True
 
+    # Reject opaque CDN hash IDs: long, no whitespace, mixed alphanumeric,
+    # and digit-heavy. Real titles either contain spaces or are mostly letters.
+    if (
+        len(lowered_stripped) >= 20
+        and lowered_stripped.isalnum()
+        and " " not in lowered_stripped
+        and sum(1 for c in lowered_stripped if c.isdigit()) / len(lowered_stripped) >= 0.3
+    ):
+        return True
+
     # Reject numeric-id based filenames like "586907_720p", "12345_hd".
     if re.match(r"^\d{3,}[-_](720p|1080p|480p|360p|240p|720|1080|hd|sd|fullhd|fhd|uhd|4k)$", lowered_stripped, re.IGNORECASE):
         return True
@@ -536,7 +564,7 @@ def _fetch_headers(
     url: str,
     referer: str | None,
     timeout: float,
-) -> urllib.error.HTTPMessage | None:
+) -> HTTPMessage | None:
     """Fetch response headers, falling back from HEAD to a tiny GET on 405."""
     if not is_safe_url(url):
         return None
@@ -617,9 +645,13 @@ def _looks_like_binary_url(url: str) -> bool:
         path = lower
     if any(token in path or lower.endswith(token) for token in _NON_HTML_PATH_TOKENS):
         return True
-    # If the last path segment has a file extension, treat as non-HTML.
+    # If the last path segment has a file extension, treat it as non-HTML
+    # unless the extension itself is a common HTML-page extension.
     basename = path.rsplit("/", 1)[-1]
-    return bool(_extract_trailing_extension(basename))
+    ext = _extract_trailing_extension(basename)
+    if ext and ext.lower() in _HTML_EXTENSIONS:
+        return False
+    return bool(ext)
 
 
 def _clean_page_title(page_title: str, url: str | None = None) -> str | None:
@@ -643,27 +675,30 @@ def _clean_page_title(page_title: str, url: str | None = None) -> str | None:
         except Exception:
             pass
 
-    # Common separators used to combine title with performer/site.
-    separators = (" | ", " - ", " – ", " — ", " // ")
-    for sep in separators:
-        if sep not in title:
+    # Common separators used to combine title with performer/site/tags.
+    # Split on all of them at once and pick the longest valid segment; a title
+    # like "Artist - Real Title ___ Like This #tag1 #tag2" should yield "Real Title".
+    separators = (" | ", " - ", " – ", " — ", " // ", "｜", "|", " ___ ", " #")
+    split_pattern = "|".join(re.escape(sep) for sep in separators)
+    parts = [p.strip() for p in re.split(split_pattern, title) if p.strip()]
+
+    filtered: list[str] = []
+    for p in parts:
+        lowered = p.lower()
+        if hostname and lowered == hostname:
             continue
-        parts = [p.strip() for p in title.split(sep)]
-        filtered = []
-        for p in parts:
-            lowered = p.lower()
-            if hostname and lowered == hostname:
-                continue
-            if host_first and lowered == host_first:
-                continue
-            if _is_unusable_stem(p):
-                continue
-            filtered.append(p)
-        if filtered:
-            # Prefer the longest remaining segment; in "Performer | Title | Site"
-            # arrangements the actual media title is usually the longest.
-            filtered.sort(key=len, reverse=True)
-            candidate = sanitize_title(filtered[0])
+        if host_first and lowered == host_first:
+            continue
+        if _is_unusable_stem(p):
+            continue
+        filtered.append(p)
+
+    if filtered:
+        # Prefer the longest remaining segment; in "Performer | Title | Site"
+        # arrangements the actual media title is usually the longest.
+        filtered.sort(key=len, reverse=True)
+        for segment in filtered:
+            candidate = sanitize_title(segment)
             if candidate and not _is_garbage_title(candidate, url or ""):
                 return candidate
 

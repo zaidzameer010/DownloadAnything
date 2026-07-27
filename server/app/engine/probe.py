@@ -22,6 +22,7 @@ class ProbeOrchestrator(IProbeEngine):
         referer: Optional[str] = None,
         page_title: Optional[str] = None,
         mime_hint: Optional[str] = None,
+        stream_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         return probe_video(
             job_id,
@@ -30,6 +31,7 @@ class ProbeOrchestrator(IProbeEngine):
             page_title=page_title,
             mime_hint=mime_hint,
             settings=settings,
+            stream_url=stream_url,
         )
 
 
@@ -40,6 +42,7 @@ def probe_video(
     referer: Optional[str] = None,
     page_title: Optional[str] = None,
     mime_hint: Optional[str] = None,
+    stream_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Orchestrates probing by routing to the appropriate specialized extractor.
@@ -48,6 +51,13 @@ def probe_video(
     unknown (no stream path tokens, no dedicated yt-dlp site), a cheap HEAD
     request supplies Content-Type so classification stays MIME-driven without
     extension allowlists.
+
+    Fallback order:
+      1. yt-dlp native probe (probe_stream).
+      2. Stream extraction: a captured stream/manifest URL from the caller
+         (e.g. a browser extension's m3u8 intercept).
+      3. Generic extraction: direct file/media probe for URLs that look like
+         blobs yt-dlp could not handle.
     """
     bucket = classify_url(url, mime=mime_hint)
     resolved_mime = mime_hint
@@ -110,7 +120,8 @@ def probe_video(
                     raise
             raise
 
-    # yt-dlp supported sites, stream manifests, and unknown pages.
+    # 1. yt-dlp native probe for supported sites, stream manifests, and pages.
+    native_err: Optional[BaseException] = None
     try:
         return probe_stream(
             job_id=job_id,
@@ -120,18 +131,49 @@ def probe_video(
             settings=settings,
         )
     except Exception as exc:
-        if is_direct_file_url(url):
-            logger.info(
-                f"probe_stream failed for direct file URL {redact_url(url)}: {exc}; "
-                f"falling back to probe_direct_media."
-            )
-            return probe_direct_media(
+        native_err = exc
+        logger.warning(
+            f"yt-dlp native probe failed for {redact_url(url)}: {exc}"
+        )
+
+    # 2. Stream extraction fallback: the caller may have supplied a captured
+    #    stream/manifest URL (e.g. from a browser extension's network observer).
+    if stream_url and stream_url != url:
+        try:
+            info = probe_stream(
                 job_id=job_id,
-                url=url,
+                url=stream_url,
                 referer=referer,
                 page_title=page_title,
-                mime_hint=resolved_mime,
-                allow_html_fallback=True,
                 settings=settings,
             )
-        raise
+            # Preserve the original page URL for refresh/referer logic.
+            if not info.get("page_url"):
+                info["page_url"] = url
+            return info
+        except Exception as stream_err:
+            logger.warning(
+                f"Stream extraction fallback failed for {redact_url(stream_url)}: {stream_err}"
+            )
+
+    # 3. Generic extraction fallback: direct file/media probe. This catches
+    #    blobs yt-dlp could not handle (e.g. unlabeled direct files) without
+    #    misclassifying ordinary HTML pages as media.
+    try:
+        return probe_direct_media(
+            job_id=job_id,
+            url=url,
+            referer=referer,
+            page_title=page_title,
+            mime_hint=resolved_mime,
+            allow_html_fallback=False,
+            settings=settings,
+        )
+    except Exception as generic_err:
+        logger.warning(
+            f"Generic extraction fallback failed for {redact_url(url)}: {generic_err}"
+        )
+
+    # Propagate the original yt-dlp failure; it is the most informative error.
+    if native_err is not None:
+        raise native_err

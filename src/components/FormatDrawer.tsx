@@ -1,4 +1,4 @@
-import { Download, FileDown, FolderOpen, Music, Video } from "lucide-react";
+import { Download, FileDown, FolderOpen, List, Music, Video } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { UseDownloaderReturn } from "../hooks/useDownloader";
 import { formatBytes, formatDuration } from "../utils";
@@ -13,6 +13,7 @@ const ENGINE_BADGES: Record<string, { label: string; cls: string }> = {
 	file: { label: "Direct", cls: "file" },
 	direct: { label: "Direct", cls: "file" },
 	torrent: { label: "Torrent", cls: "torrent" },
+	playlist: { label: "Playlist", cls: "ytdlp" },
 	ytdlp: { label: "yt-dlp", cls: "ytdlp" },
 	// High-level MIME buckets
 	video: { label: "Video", cls: "file" },
@@ -38,6 +39,10 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 		toggleTorrentFile,
 		selectAllTorrentFiles,
 		deselectAllTorrentFiles,
+		selectedPlaylistEntries,
+		togglePlaylistEntry,
+		selectAllPlaylistEntries,
+		deselectAllPlaylistEntries,
 		categories,
 		selectedCategoryPath,
 		setSelectedCategoryPath,
@@ -48,10 +53,24 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 		inputUrl,
 	} = downloader;
 
-	const [activeTab, setActiveTab] = useState<"video" | "audio">("video");
+	const hasPlaylist = useMemo(
+		() =>
+			!!probedInfo &&
+			probedInfo.mediaType === "playlist" &&
+			!!probedInfo.playlist?.entries?.length,
+		[probedInfo],
+	);
+
+	const [activeTab, setActiveTab] = useState<"video" | "audio" | "playlist">(
+		"video",
+	);
 
 	useEffect(() => {
-		if (!probedInfo) return;
+		setActiveTab(hasPlaylist ? "playlist" : "video");
+	}, [hasPlaylist]);
+
+	useEffect(() => {
+		if (!probedInfo || activeTab === "playlist") return;
 		const activeFormats = probedInfo.formats.filter((fmt) => {
 			const hasDimension =
 				(fmt.height && fmt.height > 0) || (fmt.width && fmt.width > 0);
@@ -68,7 +87,6 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 			setSelectedFormatId(activeFormats[0].formatId);
 		}
 	}, [activeTab, probedInfo, selectedFormatId, setSelectedFormatId]);
-
 	const selectAllRef = useRef<HTMLInputElement>(null);
 	const torrentFileCount = probedInfo?.torrent?.files.length ?? 0;
 	const allTorrentFilesSelected =
@@ -84,14 +102,33 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 		);
 	}, [probedInfo, selectedTorrentFiles]);
 
+	const playlistSelectAllRef = useRef<HTMLInputElement>(null);
+	const playlistEntryCount = probedInfo?.playlist?.entries?.length ?? 0;
+	const allPlaylistEntriesSelected =
+		playlistEntryCount > 0 && selectedPlaylistEntries.size === playlistEntryCount;
+	const somePlaylistEntriesSelected =
+		selectedPlaylistEntries.size > 0 && !allPlaylistEntriesSelected;
+	const totalSelectedPlaylistSize = useMemo(() => {
+		if (!probedInfo?.playlist?.entries) return 0;
+		return probedInfo.playlist.entries.reduce(
+			(sum, entry) =>
+				selectedPlaylistEntries.has(entry.index) ? sum + (entry.size ?? 0) : sum,
+			0,
+		);
+	}, [probedInfo, selectedPlaylistEntries]);
+
 	useEffect(() => {
 		if (selectAllRef.current) {
 			selectAllRef.current.indeterminate = someTorrentFilesSelected;
 		}
-	}, [someTorrentFilesSelected]);
+		if (playlistSelectAllRef.current) {
+			playlistSelectAllRef.current.indeterminate = somePlaylistEntriesSelected;
+		}
+	}, [someTorrentFilesSelected, somePlaylistEntriesSelected]);
 
 	const isDownloadDisabled =
-		probedInfo?.mediaType === "torrent" && selectedTorrentFiles.size === 0;
+		(probedInfo?.mediaType === "torrent" && selectedTorrentFiles.size === 0) ||
+		(activeTab === "playlist" && selectedPlaylistEntries.size === 0);
 
 	const isOpen = showFormatDrawer && !!probedInfo;
 
@@ -117,7 +154,11 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 					</button>
 					<button
 						className="action-btn"
-						onClick={handleChooseFormat}
+						onClick={() =>
+							handleChooseFormat(
+								activeTab === "playlist" ? "playlist" : "video",
+							)
+						}
 						disabled={isDownloadDisabled}
 					>
 						<span>Download Now</span>
@@ -244,9 +285,11 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 						</div>
 					) : (
 						<div style={{ marginTop: "20px" }}>
-							<div className="format-section-title">
-								Available Target Streams
-							</div>
+							{activeTab !== "playlist" && (
+								<div className="format-section-title">
+									Available Target Streams
+								</div>
+							)}
 
 							<div className="modal-tabs">
 								<button
@@ -257,111 +300,206 @@ export function FormatDrawer({ downloader }: FormatDrawerProps) {
 									<Video size={13} />
 									Video
 								</button>
-								<button
-									type="button"
-									className={`modal-tab-btn ${activeTab === "audio" ? "active" : ""}`}
-									onClick={() => setActiveTab("audio")}
-								>
-									<Music size={13} />
-									Audio
-								</button>
+								{hasPlaylist ? (
+									<button
+										type="button"
+										className={`modal-tab-btn ${activeTab === "playlist" ? "active" : ""}`}
+										onClick={() => setActiveTab("playlist")}
+									>
+										<List size={13} />
+										Playlist
+									</button>
+								) : (
+									<button
+										type="button"
+										className={`modal-tab-btn ${activeTab === "audio" ? "active" : ""}`}
+										onClick={() => setActiveTab("audio")}
+									>
+										<Music size={13} />
+										Audio
+									</button>
+								)}
 							</div>
 
-							<div className="format-list">
-								<div className="format-list-header">
-									<div className="format-list-radio-col"></div>
-									<div className="format-list-label-col">Stream Name</div>
-									<div className="format-list-ext-col">Ext</div>
-									<div className="format-list-size-col">Est. Size</div>
-									<div className="format-list-badges-col">Details</div>
+							{activeTab === "playlist" && probedInfo.playlist ? (
+								<div className="playlist-metadata-panel">
+									<div className="playlist-summary-grid">
+										<span>Entries</span>
+										<strong>{probedInfo.playlist.entries.length}</strong>
+										<span>Total size</span>
+										<strong>
+											{formatBytes(probedInfo.playlist.total_size ?? 0)}
+										</strong>
+										<span>Quality</span>
+										<strong>Best available</strong>
+									</div>
+
+									<div
+										style={{
+											fontSize: "12px",
+											fontWeight: 600,
+											margin: "16px 0 8px",
+											color: "var(--text-secondary)",
+										}}
+									>
+										Select Entries to Download
+									</div>
+									<div className="format-list">
+										<div className="format-list-header">
+											<div className="format-list-radio-col">
+												<input
+													type="checkbox"
+													ref={playlistSelectAllRef}
+													checked={allPlaylistEntriesSelected}
+													onChange={() =>
+														allPlaylistEntriesSelected
+															? deselectAllPlaylistEntries()
+															: selectAllPlaylistEntries()
+													}
+												/>
+											</div>
+											<div className="format-list-label-col">Title</div>
+											<div
+												className="format-list-size-col"
+												style={{ textAlign: "right" }}
+											>
+												{formatBytes(totalSelectedPlaylistSize)} /{" "}
+												{formatBytes(
+													probedInfo.playlist.total_size ?? 0,
+												)}
+											</div>
+										</div>
+										{probedInfo.playlist.entries.map((entry) => (
+											<label
+												key={entry.index}
+												className="playlist-entry-row"
+												htmlFor={`playlist-entry-${entry.index}`}
+											>
+												<input
+													type="checkbox"
+													id={`playlist-entry-${entry.index}`}
+													checked={selectedPlaylistEntries.has(entry.index)}
+													onChange={() => togglePlaylistEntry(entry.index)}
+												/>
+												{entry.thumbnail ? (
+													<img
+														src={entry.thumbnail}
+														alt=""
+														className="playlist-entry-thumb"
+													/>
+												) : (
+													<div className="playlist-entry-thumb-placeholder" />
+												)}
+												<span title={entry.title ?? entry.url}>
+													{entry.title ?? entry.url}
+												</span>
+												<small>
+													{entry.duration
+														? formatDuration(entry.duration)
+														: "\u2014"}{" "}
+													{entry.size ? formatBytes(entry.size) : ""}
+												</small>
+											</label>
+										))}
+									</div>
 								</div>
-								{probedInfo.formats
-									.filter((fmt) => {
-										const isVideo =
+							) : (
+								<div className="format-list">
+									<div className="format-list-header">
+										<div className="format-list-radio-col"></div>
+										<div className="format-list-label-col">Stream Name</div>
+										<div className="format-list-ext-col">Ext</div>
+										<div className="format-list-size-col">Est. Size</div>
+										<div className="format-list-badges-col">Details</div>
+									</div>
+									{probedInfo.formats
+										.filter((fmt) => {
+											const isVideo =
+												(fmt.height && fmt.height > 0) ||
+												fmt.formatId === "best" ||
+												(fmt.codecFamily === "video" && !fmt.isStream);
+											return activeTab === "video" ? isVideo : !isVideo;
+										})
+										.map((fmt) => {
+											const isSelected = selectedFormatId === fmt.formatId;
+											return (
+												<div
+													key={fmt.formatId}
+													className={`format-list-row ${isSelected ? "selected" : ""}`}
+													onClick={() => setSelectedFormatId(fmt.formatId)}
+												>
+													<div className="format-list-radio-col">
+														<input
+															type="radio"
+															name="format-choice"
+															checked={isSelected}
+															onChange={() => setSelectedFormatId(fmt.formatId)}
+														/>
+													</div>
+													<div className="format-list-label-col">
+														<span className="format-list-label" title={fmt.label}>
+															{fmt.label}
+														</span>
+													</div>
+													<div className="format-list-ext-col">
+														<span className="format-list-ext">
+															{fmt.ext.toUpperCase()}
+														</span>
+													</div>
+													<div className="format-list-size-col">
+														<span className="format-list-size">
+															{fmt.estSizeBytes
+																? formatBytes(fmt.estSizeBytes)
+																: "\u2014"}
+														</span>
+													</div>
+													<div className="format-list-badges-col">
+														{fmt.hdr && (
+															<span className="format-badge hdr">HDR</span>
+														)}
+														{fmt.isCombined && (
+															<span
+																className="format-badge-pill video"
+																title="Multiplexed video and audio"
+															>
+																Muxed
+															</span>
+														)}
+														{fmt.codecFamily && (
+															<span
+																className="format-badge codec"
+																title={fmt.codecFamily}
+															>
+																{fmt.codecFamily}
+															</span>
+														)}
+													</div>
+												</div>
+											);
+										})}
+									{probedInfo.formats.filter((fmt) => {
+										const hasDimension =
 											(fmt.height && fmt.height > 0) ||
+											(fmt.width && fmt.width > 0);
+										const isVideo =
+											hasDimension ||
 											fmt.formatId === "best" ||
 											(fmt.codecFamily === "video" && !fmt.isStream);
 										return activeTab === "video" ? isVideo : !isVideo;
-									})
-									.map((fmt) => {
-										const isSelected = selectedFormatId === fmt.formatId;
-										return (
-											<div
-												key={fmt.formatId}
-												className={`format-list-row ${isSelected ? "selected" : ""}`}
-												onClick={() => setSelectedFormatId(fmt.formatId)}
-											>
-												<div className="format-list-radio-col">
-													<input
-														type="radio"
-														name="format-choice"
-														checked={isSelected}
-														onChange={() => setSelectedFormatId(fmt.formatId)}
-													/>
-												</div>
-												<div className="format-list-label-col">
-													<span className="format-list-label" title={fmt.label}>
-														{fmt.label}
-													</span>
-												</div>
-												<div className="format-list-ext-col">
-													<span className="format-list-ext">
-														{fmt.ext.toUpperCase()}
-													</span>
-												</div>
-												<div className="format-list-size-col">
-													<span className="format-list-size">
-														{fmt.estSizeBytes
-															? formatBytes(fmt.estSizeBytes)
-															: "\u2014"}
-													</span>
-												</div>
-												<div className="format-list-badges-col">
-													{fmt.hdr && (
-														<span className="format-badge hdr">HDR</span>
-													)}
-													{fmt.isCombined && (
-														<span
-															className="format-badge-pill video"
-															title="Multiplexed video and audio"
-														>
-															Muxed
-														</span>
-													)}
-													{fmt.codecFamily && (
-														<span
-															className="format-badge codec"
-															title={fmt.codecFamily}
-														>
-															{fmt.codecFamily}
-														</span>
-													)}
-												</div>
-											</div>
-										);
-									})}
-								{probedInfo.formats.filter((fmt) => {
-									const hasDimension =
-										(fmt.height && fmt.height > 0) ||
-										(fmt.width && fmt.width > 0);
-									const isVideo =
-										hasDimension ||
-										fmt.formatId === "best" ||
-										(fmt.codecFamily === "video" && !fmt.isStream);
-									return activeTab === "video" ? isVideo : !isVideo;
-								}).length === 0 && (
-									<div
-										style={{
-											padding: "24px",
-											textAlign: "center",
-											color: "var(--text-muted)",
-											fontSize: "13px",
-										}}
-									>
-										No formats discovered for this tab.
-									</div>
-								)}
-							</div>
+									}).length === 0 && (
+										<div
+											style={{
+												padding: "24px",
+												textAlign: "center",
+												color: "var(--text-muted)",
+												fontSize: "13px",
+											}}
+										>
+											No formats discovered for this tab.
+										</div>
+									)}
+								</div>
+							)}
 						</div>
 					)}
 

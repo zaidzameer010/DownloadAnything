@@ -94,6 +94,7 @@
 				return { label: "Direct", cls: "file" };
 			case "torrent":
 				return { label: "Torrent", cls: "torrent" };
+			case "playlist":
 			case "ytdlp":
 				return { label: "yt-dlp", cls: "ytdlp" };
 			default:
@@ -138,6 +139,30 @@
 		}
 	}
 
+	function getAlertRoot() {
+		if (shadowRoot) return shadowRoot;
+
+		let host = document.getElementById("dma-alert-host");
+		if (!host) {
+			host = document.createElement("div");
+			host.id = "dma-alert-host";
+			document.body.appendChild(host);
+		}
+
+		let root = host.shadowRoot;
+		if (!root) {
+			root = host.attachShadow({ mode: "open" });
+			const styleHref = safeGetURL("content/styles.css");
+			if (styleHref) {
+				const styleLink = document.createElement("link");
+				styleLink.rel = "stylesheet";
+				styleLink.href = styleHref;
+				root.appendChild(styleLink);
+			}
+		}
+		return root;
+	}
+
 	function safeStorageLocalGet(keys, callback) {
 		if (
 			!isExtensionContextValid() ||
@@ -173,6 +198,32 @@
 
 	safeStorageLocalGet(["settings"], _applySettings);
 
+	function _getBestPageTitle() {
+		try {
+			const og = document.querySelector('meta[property="og:title"]')?.content;
+			if (og?.trim()) return og.trim();
+			const twitter = document.querySelector('meta[name="twitter:title"]')?.content;
+			if (twitter?.trim()) return twitter.trim();
+		} catch (e) {
+			logger.warn("[Modal] failed to read page title metadata:", e);
+		}
+		return document.title || "";
+	}
+
+	function _getBestReferer(candidate) {
+		try {
+			if (candidate) {
+				const parsed = new URL(candidate);
+				// Avoid bare origins as a referer;
+				// they have no page-specific metadata. Keep full page URLs instead.
+				if (parsed.pathname && parsed.pathname !== "/") {
+					return candidate;
+				}
+			}
+		} catch (_e) {}
+		return window.location.href;
+	}
+
 	let modalElement = null;
 	let shadowRoot = null;
 	let currentJobId = null;
@@ -190,9 +241,11 @@
 	let interceptedData = null;
 	let currentFormats = [];
 	let currentTorrentFiles = [];
+	let currentPlaylistEntries = [];
 	// UI-selected output container; populated from storage/settings_data.
 	let userMergeFormat = "";
 	let selectedTorrentFiles = new Set();
+	let selectedPlaylistEntries = new Set();
 	let fallbackStage = "native"; // "native" | "stream" | "direct" | "done"
 	let fallbackQueue = [];
 	const fallbackUrlsTried = new Set();
@@ -228,8 +281,9 @@
 					type: "PROBE_MEDIA",
 					jobId: currentJobId,
 					url: initialUrl,
-					title: document.title || "",
+					title: _getBestPageTitle(),
 					referer: window.location.href,
+					pageUrl: window.location.href,
 				});
 			});
 		},
@@ -249,7 +303,7 @@
 			const extGuess = rawName.includes(".")
 				? rawName.slice(rawName.lastIndexOf(".") + 1)
 				: "";
-			currentTitle = stem || document.title || "downloaded_file";
+			currentTitle = stem || _getBestPageTitle() || "downloaded_file";
 			currentFilename = "";
 			mediaUrl = download.url;
 
@@ -444,8 +498,9 @@
 				type: "PROBE_MEDIA",
 				jobId: currentJobId,
 				url: newUrl,
-				title: document.title || "",
-				referer: refererUrl || window.location.href,
+				title: _getBestPageTitle(),
+				referer: _getBestReferer(refererUrl),
+				pageUrl: window.location.href,
 			});
 		},
 
@@ -513,8 +568,9 @@
 							type: "PROBE_MEDIA",
 							jobId: currentJobId,
 							url: mediaUrl,
-							title: document.title || "",
+							title: _getBestPageTitle(),
 							referer: window.location.href,
+							pageUrl: window.location.href,
 						});
 					});
 			}
@@ -577,6 +633,48 @@
 			}
 
 			formatListContainer.innerHTML = formatsHtml;
+		},
+
+		renderPlaylistList(entries, selectedSet) {
+			const formatListContainer = shadowRoot.getElementById(
+				"formatListContainer",
+			);
+			if (!formatListContainer) return;
+
+			const totalSize = entries.reduce(
+				(sum, e) => sum + (e.size || 0),
+				0,
+			);
+			const selectedSize = entries
+				.filter((e) => selectedSet.has(e.index))
+				.reduce((sum, e) => sum + (e.size || 0), 0);
+
+			let html = `
+				<div class="format-list-header">
+					<div class="format-list-radio-col">
+						<input type="checkbox" id="playlistSelectAll" ${entries.length > 0 && selectedSet.size === entries.length ? "checked" : ""}>
+					</div>
+					<div class="format-list-label-col">Title</div>
+					<div class="format-list-size-col" style="text-align:right">${formatBytes(selectedSize)} / ${formatBytes(totalSize)}</div>
+				</div>
+			`;
+
+			entries.forEach((entry) => {
+				const checkedAttr = selectedSet.has(entry.index) ? "checked" : "";
+				html += `
+					<label class="playlist-entry-row" for="playlist-entry-${entry.index}">
+						<div class="format-list-radio-col">
+							<input type="checkbox" id="playlist-entry-${entry.index}" class="playlist-entry-checkbox" data-index="${entry.index}" ${checkedAttr}>
+						</div>
+						<div class="format-list-label-col">
+							<span class="format-list-label" title="${escapeHtml(entry.title || entry.url || "")}">${escapeHtml(entry.title || entry.url || "")}</span>
+						</div>
+						<div class="format-list-size-col">${entry.size ? formatBytes(entry.size) : "—"}</div>
+					</label>
+				`;
+			});
+
+			formatListContainer.innerHTML = html;
 		},
 
 		populateFormats(data) {
@@ -790,6 +888,200 @@
 				return;
 			}
 
+			if (data.mediaType === "playlist" && data.playlist) {
+				currentPlaylistEntries = data.playlist.entries || [];
+				selectedPlaylistEntries = new Set(
+					currentPlaylistEntries.map((e) => e.index),
+				);
+				currentFormats = data.formats || [];
+				if (currentFormats.length === 0) {
+					currentFormats = [
+						{
+							formatId: "best",
+							label: "Best Available (Original Quality)",
+							ext: userMergeFormat,
+							estSizeBytes: 0,
+						},
+					];
+				}
+
+				const tabsHtml = `
+					<div class="modal-tabs">
+						<button type="button" class="modal-tab-btn" id="tabBtnVideo">
+							<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-video"><path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2" ry="2"/></svg>
+							Video
+						</button>
+						<button type="button" class="modal-tab-btn active" id="tabBtnPlaylist">
+							<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-list"><path d="M3 12h18"/><path d="M3 18h18"/><path d="M3 6h18"/></svg>
+							Playlist
+						</button>
+					</div>
+				`;
+
+				content.innerHTML = `
+					${mediaHtml}
+					<div style="font-size: 10px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;">Available Targets</div>
+					${tabsHtml}
+					<div class="format-list" id="formatListContainer"></div>
+					${outputHtml}
+				`;
+
+				let activeTab = "playlist";
+				Modal.renderPlaylistList(
+					currentPlaylistEntries,
+					selectedPlaylistEntries,
+				);
+
+				const updateDownloadButton = () => {
+					const btn = shadowRoot.getElementById("btnFooterDownload");
+					if (!btn) return;
+					if (activeTab === "playlist") {
+						btn.disabled = selectedPlaylistEntries.size === 0;
+					} else {
+						btn.disabled = false;
+					}
+				};
+				updateDownloadButton();
+
+				const formatListEl = content.querySelector("#formatListContainer");
+				if (formatListEl) {
+					formatListEl.addEventListener("click", (e) => {
+						const playlistRow = e.target.closest(".playlist-entry-row");
+						if (playlistRow) {
+							const cb = playlistRow.querySelector(
+								'.playlist-entry-checkbox',
+							);
+							if (cb && e.target !== cb) {
+								cb.checked = !cb.checked;
+								cb.dispatchEvent(new Event("change", { bubbles: true }));
+							}
+							return;
+						}
+
+						const row = e.target.closest(".format-list-row");
+						if (!row) return;
+
+						const currentSelected = formatListEl.querySelector(
+							".format-list-row.selected",
+						);
+						if (currentSelected) currentSelected.classList.remove("selected");
+						row.classList.add("selected");
+						const radio = row.querySelector('input[type="radio"]');
+						if (radio) radio.checked = true;
+					});
+
+					formatListEl.addEventListener("change", (e) => {
+						if (!e.target) return;
+						if (e.target.id === "playlistSelectAll") {
+							if (e.target.checked) {
+								selectedPlaylistEntries = new Set(
+									currentPlaylistEntries.map((e) => e.index),
+								);
+								formatListEl
+									.querySelectorAll(".playlist-entry-checkbox")
+									.forEach((cb) => {
+										cb.checked = true;
+									});
+							} else {
+								selectedPlaylistEntries = new Set();
+								formatListEl
+									.querySelectorAll(".playlist-entry-checkbox")
+									.forEach((cb) => {
+										cb.checked = false;
+									});
+							}
+							Modal.renderPlaylistList(
+								currentPlaylistEntries,
+								selectedPlaylistEntries,
+							);
+							updateDownloadButton();
+							return;
+						}
+
+						if (
+							e.target.classList &&
+							e.target.classList.contains("playlist-entry-checkbox")
+						) {
+							const idx = parseInt(
+								e.target.getAttribute("data-index"),
+								10,
+							);
+							if (e.target.checked) selectedPlaylistEntries.add(idx);
+							else selectedPlaylistEntries.delete(idx);
+							Modal.renderPlaylistList(
+								currentPlaylistEntries,
+								selectedPlaylistEntries,
+							);
+							updateDownloadButton();
+						}
+					});
+				}
+
+				const tabBtnVideo = shadowRoot.getElementById("tabBtnVideo");
+				const tabBtnPlaylist = shadowRoot.getElementById("tabBtnPlaylist");
+				if (tabBtnVideo && tabBtnPlaylist) {
+					tabBtnVideo.addEventListener("click", () => {
+						if (activeTab === "video") return;
+						activeTab = "video";
+						tabBtnVideo.classList.add("active");
+						tabBtnPlaylist.classList.remove("active");
+						Modal.renderFormatList(currentFormats, activeTab);
+						updateDownloadButton();
+					});
+					tabBtnPlaylist.addEventListener("click", () => {
+						if (activeTab === "playlist") return;
+						activeTab = "playlist";
+						tabBtnPlaylist.classList.add("active");
+						tabBtnVideo.classList.remove("active");
+						Modal.renderPlaylistList(
+							currentPlaylistEntries,
+							selectedPlaylistEntries,
+						);
+						updateDownloadButton();
+					});
+				}
+
+				const bindBrowseEvents = () => {
+					const btnBrowse = shadowRoot.getElementById("btnBrowseDir");
+					if (btnBrowse) {
+						btnBrowse.addEventListener("click", () => {
+							const select = shadowRoot.getElementById("selCategory");
+							const initialDir =
+								customOutputDir || (select ? select.value : "");
+							safeSendMessage({
+								type: "REQUEST_BROWSE",
+								initialDir: initialDir,
+							});
+						});
+					}
+					const btnClearCustom =
+						shadowRoot.getElementById("btnClearCustomDir");
+					if (btnClearCustom) {
+						btnClearCustom.addEventListener("click", () => {
+							customOutputDir = "";
+							const container = shadowRoot.getElementById(
+								"customLocationContainer",
+							);
+							if (container) container.style.display = "none";
+						});
+					}
+					const selCategory = shadowRoot.getElementById("selCategory");
+					if (selCategory) {
+						selCategory.addEventListener("change", () => {
+							customOutputDir = "";
+							const container = shadowRoot.getElementById(
+								"customLocationContainer",
+							);
+							if (container) container.style.display = "none";
+						});
+					}
+				};
+				bindBrowseEvents();
+
+				safeSendMessage({ type: "GET_CATEGORIES" });
+				return;
+			}
+
 			currentFormats = data.formats || [];
 			if (currentFormats.length === 0) {
 				currentFormats = [
@@ -939,6 +1231,42 @@
 				return;
 			}
 
+			if (currentMediaType === "playlist") {
+				const playlistTabActive = shadowRoot
+					.getElementById("tabBtnPlaylist")
+					?.classList.contains("active");
+				if (playlistTabActive) {
+					if (selectedPlaylistEntries.size === 0) {
+						Modal.showToast(
+							"Select at least one playlist entry",
+							true,
+						);
+						return;
+					}
+					const select = shadowRoot.getElementById("selCategory");
+					const outputDir =
+						customOutputDir ||
+						(select ? select.value : lastOutputDir);
+					initiatedJobIds.add(currentJobId);
+					safeSendMessage({
+						type: "START_DOWNLOAD",
+						jobId: currentJobId,
+						formatId: "best",
+						outputDir,
+						conflictResolution: "replace",
+						playlistSelectedFileIndices: Array.from(
+							selectedPlaylistEntries,
+						),
+						url: mediaUrl,
+						title: currentTitle,
+						pageUrl: window.location.href,
+					});
+					Modal.showToast("Playlist download started...");
+					this.close();
+					return;
+				}
+			}
+
 			const checkedRadio = shadowRoot.querySelector(
 				'input[name="videoFormat"]:checked',
 			);
@@ -962,7 +1290,7 @@
 				type: "CHECK_FILE_EXISTS",
 				path: outputDir,
 				jobId: currentJobId,
-				title: currentTitle || document.title || "",
+				title: currentTitle || _getBestPageTitle() || "",
 				ext: ext,
 				url: interceptedData ? interceptedData.url : mediaUrl,
 				mime: interceptedData ? interceptedData.mime : null,
@@ -1004,9 +1332,9 @@
 				msg.url = interceptedData.url;
 				// Raw hints only — backend resolve_filename is the single source of truth.
 				// Prefer the already-resolved basename from file_exists_result when present.
-				msg.title = currentTitle || document.title || "";
+				msg.title = currentTitle || _getBestPageTitle() || "";
 				msg.filename = resolvedFilename || interceptedData.filename;
-				msg.referer = interceptedData.referrer;
+				msg.referer = interceptedData.referrer || window.location.href;
 				msg.fileSize = interceptedData.fileSize;
 				msg.mime = interceptedData.mime;
 			} else {
@@ -1052,7 +1380,7 @@
       `;
 
 			overlay.appendChild(box);
-			shadowRoot.appendChild(overlay);
+			getAlertRoot().appendChild(overlay);
 
 			const closeAlert = () => overlay.remove();
 			box.querySelector("#btnAlertClose").addEventListener("click", closeAlert);
@@ -1071,21 +1399,52 @@
 			});
 		},
 
-		showDuplicateJobAlert(title, url, status, jobId) {
+		showDuplicateJobAlert(
+			title,
+			url,
+			status,
+			jobId,
+			reason = "url",
+			filename = "",
+			outputDir = "",
+		) {
+			const isTitleDuplicate = reason === "title";
+			const isFilenameDuplicate = reason === "filename";
+			const modalTitle = isFilenameDuplicate
+				? "Filename Already Queued"
+				: isTitleDuplicate
+					? "Name Already In List"
+					: "Link Already In List";
+			const subtext = isFilenameDuplicate
+				? "A download with the same filename is already queued for this destination."
+				: isTitleDuplicate
+					? "A download with the same name is already active in the task registry."
+					: "This link has already been submitted and exists in the task registry.";
+			const urlHtml = isTitleDuplicate || isFilenameDuplicate
+				? ""
+				: `<div style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); word-break: break-all;">${escapeHtml(url)}</div>`;
+			const filenameHtml = isFilenameDuplicate
+				? `<div style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); word-break: break-all;">Destination: ${escapeHtml(outputDir)}</div>`
+				: "";
+			const displayTitle = isFilenameDuplicate
+				? escapeHtml(filename || title)
+				: escapeHtml(title);
+
 			const contentHtml = `
         <div style="color: var(--text-muted);">
-          This link has already been submitted and exists in the task registry.
+          ${subtext}
         </div>
         <div style="background: rgba(255,255,255,0.01); border: 1px solid var(--border); padding: 12px; border-radius: var(--radius-md); display: flex; flex-direction: column; gap: 8px; margin-top: 4px;">
-          <div style="font-weight: 700; color: #ffffff;">${escapeHtml(title)}</div>
-          <div style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); word-break: break-all;">${escapeHtml(url)}</div>
+          <div style="font-weight: 700; color: #ffffff;">${displayTitle}</div>
+          ${filenameHtml}
+          ${urlHtml}
           <div style="font-size: 10px; text-transform: uppercase; font-weight: 800; margin-top: 2px;">
             Status: <span class="badge muxed" style="border-color: var(--border-bright); color: #ffffff; padding: 1px 4px;">${escapeHtml(status)}</span>
           </div>
         </div>
       `;
 
-			this.createAlertModal("Link Already In List", contentHtml, [
+			this.createAlertModal(modalTitle, contentHtml, [
 				{
 					text: "Dismiss",
 					class: "cancel",
@@ -1501,6 +1860,9 @@
 					message.url,
 					message.status,
 					message.jobId,
+					message.reason || "url",
+					message.filename || "",
+					message.outputDir || "",
 				);
 				break;
 			case "file_exists_result":

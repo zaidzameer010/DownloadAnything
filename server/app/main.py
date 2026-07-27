@@ -30,6 +30,7 @@ from app.services.category_service import CategoryService
 from app.services.download_service import DownloadService
 from app.services.file_service import FileService
 from app.services.job_service import JobService
+from app.services.playlist_service import PlaylistService
 from app.services.probe_service import ProbeService
 from app.services.settings_service import SettingsService
 from app.services.torrent_service import TorrentService
@@ -78,6 +79,14 @@ download_service = DownloadService(
     file_service=file_service,
 )
 
+playlist_service = PlaylistService(
+    connection_manager=connection_manager,
+    job_repository=jobs_registry,
+    file_service=file_service,
+    settings_repository=settings_repository,
+    download_service=download_service,
+)
+
 torrent_service = TorrentService(
     connection_manager=connection_manager,
     job_repository=jobs_registry,
@@ -95,6 +104,7 @@ dispatcher = MessageDispatcher(
     probe_service=probe_service,
     download_service=download_service,
     torrent_service=torrent_service,
+    playlist_service=playlist_service,
 )
 
 ws_router = create_ws_router(dispatcher, connection_manager)

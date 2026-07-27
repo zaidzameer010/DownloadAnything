@@ -182,6 +182,7 @@ class TorrentService:
             await asyncio.to_thread(
                 self._job_repository.update_job, job_id, status="downloading"
             )
+            await self._broadcast_jobs_list()
             logger.info(f"Torrent download started for job {job_id}: {redact_url(url)}")
 
             filepath = await asyncio.to_thread(

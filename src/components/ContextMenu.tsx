@@ -40,6 +40,17 @@ export function ContextMenu({ downloader }: ContextMenuProps) {
 	const isMac = navigator.userAgent.toLowerCase().includes("mac");
 	const revealLabel = isMac ? "Reveal in Finder" : "Reveal in Explorer";
 
+	const isPlaylistParent =
+		job.media_type === "playlist" &&
+		!!job.playlist_child_job_ids &&
+		job.playlist_child_job_ids.length > 0;
+	const isPlaylistChild = !!job.parent_job_id;
+	const taskNoun = isPlaylistParent
+		? "Playlist"
+		: isPlaylistChild
+			? "Item"
+			: "Task";
+
 	return (
 		<div
 			className="context-menu"
@@ -55,7 +66,7 @@ export function ContextMenu({ downloader }: ContextMenuProps) {
 					}}
 				>
 					<Pause size={14} />
-					<span>Pause Task</span>
+					<span>Pause {taskNoun}</span>
 				</div>
 			)}
 			{canResume && (
@@ -67,7 +78,7 @@ export function ContextMenu({ downloader }: ContextMenuProps) {
 					}}
 				>
 					<Play size={14} />
-					<span>Resume Task</span>
+					<span>Resume {taskNoun}</span>
 				</div>
 			)}
 			{job.status === "failed" && job.error_category === "expired_url" && (
@@ -91,7 +102,7 @@ export function ContextMenu({ downloader }: ContextMenuProps) {
 					}}
 				>
 					<Trash2 size={14} />
-					<span>Remove from List</span>
+					<span>Remove {taskNoun}</span>
 				</div>
 			)}
 			{job.file_path && (

@@ -97,6 +97,7 @@ class IProbeEngine(ABC):
         referer: Optional[str] = None,
         page_title: Optional[str] = None,
         mime_hint: Optional[str] = None,
+        stream_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         raise NotImplementedError
 

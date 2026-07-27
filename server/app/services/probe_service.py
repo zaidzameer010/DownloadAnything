@@ -45,6 +45,7 @@ class ProbeService:
         url: str,
         page_title: Optional[str] = None,
         referer: Optional[str] = None,
+        stream_url: Optional[str] = None,
     ) -> str:
         await self.prune_pending_probes()
 
@@ -60,7 +61,7 @@ class ProbeService:
         async with self._active_probe_tasks_lock:
             self._probe_task_tabs[job_id] = tab_id
             self._active_probe_tasks[job_id] = asyncio.create_task(
-                self._run_probe_task(tab_id, job_id, url, page_title, referer)
+                self._run_probe_task(tab_id, job_id, url, page_title, referer, stream_url)
             )
         return job_id
 
@@ -136,6 +137,7 @@ class ProbeService:
         url_to_probe: str,
         page_title: Optional[str] = None,
         referer: Optional[str] = None,
+        stream_url: Optional[str] = None,
     ) -> None:
         bind_contextvars(tab_id=tab_id, job_id=job_id)
         settings = await asyncio.to_thread(self._settings_repository.load)
@@ -170,6 +172,7 @@ class ProbeService:
                     referer=referer,
                     page_title=page_title,
                     settings=settings,
+                    stream_url=stream_url,
                 )
 
             formats_json, format_ids = process_probe_formats(
@@ -178,7 +181,9 @@ class ProbeService:
 
             async with self._pending_probes_lock:
                 self._pending_probes[job_id] = {
-                    "url": url_to_probe,
+                    "url": info.get("url") or url_to_probe,
+                    "page_url": info.get("page_url") or url_to_probe,
+                    "stream_url": stream_url,
                     "title": info.get("title"),
                     "filename": info.get("filename"),
                     "duration": info.get("duration"),
@@ -192,6 +197,7 @@ class ProbeService:
                     "fileType": info.get("fileType"),
                     "mime": info.get("mime"),
                     "torrent": info.get("torrent"),
+                    "playlist": info.get("playlist"),
                 }
 
             await self._connection_manager.send_message(
@@ -200,6 +206,8 @@ class ProbeService:
                     "type": "probe_result",
                     "jobId": job_id,
                     "title": info.get("title", "Unknown Title"),
+                    "url": info.get("url") or url_to_probe,
+                    "pageUrl": info.get("page_url") or url_to_probe,
                     "filename": info.get("filename"),
                     "duration": info.get("duration"),
                     "thumbnail": info.get("thumbnail"),
@@ -209,6 +217,7 @@ class ProbeService:
                     "fileType": info.get("fileType"),
                     "mime": info.get("mime"),
                     "torrent": info.get("torrent"),
+                    "playlist": info.get("playlist"),
                 },
             )
         except asyncio.CancelledError:

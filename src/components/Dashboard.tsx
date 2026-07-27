@@ -7,13 +7,15 @@ import {
 import {
 	AlertCircle,
 	CheckCircle2,
+	ChevronDown,
+	ChevronRight,
 	FileDown,
 	Loader2,
 	Pause,
 	Settings,
 	UploadCloud,
 } from "lucide-react";
-import { useMemo } from "react";
+import { Fragment, useMemo, useState } from "react";
 import type { UseDownloaderReturn } from "../hooks/useDownloader";
 import type { Job } from "../types";
 import { formatBytes, formatSpeed } from "../utils";
@@ -75,6 +77,7 @@ function DirectDownloader({ downloader }: { downloader: UseDownloaderReturn }) {
 
 function DownloadsTable({ downloader }: { downloader: UseDownloaderReturn }) {
 	const {
+		jobs,
 		displayJobs,
 		filterTab,
 		setFilterTab,
@@ -83,6 +86,10 @@ function DownloadsTable({ downloader }: { downloader: UseDownloaderReturn }) {
 		handleClearCompleted,
 		setContextMenu,
 	} = downloader;
+
+	const [expandedPlaylists, setExpandedPlaylists] = useState<Set<string>>(
+		new Set(),
+	);
 
 	const columns = useMemo<ColumnDef<Job>[]>(
 		() => [
@@ -94,12 +101,12 @@ function DownloadsTable({ downloader }: { downloader: UseDownloaderReturn }) {
 					const isPostProcessing = job.status === "postprocessing";
 
 					let displayName = "Unknown filename";
-					if (job.file_path) {
+					if (job.title && !/^https?:\/\//i.test(job.title)) {
+						displayName = job.title;
+					} else if (job.file_path) {
 						const parts = job.file_path.split(/[/\\]/);
 						const name = parts[parts.length - 1];
 						if (name) displayName = name;
-					} else if (job.title && !/^https?:\/\//i.test(job.title)) {
-						displayName = job.title;
 					} else {
 						try {
 							const urlObj = new URL(job.url);
@@ -211,6 +218,11 @@ function DownloadsTable({ downloader }: { downloader: UseDownloaderReturn }) {
 						);
 					}
 
+					const isPlaylist =
+						job.playlist_child_job_ids &&
+						job.playlist_child_job_ids.length > 0;
+					const isExpanded = expandedPlaylists.has(job.job_id);
+
 					return (
 						<div className="job-title-cell">
 							<div className="job-thumbnail-box">
@@ -221,10 +233,39 @@ function DownloadsTable({ downloader }: { downloader: UseDownloaderReturn }) {
 								)}
 							</div>
 							<div className="job-title-info">
-								<div className="job-title-name" title={displayName}>
-									{displayName}
+								<div className="job-title-name-row">
+									{isPlaylist && (
+										<button
+											type="button"
+											className="playlist-expand-btn"
+											onClick={(e) => {
+												e.stopPropagation();
+												setExpandedPlaylists((prev) => {
+													const next = new Set(prev);
+													if (next.has(job.job_id)) next.delete(job.job_id);
+													else next.add(job.job_id);
+													return next;
+												});
+											}}
+											title={isExpanded ? "Collapse" : "Expand"}
+										>
+											{isExpanded ? (
+												<ChevronDown size={14} />
+											) : (
+												<ChevronRight size={14} />
+											)}
+										</button>
+									)}
+									<span className="job-title-name" title={displayName}>
+										{displayName}
+									</span>
+									{isPlaylist && (
+										<span className="playlist-count-badge">
+											{job.playlist_child_job_ids.length} items
+										</span>
+									)}
 								</div>
-								{(job.media_type === "torrent" || subInfo) && (
+								{(job.media_type === "torrent" || subInfo || isPlaylist) && (
 									<div className="job-subinfo-row">
 										{job.media_type === "torrent" && (
 											<span
@@ -236,6 +277,15 @@ function DownloadsTable({ downloader }: { downloader: UseDownloaderReturn }) {
 												{job.torrent_completed_pieces !== undefined
 													? ` · ${job.torrent_completed_pieces}/${job.torrent_piece_count ?? "?"} pieces`
 													: ""}
+											</span>
+										)}
+										{isPlaylist && (
+											<span className="playlist-inline-meta">
+												{job.playlist_child_job_ids.filter(
+													(id) =>
+														jobs[id]?.status === "completed",
+												).length}
+												/{job.playlist_child_job_ids.length} completed
 											</span>
 										)}
 										{subInfo}
@@ -340,7 +390,7 @@ function DownloadsTable({ downloader }: { downloader: UseDownloaderReturn }) {
 				},
 			},
 		],
-		[],
+		[expandedPlaylists, jobs],
 	);
 
 	const table = useReactTable({
@@ -446,32 +496,100 @@ function DownloadsTable({ downloader }: { downloader: UseDownloaderReturn }) {
 					<tbody>
 						{table.getRowModel().rows.map((row) => {
 							const job = row.original;
+							const isExpanded = expandedPlaylists.has(job.job_id);
+							const isPlaylist =
+								job.playlist_child_job_ids &&
+								job.playlist_child_job_ids.length > 0;
 							return (
-								<tr
-									key={row.id}
-									className="animate-fade-in-up"
-									style={{ cursor: "context-menu" }}
-									onContextMenu={(e) => {
-										e.preventDefault();
-										setContextMenu({
-											x: e.clientX,
-											y: e.clientY,
-											jobId: job.job_id,
-										});
-									}}
-								>
-									{row.getVisibleCells().map((cell) => (
-										<td key={cell.id}>
-											{flexRender(
-												cell.column.columnDef.cell,
-												cell.getContext(),
-											)}
-										</td>
-									))}
-								</tr>
-							);
-						})}
-					</tbody>
+								<Fragment key={row.id}>
+									<tr
+										className="animate-fade-in-up"
+										style={{ cursor: "context-menu" }}
+										onContextMenu={(e) => {
+											e.preventDefault();
+											setContextMenu({
+												x: e.clientX,
+												y: e.clientY,
+												jobId: job.job_id,
+											});
+										}}
+									>
+										{row.getVisibleCells().map((cell) => (
+											<td key={cell.id}>
+												{flexRender(
+													cell.column.columnDef.cell,
+													cell.getContext(),
+												)}
+											</td>
+										))}
+									</tr>
+									{isPlaylist &&
+										isExpanded &&
+										job.playlist_child_job_ids.map((childId) => {
+											const child = jobs[childId];
+											if (!child) return null;
+											const barFillClass =
+												child.status === "downloading" ? "downloading" : child.status;
+											const childProgress = child.progress ?? 0;
+											const combinedDl =
+												child.combined_downloaded_bytes ?? child.downloaded_bytes ?? 0;
+											const combinedTotal =
+												child.combined_total_bytes ?? child.total_bytes ?? 0;
+											const totalStr =
+												combinedTotal > 0 ? formatBytes(combinedTotal) : "?";
+											return (
+												<tr
+													key={childId}
+													className="animate-fade-in-up playlist-child-tr"
+													style={{ cursor: "context-menu" }}
+													onContextMenu={(e) => {
+														e.preventDefault();
+														setContextMenu({
+																x: e.clientX,
+																y: e.clientY,
+																jobId: childId,
+															});
+														}}
+												>
+													<td className="playlist-child-title-cell">
+														<div className="job-title-cell">
+															<div className="job-thumbnail-box">
+																{child.thumbnail ? (
+																	<img src={child.thumbnail} alt="preview" />
+																) : (
+																	<FileDown size={18} style={{ color: "var(--text-muted)" }} />
+																)}
+															</div>
+															<span className="job-title-name" title={child.title || childId}>
+																{child.title || childId}
+															</span>
+														</div>
+													</td>
+													<td>
+														<span className={`status-badge ${child.status}`}>{child.status}</span>
+													</td>
+													<td>
+														<div className="playlist-child-progress-cell">
+															<div className="progress-bar-bg">
+																<div
+																	className={`progress-bar-fill ${barFillClass}`}
+																	style={{ width: `${childProgress}%` }}
+																/>
+															</div>
+														</div>
+													</td>
+													<td>
+															<span className="job-size-cell tabular-nums">
+																{formatBytes(combinedDl)} / {totalStr}
+															</span>
+														</td>
+												</tr>
+											);
+										})}
+									</Fragment>
+								);
+							})}
+						</tbody>
 				</table>
 
 				{displayJobs.length === 0 && (

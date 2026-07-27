@@ -4,7 +4,7 @@ import asyncio
 import os
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from app.config import settings as app_settings
 from app.domain.exceptions import DownloadPaused
@@ -171,20 +171,16 @@ class DownloadService:
                     "The selected format is no longer available. Please probe again.",
                 )
 
-        refreshed_url = cast(str, info.get("url") or url)
-
-        original_lower = url.lower().split("?")[0]
-        refreshed_lower = refreshed_url.lower().split("?")[0]
-        if (
-            original_lower.endswith("master.m3u8")
-            or original_lower.endswith("/master")
-            or original_lower.endswith("/master.m3u8")
-        ) and not (
-            refreshed_lower.endswith("master.m3u8")
-            or refreshed_lower.endswith("/master")
-            or refreshed_lower.endswith("/master.m3u8")
-        ):
+        # For stream manifests, yt-dlp may resolve the canonical URL to a
+        # variant playlist (e.g. a master .m3u8 pointing at zz.m3u8). The
+        # selected format_id was derived from the original manifest's format
+        # list, so re-extracting that variant URL with the same format_id
+        # fails with "Requested format is not available". Keep the original
+        # stream URL and let yt-dlp resolve variants during format selection.
+        if media_type == ENGINE_STREAM:
             refreshed_url = url
+        else:
+            refreshed_url = cast(str, info.get("url") or url)
 
         existing_title = job.title
         existing_filename = job.filename
@@ -243,6 +239,102 @@ class DownloadService:
         await self._connection_manager.broadcast(
             {"type": "jobs_list", "jobs": [j.model_dump() for j in jobs]}
         )
+
+    async def aggregate_parent_progress(self, child_job_id: str) -> None:
+        """Public wrapper to recompute a playlist parent from its children."""
+        child = await asyncio.to_thread(self._job_repository.get_job, child_job_id)
+        if not child or not child.parent_job_id:
+            return
+        await self.aggregate_parent_by_id(child.parent_job_id)
+
+    async def aggregate_parent_by_id(self, parent_job_id: str) -> None:
+        """Recompute a playlist parent's progress and status from its children."""
+        parent = await asyncio.to_thread(self._job_repository.get_job, parent_job_id)
+        if not parent or not parent.playlist_child_job_ids:
+            return
+
+        children: List[Any] = []
+        for cid in parent.playlist_child_job_ids:
+            c = await asyncio.to_thread(self._job_repository.get_job, cid)
+            if c:
+                children.append(c)
+
+        if not children:
+            return
+
+        total = sum((c.combined_total_bytes or c.total_bytes or 0) for c in children)
+        downloaded = sum((c.combined_downloaded_bytes or c.downloaded_bytes or 0) for c in children)
+        speed = sum((c.speed or 0) for c in children)
+        progress = (downloaded / total * 100) if total > 0 else 0.0
+
+        statuses = [c.status for c in children]
+        terminal = {"completed", "failed", "canceled"}
+        all_terminal = all(s in terminal for s in statuses)
+        if all_terminal:
+            if all(s == "completed" for s in statuses):
+                parent_status = "completed"
+                progress = 100.0
+            else:
+                parent_status = "failed"
+        elif any(s in ("downloading", "queued", "postprocessing") for s in statuses):
+            parent_status = "downloading"
+        elif any(s == "paused" for s in statuses):
+            parent_status = "paused"
+        else:
+            parent_status = parent.status or "downloading"
+
+        update_kwargs: Dict[str, Any] = {
+            "status": parent_status,
+            "progress": progress,
+            "combined_total_bytes": total,
+            "combined_downloaded_bytes": downloaded,
+            "speed": speed,
+            "eta": 0.0,
+        }
+        if parent_status == "completed":
+            update_kwargs["file_path"] = parent.output_dir
+        if parent_status == "failed":
+            failed = sum(1 for s in statuses if s in ("failed", "canceled"))
+            update_kwargs["error"] = f"{failed}/{len(children)} entries failed"
+
+        await asyncio.to_thread(
+            self._job_repository.update_job, parent.job_id, **update_kwargs
+        )
+
+        await self._connection_manager.broadcast(
+            {
+                "type": "download_progress",
+                "jobId": parent.job_id,
+                "status": parent_status,
+                "progress": progress,
+                "combinedDownloadedBytes": downloaded,
+                "combinedTotalBytes": total,
+                "speed": speed,
+                "eta": 0,
+            }
+        )
+
+        if parent_status == "completed":
+            await self._connection_manager.broadcast(
+                {
+                    "type": "download_completed",
+                    "jobId": parent.job_id,
+                    "filePath": parent.output_dir,
+                    "sizeBytes": int(downloaded),
+                    "durationMs": None,
+                }
+            )
+        elif parent_status == "failed":
+            await self._connection_manager.broadcast(
+                {
+                    "type": "download_failed",
+                    "jobId": parent.job_id,
+                    "error": update_kwargs.get("error", "Playlist download failed"),
+                    "stage": "downloading",
+                }
+            )
+
+        await self._broadcast_jobs_list()
 
     async def _run_download_task(
         self,
@@ -303,6 +395,8 @@ class DownloadService:
                 try:
                     event = await event_queue.get()
                     await self._connection_manager.broadcast(event)
+                    if isinstance(event, dict) and event.get("jobId"):
+                        await self.aggregate_parent_progress(str(event.get("jobId")))
                     event_queue.task_done()
                 except asyncio.CancelledError:
                     break
@@ -364,6 +458,7 @@ class DownloadService:
                                 "pageUrl": page_url,
                             }
                         )
+                    await self.aggregate_parent_progress(job_id)
                     return
 
                 await asyncio.to_thread(
@@ -401,12 +496,14 @@ class DownloadService:
                         "durationMs": None,
                     }
                 )
+                await self.aggregate_parent_progress(job_id)
         except DownloadPaused:
             logger.info(f"Download job {job_id} paused cleanly.")
             await asyncio.to_thread(
                 self._job_repository.update_job, job_id, status="paused"
             )
             await self._broadcast_jobs_list()
+            await self.aggregate_parent_progress(job_id)
         except Exception as error:
             stage = "downloading"
             job = await asyncio.to_thread(self._job_repository.get_job, job_id)
@@ -443,6 +540,7 @@ class DownloadService:
                         "pageUrl": page_url,
                     }
                 )
+            await self.aggregate_parent_progress(job_id)
         finally:
             async with self._active_tasks_lock:
                 self._active_tasks.pop(job_id, None)

@@ -10,7 +10,6 @@ import { classifyStream, trackStream } from "./stream_extractor.js";
 
 const logger = createLogger("service-worker");
 
-const OFFSCREEN_TAB_ID = -1;
 const MAX_SNIFFED_STREAMS_PER_TAB = 100;
 
 let backendAvailable = false;
@@ -439,7 +438,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 				await registerUrlTab(message.url, tabId);
 			}
 			// Page/tab URL as Referer is required for many embed-player CDNs.
-			const referer = message.referer || message.referrer || tab.url || null;
+			// Prefer the explicit pageUrl from the content script; it is the full page
+			// URL and is safer than bare initiator origins.
+			const referer =
+				message.pageUrl ||
+				message.referer ||
+				message.referrer ||
+				tab.url ||
+				null;
 			sendToWS({
 				type: "probe",
 				url: message.url,
@@ -497,6 +503,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 						outputDir: message.outputDir,
 						conflictResolution: message.conflictResolution || "replace",
 						torrentSelectedFileIndices: message.torrentSelectedFileIndices,
+						playlistSelectedFileIndices: message.playlistSelectedFileIndices,
 						url: message.url,
 						title: message.title,
 						filename: message.filename,
@@ -627,10 +634,20 @@ async function handleOffscreenMessage(message) {
 		}
 
 		if (wsMsg.type === "duplicate_job_alert") {
-			const tabId = await getTabForUrl(wsMsg.url);
-			if (typeof tabId === "number") {
+			// The server tags the originating jobId as forJobId; route by that first.
+			// The message's own jobId is the existing duplicate job.
+			if (wsMsg.forJobId) {
+				const tabId = await getTabForJob(wsMsg.forJobId);
+				if (typeof tabId === "number") {
+					chrome.tabs.sendMessage(tabId, wsMsg).catch(() => {});
+					return;
+				}
+			}
+			// Legacy fallback: messages without forJobId carry the URL mapping.
+			const urlTabId = await getTabForUrl(wsMsg.url);
+			if (typeof urlTabId === "number") {
 				await removeUrlTab(wsMsg.url);
-				chrome.tabs.sendMessage(tabId, wsMsg).catch(() => {});
+				chrome.tabs.sendMessage(urlTabId, wsMsg).catch(() => {});
 			}
 			return;
 		}
@@ -770,10 +787,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 			const entry = pendingRefreshByTab.get(tabId);
 			const canonical = canonicalizeCandidateUrl(entry?.pageUrl || "");
 			const entries = pendingRefreshByPageUrl.get(canonical);
-			if (
-				!Array.isArray(entries) ||
-				!entries.includes(entry)
-			) {
+			if (!Array.isArray(entries) || !entries.includes(entry)) {
 				pendingRefreshByTab.delete(tabId);
 			}
 		}
@@ -930,10 +944,6 @@ if (chrome.downloads?.onDeterminingFilename) {
 				return;
 			}
 
-			logger.info(
-				"[Interception] Intercepting download! Cancelling Chrome native download...",
-			);
-
 			// Extract metadata. Keep the raw filename so the backend is the single
 			// source of truth for filename/title extraction.
 			const downloadData = {
@@ -954,10 +964,21 @@ if (chrome.downloads?.onDeterminingFilename) {
 				downloadInitiators.delete(item.referrer);
 			}
 
-			// Cancel the native download. Resolve the filename event immediately so
-			// Chrome does not time it out. Send the intercepted data from inside the
-			// cancel callback so runtime.lastError is consumed before any new API call.
-			const proceed = (targetId) => {
+			// Only intercept if we can show a confirmation modal in a content script.
+			// If no tab is available, let Chrome handle the download natively.
+			findInterceptionTargetTab(tabId).then((targetId) => {
+				if (targetId === null) {
+					logger.info(
+						"[Interception] No content-script target tab found. Letting Chrome handle download.",
+					);
+					suggest();
+					return;
+				}
+
+				logger.info(
+					`[Interception] Target tab ${targetId} found. Cancelling Chrome native download...`,
+				);
+
 				chrome.tabs.get(targetId, (t) => {
 					if (
 						!chrome.runtime.lastError &&
@@ -967,54 +988,19 @@ if (chrome.downloads?.onDeterminingFilename) {
 					) {
 						downloadData.referrer = t.url;
 					}
-					sendIntercepted(targetId, downloadData);
-				});
-			};
-			const fallback = () => {
-				chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-					if (chrome.runtime.lastError) {
-						logger.info(
-							"[Interception] Tab query error:",
-							chrome.runtime.lastError.message,
-						);
-					}
-					const tab = tabs?.[0];
-					const activeTabId = tab?.id;
-					if (typeof activeTabId === "number" && tab.url?.startsWith("http")) {
-						if (!downloadData.referrer) {
-							downloadData.referrer = tab.url;
-						}
-						sendIntercepted(activeTabId, downloadData);
-					} else {
-						logger.info(
-							"[Interception] No active webpage tab found. Routing directly to backend...",
-						);
-						routeDirectlyToBackend(OFFSCREEN_TAB_ID, downloadData);
-					}
-				});
-			};
 
-			// Cancel the native download. The callback wrapper forces us to read
-			// runtime.lastError so Chrome does not log an unchecked warning.
-			new Promise((resolve) => {
-				chrome.downloads.cancel(item.id, () => {
-					const err = chrome.runtime.lastError;
-					if (err) {
-						logger.info(
-							"[Interception] Suppressed cancellation error:",
-							err.message,
-						);
-					}
-					resolve(undefined);
+					// Cancel the native download and then show the confirmation modal.
+					chrome.downloads.cancel(item.id, () => {
+						if (chrome.runtime.lastError) {
+							logger.info(
+								"[Interception] Suppressed cancellation error:",
+								chrome.runtime.lastError.message,
+							);
+						}
+						suggest();
+						sendIntercepted(targetId, downloadData);
+					});
 				});
-			}).then(() => {
-				// Release the filename event and then start the intercepted workflow.
-				suggest();
-				if (typeof tabId === "number") {
-					proceed(tabId);
-				} else {
-					fallback();
-				}
 			});
 		});
 
@@ -1032,6 +1018,39 @@ function sendDownloadUrlToBackend(jobId, downloadData) {
 	});
 }
 
+function findInterceptionTargetTab(tabIdHint) {
+	return new Promise((resolve) => {
+		if (typeof tabIdHint === "number" && tabIdHint >= 0) {
+			chrome.tabs.get(tabIdHint, (t) => {
+				if (!chrome.runtime.lastError && t && t.url?.startsWith("http")) {
+					resolve(tabIdHint);
+					return;
+				}
+				queryActiveTab(resolve);
+			});
+		} else {
+			queryActiveTab(resolve);
+		}
+	});
+}
+
+function queryActiveTab(resolve) {
+	chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+		if (chrome.runtime.lastError) {
+			logger.info(
+				"[Interception] Tab query error:",
+				chrome.runtime.lastError.message,
+			);
+		}
+		const tab = tabs?.[0];
+		if (typeof tab?.id === "number" && tab.url?.startsWith("http")) {
+			resolve(tab.id);
+		} else {
+			resolve(null);
+		}
+	});
+}
+
 function sendIntercepted(tabId, downloadData) {
 	logger.info(`[Interception] Sending INTERCEPTED_DOWNLOAD to tab ${tabId}...`);
 	chrome.tabs
@@ -1041,37 +1060,17 @@ function sendIntercepted(tabId, downloadData) {
 		})
 		.catch((err) => {
 			logger.warn(
-				"[Interception] Content script not responding in tab, routing directly to backend:",
+				"[Interception] Content script not responding in tab, trying active tab fallback:",
 				err,
 			);
-			routeDirectlyToBackend(tabId, downloadData);
+			findInterceptionTargetTab(null).then((fallbackId) => {
+				if (fallbackId !== null && fallbackId !== tabId) {
+					sendIntercepted(fallbackId, downloadData);
+				} else {
+					logger.warn(
+						"[Interception] No fallback tab available; intercepted download abandoned.",
+					);
+				}
+			});
 		});
-}
-
-async function routeDirectlyToBackend(tabId, downloadData) {
-	const targetTabId =
-		typeof tabId === "number" && tabId >= 0 ? tabId : OFFSCREEN_TAB_ID;
-	const jobId = `job_intercept_${crypto.randomUUID()}`;
-	const rawFilename = downloadData.filename || "downloaded_file";
-
-	logger.info(
-		`[Interception] Routing direct download to backend: ${rawFilename}`,
-	);
-	try {
-		await registerJobTab(jobId, targetTabId);
-		sendToWS({
-			type: "choose",
-			jobId: jobId,
-			formatId: "best",
-			outputDir: "", // default dir
-			conflictResolution: "rename",
-			url: downloadData.url,
-			filename: rawFilename,
-			referer: downloadData.referrer,
-			fileSize: downloadData.fileSize,
-			mime: downloadData.mime,
-		});
-	} catch (error) {
-		logger.warn("[Interception] Failed to route direct download:", error);
-	}
 }

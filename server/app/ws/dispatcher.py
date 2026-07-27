@@ -10,7 +10,7 @@ import yt_dlp
 from pydantic import TypeAdapter
 
 from app.config import get_app_version, settings as app_settings
-from app.engine.file_types import classify_mime
+from app.engine.file_types import FILE_TYPE_AUDIO, classify_mime
 from app.engine.media_classify import classify_download_item
 from app.engine.title_extractor import _is_unusable_stem, resolve_filename
 from app.engine.torrent import is_magnet_url
@@ -42,6 +42,7 @@ from app.services.download_service import DownloadService
 from app.services.file_service import FileService
 from app.services.interfaces import IConnectionManager
 from app.services.job_service import JobService
+from app.services.playlist_service import PlaylistService
 from app.services.probe_service import ProbeService
 from app.services.settings_service import SettingsService
 from app.services.torrent_service import TorrentService
@@ -67,6 +68,7 @@ class MessageDispatcher:
         probe_service: ProbeService,
         download_service: DownloadService,
         torrent_service: TorrentService,
+        playlist_service: PlaylistService,
     ) -> None:
         self._connection_manager = connection_manager
         self._settings_service = settings_service
@@ -76,6 +78,7 @@ class MessageDispatcher:
         self._probe_service = probe_service
         self._download_service = download_service
         self._torrent_service = torrent_service
+        self._playlist_service = playlist_service
 
         self._message_adapter: TypeAdapter[ClientMessage] = TypeAdapter(ClientMessage)
 
@@ -154,6 +157,8 @@ class MessageDispatcher:
                 {
                     "type": "duplicate_job_alert",
                     "jobId": duplicate.job_id,
+                    "forJobId": job_id,
+                    "reason": "url",
                     "url": duplicate.url,
                     "title": duplicate.title or "Unknown Title",
                     "status": duplicate.status,
@@ -161,12 +166,22 @@ class MessageDispatcher:
             )
             return
 
+        effective_stream_url = msg.streamUrl
+        if not effective_stream_url and msg.jobId:
+            pending = await self._probe_service.get_pending_probe(msg.jobId)
+            if pending:
+                effective_stream_url = cast(Optional[str], pending.get("stream_url"))
+            if not effective_stream_url:
+                job = await self._job_service.get_job(msg.jobId)
+                effective_stream_url = job.stream_url if job else None
+
         await self._probe_service.start_probe(
             tab_id=tab_id,
             job_id=job_id,
             url=msg.url,
             page_title=msg.title,
             referer=msg.referer,
+            stream_url=effective_stream_url,
         )
 
     async def handle_cancel_probe(
@@ -185,18 +200,21 @@ class MessageDispatcher:
         _ = tab_id
         job_id = msg.jobId
         await self._probe_service.prune_pending_probes()
+        settings = await self._settings_service.get_settings()
 
         metadata_raw = await self._probe_service.pop_pending_probe(job_id)
         format_ids: list[Any] = []
 
         if metadata_raw is None:
             if msg.url:
+                is_audio = classify_mime(msg.mime) == FILE_TYPE_AUDIO
                 resolved = await self._resolve_filename_in_thread(
                     url=msg.url,
                     filename=msg.filename,
                     mime=msg.mime,
                     referer=msg.referer,
                     page_title=msg.title,
+                    preferred_ext=None if is_audio else settings.mergeFormat,
                     timeout=3.0,
                 )
                 intercept_type = classify_download_item(msg.url, msg.mime)
@@ -218,28 +236,35 @@ class MessageDispatcher:
                     f"Choose requested for untracked/missing probed job {job_id}"
                 )
                 return
-        else:
-            format_ids = cast(list[Any], metadata_raw.get("formatIds", []) or [])
-            available_format_ids = {str(format_id) for format_id in format_ids}
-            if (
-                msg.formatId != "best"
-                and available_format_ids
-                and msg.formatId not in available_format_ids
-            ):
-                await self._probe_service.restore_pending_probe(job_id, metadata_raw)
-                await self._connection_manager.send_message(
-                    tab_id,
-                    {
-                        "type": "probe_failed",
-                        "jobId": job_id,
-                        "error": "The selected format is no longer available. Please probe again.",
-                        "errorCategory": "stale_probe",
-                        "suggestion": "reprobe_required",
-                    },
-                )
-                return
 
-        metadata_url = cast(str, metadata_raw["url"])
+        metadata_raw = cast(dict[str, Any], metadata_raw)
+
+        format_ids = cast(list[Any], metadata_raw.get("formatIds", []) or [])
+        available_format_ids = {str(format_id) for format_id in format_ids}
+        if (
+            msg.formatId != "best"
+            and available_format_ids
+            and msg.formatId not in available_format_ids
+        ):
+            await self._probe_service.restore_pending_probe(job_id, metadata_raw)
+            await self._connection_manager.send_message(
+                tab_id,
+                {
+                    "type": "probe_failed",
+                    "jobId": job_id,
+                    "error": "The selected format is no longer available. Please probe again.",
+                    "errorCategory": "stale_probe",
+                    "suggestion": "reprobe_required",
+                },
+            )
+            return
+
+        metadata_url = cast(
+            str,
+            metadata_raw.get("stream_url")
+            or metadata_raw.get("page_url")
+            or metadata_raw["url"],
+        )
         metadata_title = cast(Optional[str], metadata_raw.get("title"))
         metadata_duration = cast(Optional[float], metadata_raw.get("duration"))
         metadata_thumbnail = cast(Optional[str], metadata_raw.get("thumbnail"))
@@ -269,17 +294,27 @@ class MessageDispatcher:
             if _is_unusable_title(page_title_hint):
                 page_title_hint = None
 
-            preferred_ext: Optional[str] = None
+            is_audio = classify_mime(metadata_mime) == FILE_TYPE_AUDIO
+            fmt_ext: Optional[str] = None
             for fmt in metadata_formats or []:
                 if isinstance(fmt, dict):
-                    fmt_id = fmt.get("formatId")
-                    fmt_ext = fmt.get("ext")
+                    fmt_dict = cast(dict[str, object], fmt)
+                    fmt_id = cast(Optional[str], fmt_dict.get("formatId"))
+                    fmt_ext = cast(Optional[str], fmt_dict.get("ext"))
                 else:
                     fmt_id = getattr(fmt, "formatId", None)
                     fmt_ext = getattr(fmt, "ext", None)
                 if str(fmt_id) == str(msg.formatId):
-                    preferred_ext = fmt_ext
                     break
+                fmt_ext = None
+
+            # Video output uses the user's selected mergeFormat; audio-only output
+            # keeps the source extension because yt-dlp does not remux it.
+            preferred_ext: Optional[str] = None
+            if is_audio:
+                preferred_ext = fmt_ext
+            else:
+                preferred_ext = fmt_ext or settings.mergeFormat
 
             resolved = await self._resolve_filename_in_thread(
                 url=metadata_url,
@@ -317,6 +352,53 @@ class MessageDispatcher:
             chosen_output_dir
         )
 
+        # Block before queueing if an active job already has the same title.
+        if metadata_title:
+            duplicate = await self._job_service.find_duplicate_by_title(metadata_title)
+            if duplicate:
+                logger.info(
+                    f"Duplicate title choose request for {metadata_title}. JobId: {duplicate.job_id}"
+                )
+                await self._connection_manager.send_message(
+                    tab_id,
+                    {
+                        "type": "duplicate_job_alert",
+                        "jobId": duplicate.job_id,
+                        "forJobId": job_id,
+                        "reason": "title",
+                        "url": duplicate.url,
+                        "title": duplicate.title or metadata_title,
+                        "status": duplicate.status,
+                    },
+                )
+                return
+
+        # Block if another active job is already set to write the same filename
+        # to the same destination.
+        if metadata_filename:
+            duplicate = await self._job_service.find_duplicate_by_filename(
+                metadata_filename, resolved_output_dir
+            )
+            if duplicate:
+                logger.info(
+                    f"Duplicate filename choose request for {metadata_filename} in {resolved_output_dir}. JobId: {duplicate.job_id}"
+                )
+                await self._connection_manager.send_message(
+                    tab_id,
+                    {
+                        "type": "duplicate_job_alert",
+                        "jobId": duplicate.job_id,
+                        "forJobId": job_id,
+                        "reason": "filename",
+                        "url": duplicate.url,
+                        "title": duplicate.title or metadata_filename,
+                        "filename": metadata_filename,
+                        "outputDir": resolved_output_dir,
+                        "status": duplicate.status,
+                    },
+                )
+                return
+
         await self._job_service.create_job(job_id, metadata_url, status="queued")
         await self._job_service.update_job(
             job_id,
@@ -329,7 +411,8 @@ class MessageDispatcher:
             output_dir=resolved_output_dir,
             total_bytes=msg.fileSize or 0.0,
             referer=effective_referer,
-            page_url=msg.pageUrl or effective_referer,
+            page_url=msg.pageUrl or metadata_raw.get("page_url") or effective_referer,
+            stream_url=metadata_raw.get("stream_url"),
             probe_format_ids=probe_format_ids or None,
             probe_timestamp=probe_timestamp,
             probe_referer=probe_referer,
@@ -343,7 +426,38 @@ class MessageDispatcher:
             torrent_info_hash=(metadata_torrent or {}).get("infoHash"),
         )
 
+        # Push the new job to all connected clients immediately so the UI shows
+        # it without waiting for the download task to acquire a slot.
+        await self._broadcast_jobs_list()
+
         conflict_res = getattr(msg, "conflictResolution", "replace") or "replace"
+
+        if metadata_media_type == "playlist" and msg.playlistSelectedFileIndices is not None:
+            playlist_metadata = cast(
+                Optional[dict[str, object]], metadata_raw.get("playlist")
+            )
+            if playlist_metadata and playlist_metadata.get("entries"):
+                await self._playlist_service.start_download(
+                    tab_id=tab_id,
+                    job_id=job_id,
+                    playlist=playlist_metadata,
+                    output_dir=resolved_output_dir,
+                    selected_indices=msg.playlistSelectedFileIndices,
+                    referer=effective_referer,
+                    page_url=msg.pageUrl or metadata_raw.get("page_url") or effective_referer,
+                    conflict_resolution=conflict_res,
+                )
+            else:
+                await self._connection_manager.send_message(
+                    tab_id,
+                    {
+                        "type": "download_failed",
+                        "jobId": job_id,
+                        "error": "Playlist metadata is missing; please probe again.",
+                        "stage": "queued",
+                    },
+                )
+            return
 
         if metadata_media_type == "torrent" or is_magnet_url(metadata_url):
             await self._torrent_service.start_download(
@@ -354,10 +468,26 @@ class MessageDispatcher:
                 selected_files=msg.torrentSelectedFileIndices,
             )
         else:
+            download_url = metadata_url
+            if metadata_media_type == "playlist":
+                # Video tab for a playlist: download the current/sample video.
+                parsed = urllib.parse.urlparse(download_url)
+                if parsed.path.rstrip("/").lower() in ("/playlist", "/playlists"):
+                    playlist_metadata = cast(
+                        Optional[dict[str, object]], metadata_raw.get("playlist")
+                    )
+                    entries = cast(
+                        list[dict[str, Any]],
+                        (playlist_metadata or {}).get("entries") or [],
+                    )
+                    if entries:
+                        first_url = entries[0].get("url")
+                        if first_url:
+                            download_url = str(first_url)
             await self._download_service.start_download(
                 tab_id=tab_id,
                 job_id=job_id,
-                url=metadata_url,
+                url=download_url,
                 format_id=msg.formatId,
                 output_dir=resolved_output_dir,
                 conflict_resolution=conflict_res,
@@ -368,15 +498,74 @@ class MessageDispatcher:
     async def handle_check_file_exists(
         self, tab_id: int, msg: ClientCheckFileExistsMessage
     ) -> None:
+        settings = await self._settings_service.get_settings()
+        # Video downloads should be checked against the user's selected mergeFormat;
+        # audio-only downloads keep their source extension because yt-dlp does not
+        # remux audio-only streams to the merge container.
+        is_audio = classify_mime(msg.mime) == FILE_TYPE_AUDIO
+        preferred_ext = msg.ext if is_audio else settings.mergeFormat
+
         result = await self._file_service.check_file_exists(
             path=msg.path,
             job_id=msg.jobId,
             filename=msg.filename,
             title=msg.title,
-            ext=msg.ext,
+            ext=preferred_ext,
             url=msg.url,
             mime=msg.mime,
         )
+
+        # A download with the same resolved title is already active; block before
+        # we even check the filesystem so the user sees the job duplicate first.
+        resolved_title = result.get("title")
+        if isinstance(resolved_title, str) and resolved_title:
+            duplicate = await self._job_service.find_duplicate_by_title(resolved_title)
+            if duplicate:
+                logger.info(
+                    f"Duplicate title detected for {resolved_title}. JobId: {duplicate.job_id}"
+                )
+                await self._connection_manager.send_message(
+                    tab_id,
+                    {
+                        "type": "duplicate_job_alert",
+                        "jobId": duplicate.job_id,
+                        "forJobId": msg.jobId,
+                        "reason": "title",
+                        "url": duplicate.url,
+                        "title": duplicate.title or resolved_title,
+                        "status": duplicate.status,
+                    },
+                )
+                return
+
+        # Another active job is already queued to write the same filename to the
+        # same destination. Block before the on-disk file-exists check.
+        resolved_filename = result.get("filename")
+        resolved_path = result.get("resolvedPath")
+        if isinstance(resolved_filename, str) and isinstance(resolved_path, str):
+            duplicate = await self._job_service.find_duplicate_by_filename(
+                resolved_filename, resolved_path
+            )
+            if duplicate:
+                logger.info(
+                    f"Duplicate filename detected for {resolved_filename} in {resolved_path}. JobId: {duplicate.job_id}"
+                )
+                await self._connection_manager.send_message(
+                    tab_id,
+                    {
+                        "type": "duplicate_job_alert",
+                        "jobId": duplicate.job_id,
+                        "forJobId": msg.jobId,
+                        "reason": "filename",
+                        "url": duplicate.url,
+                        "title": duplicate.title or resolved_filename,
+                        "filename": resolved_filename,
+                        "outputDir": resolved_path,
+                        "status": duplicate.status,
+                    },
+                )
+                return
+
         await self._connection_manager.send_message(tab_id, result)
 
     async def _broadcast_jobs_list(self) -> None:
@@ -388,7 +577,11 @@ class MessageDispatcher:
     async def handle_pause(self, tab_id: int, msg: ClientPauseMessage) -> None:
         _ = tab_id
         logger.info(f"Pause request received for job {msg.jobId}")
-        success = await self._job_service.pause(msg.jobId)
+        job = await self._job_service.get_job(msg.jobId)
+        if job and job.media_type == "playlist" and job.playlist_child_job_ids:
+            success = await self._playlist_service.pause(msg.jobId)
+        else:
+            success = await self._job_service.pause(msg.jobId)
         if success:
             await self._broadcast_jobs_list()
         else:
@@ -397,12 +590,18 @@ class MessageDispatcher:
     async def handle_resume(self, tab_id: int, msg: ClientResumeMessage) -> None:
         _ = tab_id
         logger.info(f"Resume request received for job {msg.jobId}")
+        job = await self._job_service.get_job(msg.jobId)
+        if job and job.media_type == "playlist" and job.playlist_child_job_ids:
+            success = await self._playlist_service.resume(msg.jobId)
+            if not success:
+                logger.warning(f"Failed to resume playlist job {msg.jobId}")
+            return
+
         success = await self._job_service.resume(msg.jobId)
         if not success:
             logger.warning(f"Failed to resume job {msg.jobId}")
             return
 
-        job = await self._job_service.get_job(msg.jobId)
         if not job:
             return
 
@@ -550,12 +749,28 @@ class MessageDispatcher:
         )
 
         job_before_remove = await self._job_service.get_job(job_id)
+        if job_before_remove and job_before_remove.media_type == "playlist":
+            await self._playlist_service.cancel(job_id)
+            return
+
         await self._job_service.remove_job(job_id)
 
         await self._download_service.cancel(job_id)
         await self._torrent_service.cancel(job_id)
 
-        if job_before_remove and job_before_remove.file_path and job_before_remove.progress < 100.0:
+        if (
+            job_before_remove
+            and job_before_remove.parent_job_id
+        ):
+            await self._playlist_service.remove_child(
+                job_before_remove.parent_job_id, job_id
+            )
+
+        if (
+            job_before_remove
+            and job_before_remove.file_path
+            and job_before_remove.progress < 100.0
+        ):
             await self._file_service.maybe_trash_incomplete(
                 job_before_remove.file_path, job_before_remove.progress
             )
@@ -606,7 +821,15 @@ class MessageDispatcher:
         if job and job.file_path:
             await self._file_service.delete_file(job.file_path)
 
+        if job and job.media_type == "playlist":
+            await self._playlist_service.cancel(msg.jobId)
+            return
+
         await self._job_service.remove_job(msg.jobId)
+
+        if job and job.parent_job_id:
+            await self._playlist_service.remove_child(job.parent_job_id, msg.jobId)
+
         await self._broadcast_jobs_list()
 
     async def handle_get_jobs(self, tab_id: int, msg: ClientGetJobsMessage) -> None:

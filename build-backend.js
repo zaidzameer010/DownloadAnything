@@ -129,8 +129,6 @@ try {
 		"--collect-all",
 		"uvicorn",
 		"--collect-all",
-		"m3u8",
-		"--collect-all",
 		"send2trash",
 		"--collect-all",
 		"structlog",
@@ -138,10 +136,9 @@ try {
 		"certifi",
 		"server/app/main.py",
 	];
-	execSync(
-		`${pythonCmd} -m PyInstaller ${pyInstallerArgs.join(" ")}`,
-		{ stdio: "inherit" },
-	);
+	execSync(`${pythonCmd} -m PyInstaller ${pyInstallerArgs.join(" ")}`, {
+		stdio: "inherit",
+	});
 } catch (error) {
 	logger.error("Failed to run PyInstaller:", error.message);
 	process.exit(1);

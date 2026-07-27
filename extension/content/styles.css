@@ -132,6 +132,29 @@
 	color: var(--text-muted);
 }
 
+.playlist-entry-row {
+	display: flex;
+	align-items: center;
+	padding: 10px 16px;
+	border-bottom: 1px solid var(--border);
+	cursor: pointer;
+	transition: var(--transition-smooth);
+	font-size: 12px;
+}
+
+.playlist-entry-row:last-child {
+	border-bottom: none;
+}
+
+.playlist-entry-row:hover {
+	background: rgba(255, 255, 255, 0.02);
+}
+
+.format-list-radio-col input[type="checkbox"] {
+	accent-color: #ffffff;
+	cursor: pointer;
+}
+
 /* Picker Modal Backdrop */
 .modal-backdrop {
 	position: fixed;

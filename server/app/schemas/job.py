@@ -37,6 +37,7 @@ class JobInfo(BaseModel):
     fragment_count: Optional[int] = None
     referer: Optional[str] = None
     page_url: Optional[str] = None
+    stream_url: Optional[str] = None
     probe_format_ids: Optional[List[str]] = None
     probe_timestamp: Optional[float] = None
     probe_referer: Optional[str] = None
@@ -52,4 +53,9 @@ class JobInfo(BaseModel):
     torrent_seeds: int = 0
     torrent_availability: float = 0.0
     torrent_completed_pieces: int = 0
+    # Playlist support
+    playlist_entries: Optional[List[Dict[str, Any]]] = None
+    playlist_selected_indices: Optional[List[int]] = None
+    playlist_child_job_ids: Optional[List[str]] = None
+    parent_job_id: Optional[str] = None
     added_at: float = 0.0

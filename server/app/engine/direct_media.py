@@ -181,6 +181,16 @@ def probe_direct_media(
             url, referer=referer
         )
 
+        # If neither HEAD nor a Range GET could reach the resource, do not
+        # fabricate a downloadable result. The caller (or extension fallback)
+        # can then try alternate URLs such as sniffed network requests.
+        if mime is None and final_url is None:
+            raise ProbeFailure(
+                "network_error",
+                f"Could not reach the direct file URL; the server rejected the request.",
+                "network_error",
+            )
+
         # Prefer browser-provided MIME when the server omits one.
         if not mime and mime_hint:
             mime = mime_hint

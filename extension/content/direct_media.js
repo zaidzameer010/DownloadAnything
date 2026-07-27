@@ -2,8 +2,7 @@
 	window.DirectMediaFallback = {
 		filterCandidates(currentSniffedStreams, fallbackUrlsTried) {
 			return currentSniffedStreams.filter(
-				(s) =>
-					s.type === "MEDIA" && !fallbackUrlsTried.has(s.key || s.url),
+				(s) => s.type === "MEDIA" && !fallbackUrlsTried.has(s.key || s.url),
 			);
 		},
 		sortCandidates(candidates) {

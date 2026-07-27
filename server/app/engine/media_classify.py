@@ -74,13 +74,18 @@ def has_dedicated_ytdlp_extractor(url: str) -> bool:
     """Return True if yt-dlp has a site-specific extractor suitable for `url`.
 
     Ignores the GenericIE catch-all so that unrelated manifests are not labeled
-    as yt-dlp supported sites.
+    as yt-dlp supported sites. Also skips yt-dlp's blanket unsupported/piracy/DRM
+    extractors (KnownPiracyIE / KnownDRMIE) because they never actually extract
+    media and would otherwise disable the extension's sniffed-stream fallback.
     """
     try:
         for ie_cls in _yt_dlp_extractor_classes():
             if ie_cls.__name__ == "GenericIE":
                 continue
-            if getattr(ie_cls, "IE_NAME", ie_cls.__name__).lower() == "generic":
+            ie_name = getattr(ie_cls, "IE_NAME", ie_cls.__name__)
+            if ie_name.lower() == "generic":
+                continue
+            if ie_name in ("Piracy", "DRM"):
                 continue
             if ie_cls.suitable(url):
                 return True

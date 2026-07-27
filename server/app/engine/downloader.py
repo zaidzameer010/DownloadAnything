@@ -9,10 +9,11 @@ import re
 import secrets
 import mimetypes
 import threading
-from typing import Any, BinaryIO, Dict, List, Optional, cast
+from typing import Any, BinaryIO, Dict, List, Optional, Tuple, cast
 
 from app.engine import ytdlp_opts
-from app.config import get_app_data_dir
+from app.engine.codec_filter import format_size_bytes
+from app.config import get_app_data_dir, settings as app_settings
 from app.domain.exceptions import DownloadPaused
 from app.schemas.settings import AppSettings
 from app.engine.jobs import jobs_registry
@@ -122,6 +123,120 @@ def is_expired_url_error(error_message: str) -> bool:
     """Return True if an error message strongly suggests the URL expired."""
     lowered = (error_message or "").lower()
     return any(phrase in lowered for phrase in _EXPIRED_PHRASES)
+
+
+def _get_fmt_value(fmt: Any, key: str) -> Any:
+    """Return a format field whether the entry is a dict or a model instance."""
+    if isinstance(fmt, dict):
+        return cast(Dict[str, Any], fmt).get(key)
+    return getattr(fmt, key, None)
+
+
+def _read_info_sizes(info: Any) -> Dict[str, Optional[int]]:
+    """Best-effort video, audio, and total byte sizes from a yt-dlp info dict.
+
+    Prefer exact ``filesize``, fall back to ``filesize_approx``, and finally
+    estimate from bitrate × duration. For merged selections with
+    ``requested_formats``, sum the individual stream sizes.
+    """
+    if info is None:
+        return {}
+    info_dict = cast(Dict[str, Any], info)
+    duration = info_dict.get("duration")
+
+    top_total = format_size_bytes(info_dict, duration)
+
+    requested: Any = info_dict.get("requested_formats")
+    if isinstance(requested, list):
+        video_size: Optional[int] = None
+        audio_size: Optional[int] = None
+        extra_total = 0
+        complete = True
+        has_video = False
+        has_audio = False
+
+        for fmt in requested:
+            size = format_size_bytes(fmt, duration)
+            if not isinstance(fmt, dict):
+                if size is None:
+                    complete = False
+                continue
+            fmt_dict = cast(Dict[str, Any], fmt)
+            vcodec = fmt_dict.get("vcodec")
+            acodec = fmt_dict.get("acodec")
+            is_video = bool(vcodec and vcodec != "none")
+            is_audio = bool(acodec and acodec != "none")
+
+            if is_video:
+                has_video = True
+            if is_audio:
+                has_audio = True
+
+            if size is None:
+                complete = False
+                continue
+
+            if is_video and is_audio:
+                extra_total += size
+            elif is_video:
+                video_size = (video_size or 0) + size
+            elif is_audio:
+                audio_size = (audio_size or 0) + size
+            else:
+                extra_total += size
+
+        partial_total = (video_size or 0) + (audio_size or 0) + extra_total
+        total_size = partial_total if complete else top_total
+
+        return {
+            "video": video_size if has_video else None,
+            "audio": audio_size if has_audio else None,
+            "total": total_size if total_size and total_size > 0 else None,
+        }
+
+    vcodec = info_dict.get("vcodec")
+    acodec = info_dict.get("acodec")
+    is_video = bool(vcodec and vcodec != "none")
+    is_audio = bool(acodec and acodec != "none")
+    if is_audio and not is_video:
+        return {"video": None, "audio": top_total, "total": top_total}
+    return {"video": top_total, "audio": None, "total": top_total}
+
+
+def _seed_size_estimates(
+    job_id: str,
+    info: Any,
+    video_est: float,
+    audio_est: float,
+    combined_total: float,
+) -> Tuple[float, float, float]:
+    """Update job byte totals from yt-dlp info and return the new estimates."""
+    sizes = _read_info_sizes(info)
+    if not sizes:
+        return video_est, audio_est, combined_total
+
+    sizes_video = sizes.get("video")
+    sizes_audio = sizes.get("audio")
+    sizes_total = sizes.get("total")
+
+    new_video = float(sizes_video) if sizes_video is not None else video_est
+    new_audio = float(sizes_audio) if sizes_audio is not None else audio_est
+
+    if sizes_total is not None:
+        new_combined = float(sizes_total)
+    else:
+        new_combined = (new_video or 0.0) + (new_audio or 0.0)
+        if new_combined <= 0.0:
+            new_combined = combined_total
+
+    jobs_registry.update_job(
+        job_id,
+        persist=False,
+        total_bytes=new_video or 0.0,
+        audio_total_bytes=new_audio or 0.0,
+        combined_total_bytes=new_combined,
+    )
+    return new_video, new_audio, new_combined
 
 
 def get_aria2_next_executable_path() -> Optional[Path]:
@@ -534,15 +649,18 @@ def _source_container_for_remux(target_ext: str) -> str:
     so FFmpegVideoRemuxer actually runs; ffmpeg auto-detects the real content.
     """
     clean_target = (target_ext or "").strip().lstrip(".").lower()
+    candidates = ["mp4", "mkv", "webm", "mov"]
     for mime in ("video/mp4", "video/x-matroska", "video/webm", "video/quicktime"):
         ext = mimetypes.guess_extension(mime, strict=False)
         if ext:
             clean_ext = ext.lstrip(".").lower()
             if clean_ext and clean_ext != clean_target:
                 return clean_ext
-    # Last resort: ask mimetypes for the most common video extension.
-    fallback_ext = mimetypes.guess_extension("video/mp4", strict=False)
-    return (fallback_ext or ".mp4").lstrip(".")
+    # Last resort: pick a common container that is not the target itself.
+    for fallback in candidates:
+        if fallback != clean_target:
+            return fallback
+    return clean_target or "mp4"
 
 
 class HlsPngTsWrapperStripPP(PostProcessor):
@@ -645,20 +763,21 @@ def _add_stream_fixup_postprocessors(
     post_process chain instead. They are inserted at the front so they run
     before any subtitle/thumbnail embedding and before FFmpegVideoRemuxer.
     """
-    downloader_cls = get_suitable_downloader(info, ydl.params)
+    downloader_cls = get_suitable_downloader(cast(Any, info), ydl.params)
     downloader_name = getattr(downloader_cls, "FD_NAME", None) if downloader_cls else None
 
-    post_process = ydl._pps.get("post_process")
+    pps = cast(Dict[str, Any], getattr(ydl, "_pps", {}))
+    post_process = cast(List[PostProcessor], pps.get("post_process"))
     if not post_process:
         return
 
     fixups: list[PostProcessor] = []
     if downloader_name == "hlsnative":
         fixups.append(HlsPngTsWrapperStripPP(ydl))
-        fixups.append(FFmpegFixupM3u8PP(ydl))
+        fixups.append(cast(PostProcessor, FFmpegFixupM3u8PP(ydl)))
     elif downloader_name == "dashsegments":
         if info.get("is_live") or info.get("is_dash_periods"):
-            fixups.append(FFmpegFixupDuplicateMoovPP(ydl))
+            fixups.append(cast(PostProcessor, FFmpegFixupDuplicateMoovPP(ydl)))
 
     for pp in reversed(fixups):
         pp.set_downloader(ydl)
@@ -757,37 +876,29 @@ def download_video(
     is_direct_video = is_direct_file and is_video
     skip_postprocessing = is_direct_file and not is_video
 
-    # Overwrite download URL with direct stream/file URL if it's a fallback format
+    # Overwrite download URL with the direct file URL when one is stored on the job.
+    # For HLS/DASH streams we keep the original manifest URL so yt-dlp can resolve
+    # the correct variant from the master manifest.
     download_url = url
-    if job and is_stream_or_file and job.formats and format_id:
+    if job and is_direct_file and job.formats and format_id:
         for fmt in job.formats:
-            fmt_id = (
-                fmt.get("formatId")
-                if isinstance(fmt, dict)
-                else getattr(fmt, "formatId", None)
-            )
+            fmt_id = _get_fmt_value(fmt, "formatId")
             if fmt_id == format_id:
-                fmt_url = (
-                    fmt.get("url")
-                    if isinstance(fmt, dict)
-                    else getattr(fmt, "url", None)
-                )
+                fmt_url = _get_fmt_value(fmt, "url")
                 if fmt_url:
                     download_url = fmt_url
-                    logger.debug(f"Using direct format URL for download: {redact_url(download_url)}")
+                    logger.debug(f"Using direct file URL for download: {redact_url(download_url)}")
                 break
-        
+
         # If format_id is "best" or not matched, fall back to the first format's url
         if download_url == url and format_id == "best" and job.formats:
             first_fmt = job.formats[0]
-            fmt_url = (
-                first_fmt.get("url")
-                if isinstance(first_fmt, dict)
-                else getattr(first_fmt, "url", None)
-            )
+            fmt_url = _get_fmt_value(first_fmt, "url")
             if fmt_url:
                 download_url = fmt_url
-                logger.debug(f"Using direct format URL for download (best): {redact_url(download_url)}")
+                logger.debug(f"Using direct file URL for download (best): {redact_url(download_url)}")
+    elif is_stream_or_file:
+        logger.debug(f"Using stream manifest URL for extraction: {redact_url(download_url)}")
 
     # Normalize trailing numeric ids with leading zeros (some APIs reject them).
     download_url = normalize_numeric_id_url(download_url)
@@ -817,17 +928,9 @@ def download_video(
             preferred_ext = None
             if job and job.formats and format_id:
                 for fmt in job.formats:
-                    fmt_id = (
-                        fmt.get("formatId")
-                        if isinstance(fmt, dict)
-                        else getattr(fmt, "formatId", None)
-                    )
+                    fmt_id = _get_fmt_value(fmt, "formatId")
                     if str(fmt_id) == str(format_id):
-                        preferred_ext = (
-                            fmt.get("ext")
-                            if isinstance(fmt, dict)
-                            else getattr(fmt, "ext", None)
-                        )
+                        preferred_ext = _get_fmt_value(fmt, "ext")
                         break
             resolved_filename = resolve_filename(
                 url=download_url or url,
@@ -844,6 +947,19 @@ def download_video(
             jobs_registry.update_job(
                 job_id, title=resolved_filename.title, filename=resolved_filename.filename
             )
+    elif job and job.filename:
+        # yt-dlp / stream jobs: lock the output template to the filename-safe base
+        # that the server and UI already agreed on, so the final file path matches
+        # what duplicate checks (find_duplicate_by_filename, file_exists) expect.
+        base = os.path.basename(job.filename)
+        ext = _extract_trailing_extension(base)
+        title = _strip_trailing_extension(base) or "video"
+        resolved_filename = ResolvedFilename(
+            title=title,
+            extension=ext,
+            filename=base,
+            source="job",
+        )
 
     embed_thumbnail = settings_data.embedThumbnail
     embed_subs = settings_data.embedSubs
@@ -866,50 +982,12 @@ def download_video(
     ffmpeg_location = settings_data.ffmpegLocation
     rate_limit = settings_data.rateLimit
 
-    # Look up format estimates from job
+    # Initialize byte counters and completion flag
     video_est = 0
     audio_est = 0
     combined_dl = 0
     combined_total = 0
-    is_stream = False
     download_finished = False
-
-    # Check if URL itself is a manifest/stream URL
-    lower_url = download_url.lower().split("?")[0]
-    if (
-        any(lower_url.endswith(ext) for ext in [".m3u8", ".mpd"])
-        or "/manifest" in lower_url
-    ):
-        is_stream = True
-
-    if job and job.formats and format_id:
-        for fmt in job.formats:
-            fmt_id = (
-                fmt.get("formatId")
-                if isinstance(fmt, dict)
-                else getattr(fmt, "formatId", None)
-            )
-            if fmt_id == format_id:
-                video_est = (
-                    fmt.get("videoEstSizeBytes")
-                    if isinstance(fmt, dict)
-                    else getattr(fmt, "videoEstSizeBytes", None)
-                ) or 0
-                audio_est = (
-                    fmt.get("audioEstSizeBytes")
-                    if isinstance(fmt, dict)
-                    else getattr(fmt, "audioEstSizeBytes", None)
-                ) or 0
-                is_stream = (
-                    is_stream
-                    or (
-                        fmt.get("isStream")
-                        if isinstance(fmt, dict)
-                        else getattr(fmt, "isStream", False)
-                    )
-                    or False
-                )
-                break
 
     # Resolve isolated temp directory for downloading
     app_temp_dir = get_app_data_dir() / "temp" / job_id
@@ -920,6 +998,9 @@ def download_video(
     if job and is_stream_or_file:
         if not format_id or format_id == "best":
             format_selector = "best"
+    if job and job.parent_job_id and format_id == "best":
+        # Playlist items should always get the best available video+audio merge.
+        format_selector = "bestvideo+bestaudio/best"
 
     # Build the output template from the single source of truth in title_extractor.
     # Escape percent signs so yt-dlp does not interpret them as template markers.
@@ -959,7 +1040,7 @@ def download_video(
 
     def _detect_phase(d: Dict[str, Any]) -> str:
         """Return 'video', 'audio', or 'single' for the current stream."""
-        info = d.get("info_dict") or {}
+        info = cast(Dict[str, Any], d.get("info_dict") or {})
         vcodec = info.get("vcodec", "")
         acodec = info.get("acodec", "")
         if vcodec and vcodec != "none" and (not acodec or acodec == "none"):
@@ -1015,23 +1096,6 @@ def download_video(
         detected = _detect_phase(d)
         current_phase = stream_state["phase"]
 
-        # Dynamic size estimation from stream if not resolved in probing
-        info = d.get("info_dict") or {}
-        duration = info.get("duration")
-        if duration and duration > 0:
-            if detected == "video" and video_est == 0:
-                vbr = info.get("vbr") or info.get("tbr") or 0
-                if vbr > 0:
-                    video_est = int(vbr * 1000 * duration / 8)
-            elif detected == "audio" and audio_est == 0:
-                abr = info.get("abr") or info.get("tbr") or 0
-                if abr > 0:
-                    audio_est = int(abr * 1000 * duration / 8)
-            elif detected == "single" and video_est == 0:
-                tbr = info.get("tbr") or info.get("vbr") or info.get("abr") or 0
-                if tbr > 0:
-                    video_est = int(tbr * 1000 * duration / 8)
-
         if current_phase == "single" and detected == "video":
             # Entering separate-stream mode: first stream is video
             stream_state["phase"] = "video"
@@ -1075,6 +1139,11 @@ def download_video(
             aud_total = existing_job.audio_total_bytes if existing_job and existing_job.audio_total_bytes > 0.0 else audio_est
             combined_dl = vid_dl
             combined_total = vid_total + aud_total if aud_total > 0.0 else vid_total
+            if existing_job and existing_job.combined_total_bytes > combined_total:
+                # Keep the audio portion in the total from the very first tick.
+                combined_total = existing_job.combined_total_bytes
+            if combined_total > 0.0 and combined_dl > combined_total:
+                combined_total = combined_dl
         elif current_phase == "audio":
             vid_dl = (
                 stream_state["video_done_bytes"]
@@ -1092,6 +1161,11 @@ def download_video(
                 aud_total = aud_dl
             combined_dl = vid_dl + aud_dl
             combined_total = vid_total + aud_total
+            if existing_job and existing_job.combined_total_bytes > combined_total:
+                # Preserve the initial combined size estimate while audio is still unknown.
+                combined_total = existing_job.combined_total_bytes
+            if combined_total > 0.0 and combined_dl > combined_total:
+                combined_total = combined_dl
         else:
             # Single-stream download
             vid_dl = max(downloaded, existing_job.downloaded_bytes if existing_job else 0.0)
@@ -1134,8 +1208,6 @@ def download_video(
             "filePath": filename,
         }
 
-        loop.call_soon_threadsafe(event_queue.put_nowait, payload)
-
         jobs_registry.update_job(
             job_id,
             persist=False,  # high-frequency tick — skip disk write
@@ -1153,6 +1225,8 @@ def download_video(
             fragment_index=d.get("fragment_index"),
             fragment_count=d.get("fragment_count"),
         )
+
+        loop.call_soon_threadsafe(event_queue.put_nowait, payload)
 
     # Define postprocessor hook
     def pp_hook(d: Dict[str, Any]):
@@ -1254,30 +1328,15 @@ def download_video(
         opts.setdefault("postprocessors", []).append(
             {"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"}
         )
-        opts.setdefault("postprocessors", []).append(
-            {"key": "EmbedThumbnail", "already_have_thumbnail": False}
-        )
 
-    # Remux videos to the UI-selected container only when the source container
-    # is known to differ. Avoids unnecessary ffmpeg passes and prevents forcing
-    # an already-correct container through a redundant remux.
-    if is_video and merge_format:
-        predicted_source = (
-            guess_file_extension(
-                filename=getattr(job, "filename", None),
-                mime=getattr(job, "mime", None),
-                url=download_url,
-            )
-            or ""
+    # Remux videos to the UI-selected container. We always run the remuxer for
+    # video when a mergeFormat is set so the final file container matches the
+    # user's preference, instead of trusting a source-extension guess that may
+    # be wrong or stale.
+    if is_video and merge_format and not skip_postprocessing:
+        opts.setdefault("postprocessors", []).append(
+            {"key": "FFmpegVideoRemuxer", "preferedformat": merge_format}
         )
-        needs_remux = (
-            not predicted_source
-            or predicted_source.lower().strip(".") != merge_format.lower().strip(".")
-        )
-        if needs_remux:
-            opts.setdefault("postprocessors", []).append(
-                {"key": "FFmpegVideoRemuxer", "preferedformat": merge_format}
-            )
 
     # Embed Metadata postprocessor
     if not skip_postprocessing:
@@ -1288,6 +1347,15 @@ def download_video(
                 "add_infojson": "if_exists",
                 "add_metadata": True,
             }
+        )
+
+    # Embed the thumbnail last. FFmpegVideoRemuxer and FFmpegMetadata both
+    # run ffmpeg with -map 0 -c copy; if they run after the thumbnail is
+    # attached, the Matroska attached_pic disposition is dropped and cover
+    # art is not recognized by Explorer/Finder.
+    if embed_thumbnail and not skip_postprocessing:
+        opts.setdefault("postprocessors", []).append(
+            {"key": "EmbedThumbnail", "already_have_thumbnail": False}
         )
 
     # Use aria2-next as yt-dlp's external downloader for every job when enabled.
@@ -1368,10 +1436,10 @@ def download_video(
 
     try:
         try:
-            with yt_dlp.YoutubeDL(active_opts) as ydl:
+            with yt_dlp.YoutubeDL(cast(Any, active_opts)) as ydl:
                 _raise_if_paused(job_id)
                 try:
-                    info = ydl.extract_info(download_url, download=False)
+                    info = cast(Any, ydl.extract_info(download_url, download=False))
                 except Exception as extract_err:
                     if is_direct_file_url(download_url) or is_direct_download_type(getattr(job, "media_type", None)):
                         logger.info(
@@ -1383,7 +1451,7 @@ def download_video(
                             mime=getattr(job, "mime", None),
                             url=download_url,
                         ) or "bin"
-                        info = {
+                        info = cast(Any, {
                             "id": job_id,
                             "title": (getattr(job, "title", None) or "file").replace("%", "%%"),
                             "url": download_url,
@@ -1400,9 +1468,18 @@ def download_video(
                                     "protocol": "https" if download_url.startswith("https") else "http",
                                 }
                             ],
-                        }
+                        })
+                    elif ytdlp_opts.is_piracy_block_error(extract_err):
+                        logger.warning(
+                            f"yt-dlp piracy block for {redact_url(download_url)}; forcing generic extractor..."
+                        )
+                        info = cast(Any, ydl.extract_info(download_url, download=False, force_generic_extractor=True))
                     else:
                         raise extract_err
+
+                video_est, audio_est, combined_total = _seed_size_estimates(
+                    job_id, info, video_est, audio_est, combined_total
+                )
 
                 if is_direct_video:
                     # Lock the source extension for the temp file so ffmpeg remuxes
@@ -1436,9 +1513,12 @@ def download_video(
                     f"Download failed with native cookies ({browser}): {first_err}. Retrying without cookies..."
                 )
                 active_opts.pop("cookiesfrombrowser", None)
-                with yt_dlp.YoutubeDL(active_opts) as ydl:
+                with yt_dlp.YoutubeDL(cast(Any, active_opts)) as ydl:
                     _raise_if_paused(job_id)
-                    info = ydl.extract_info(download_url, download=False)
+                    info = cast(Any, ydl.extract_info(download_url, download=False))
+                    video_est, audio_est, combined_total = _seed_size_estimates(
+                        job_id, info, video_est, audio_est, combined_total
+                    )
                     if is_direct_video:
                         source_ext = (
                             guess_file_extension(
@@ -1476,7 +1556,7 @@ def download_video(
                         break
 
         # Move the completed postprocessed file to the user's selected destination directory
-        final_out_dir = output_dir if output_dir else settings.DEFAULT_OUTPUT_DIR
+        final_out_dir = output_dir if output_dir else app_settings.DEFAULT_OUTPUT_DIR
         os.makedirs(final_out_dir, exist_ok=True)
 
         dest_filepath = os.path.join(final_out_dir, os.path.basename(final_filepath))

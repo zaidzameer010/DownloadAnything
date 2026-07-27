@@ -21,6 +21,8 @@ class ClientProbeMessage(BaseModel):
     title: Optional[str] = None
     referer: Optional[str] = None
     jobId: Optional[str] = None
+    # Optional stream/manifest URL captured by the browser extension (e.g. m3u8/mpd).
+    streamUrl: Optional[str] = None
 
 
 class ClientChooseMessage(BaseModel):
@@ -42,6 +44,9 @@ class ClientChooseMessage(BaseModel):
 
     # Optional torrent file selection (indices of files to download)
     torrentSelectedFileIndices: Optional[List[int]] = None
+
+    # Optional playlist entry selection (indices of entries to download)
+    playlistSelectedFileIndices: Optional[List[int]] = None
 
 
 class ClientCheckFileExistsMessage(BaseModel):
