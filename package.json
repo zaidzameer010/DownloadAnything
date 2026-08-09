@@ -6,31 +6,38 @@
 	"scripts": {
 		"dev": "vite",
 		"build": "tsc && vite build",
+		"backend:build": "conda run --no-capture-output -n downloadanything python -m PyInstaller --noconfirm --clean --distpath build/backend --workpath build/backend/work backend/server.spec && bun bundle-tauri-sidecar.js",
 		"start": "vite preview",
-		"tauri:dev": "tauri dev",
-		"tauri:build": "tauri build",
+		"tauri:dev": "bun tauri dev",
+		"tauri:build": "bun tauri build",
 		"lint": "biome lint",
 		"format": "biome format --write",
-		"check": "biome check --write"
+		"check": "biome check"
 	},
 	"dependencies": {
-		"@tanstack/react-table": "^8.21.3",
-		"lucide-react": "^1.25.0",
-		"react": "^19.2.7",
-		"react-dom": "^19.2.7"
+		"@heroui/react": "^3.2.4",
+		"@heroui/styles": "^3.2.4",
+		"@tailwindcss/vite": "^4.3.3",
+		"@tauri-apps/api": "^2.11.1",
+		"@tauri-apps/plugin-process": "^2.3.1",
+		"@tauri-apps/plugin-shell": "^2.3.5",
+		"@tauri-apps/plugin-updater": "^2.10.1",
+		"lucide-react": "^1.31.0",
+		"react": "^19.2.8",
+		"react-dom": "^19.2.8"
 	},
 	"devDependencies": {
 		"@babel/core": "^8.0.1",
-		"@biomejs/biome": "2.5.5",
+		"@biomejs/biome": "2.5.7",
 		"@rolldown/plugin-babel": "^0.2.3",
 		"@tauri-apps/cli": "^2.11.4",
 		"@types/babel__core": "^7.20.5",
-		"@types/node": "^26.1.1",
-		"@types/react": "^19.2.17",
-		"@types/react-dom": "^19.2.3",
-		"@vitejs/plugin-react": "^6.0.3",
+		"@types/node": "^26.2.0",
+		"@types/react": "^19.2.18",
+		"@types/react-dom": "^19.2.4",
+		"@vitejs/plugin-react": "^6.0.5",
 		"babel-plugin-react-compiler": "^1.0.0",
 		"typescript": "~7.0.2",
-		"vite": "^8.1.5"
+		"vite": "^8.2.1"
 	}
 }

@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "DownloadAnything",
+  "version": "0.4.0",
+  "description": "Extract and download video URLs, including HLS, DASH and direct streams.",
+  "permissions": [
+    "storage",
+    "webRequest",
+    "downloads",
+    "alarms"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/styles.css"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/logger.js", "src/extractor.js", "src/filenameExtractor.js", "src/content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_title": "DownloadAnything",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  }
+}

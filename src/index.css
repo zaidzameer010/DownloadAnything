@@ -1,117 +1,160 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500;600;700;800&display=swap");
+@import "tailwindcss";
+@import "@heroui/styles";
 
-:root {
-	/* OLED Grayscale Palette */
-	--bg-deep: #000000; /* Pure OLED black background */
-	--bg-panel: #09090b; /* Soft dark gray for card panels (zinc-950) */
-	--bg-solid: #09090b;
-	--bg-input: #040405; /* Extremely dark input fields */
-	--bg-card: #09090b;
+.dark {
+	/* True OLED Pitch Black Background & High-Contrast Monochromatic Theme */
+	--background: #000000;
+	--foreground: #f4f4f7;
+	--muted: #a1a1aa;
 
-	/* Text Colors */
-	--text-primary: #f4f4f5; /* Soft zinc-100 primary text */
-	--text-secondary: #a1a1aa; /* Detail zinc-400 text */
-	--text-muted: #71717a; /* Muted zinc-500 labels */
-	--text-disabled: #3f3f46; /* Disabled zinc-700 text */
+	/* Elevated Surfaces & Explicit Hover States */
+	--surface: #09090b;
+	--surface-hover: #141417;
+	--surface-foreground: #f4f4f7;
 
-	/* Outlines & Borders (Transparent and thin) */
-	--border-dim: rgba(255, 255, 255, 0.05);
-	--border-bright: rgba(255, 255, 255, 0.12);
-	--border-focus: rgba(255, 255, 255, 0.25);
+	--surface-secondary: #101014;
+	--surface-secondary-hover: #1c1c22;
 
-	/* Highlights & Selections (No raw inversion) */
-	--bg-highlight: rgba(255, 255, 255, 0.04); /* Modern hover overlay */
-	--bg-highlight-active: rgba(255, 255, 255, 0.08);
-	--text-highlight: #ffffff;
+	--surface-tertiary: #16161b;
+	--surface-tertiary-hover: #24242c;
 
-	/* Status indicators mapped to premium dark-mode desaturated accents */
-	--status-downloading: #38bdf8; /* sky-400 */
-	--status-downloading-glow: rgba(56, 189, 248, 0.2);
-	--status-postprocessing: #c084fc; /* violet-400 */
-	--status-postprocessing-glow: rgba(192, 132, 252, 0.2);
-	--status-completed: #34d399; /* emerald-400 */
-	--status-completed-glow: rgba(52, 211, 153, 0.2);
-	--status-failed: #fb7185; /* rose-400 */
-	--status-failed-glow: rgba(251, 113, 133, 0.2);
-	--status-paused: #a1a1aa; /* zinc-400 */
-	--status-paused-glow: rgba(161, 161, 170, 0.1);
-	--status-queued: #52525b; /* zinc-600 */
-	--status-seeding: #fbbf24; /* amber-400 */
-	--status-seeding-glow: rgba(251, 191, 36, 0.2);
+	--overlay: #1c1c22;
+	--overlay-hover: #2a2a33;
+	--overlay-foreground: #ffffff;
 
-	/* Typography: Inter for controls, Mono for numerical metadata */
-	--font-sans:
-		"Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-		sans-serif;
-	--font-mono: "JetBrains Mono", "Fira Code", monospace;
+	/* Sleek High-Contrast Monochrome Gray/White Accent & Sharp Hover */
+	--accent: #e4e4e7;
+	--accent-hover: #ffffff;
+	--accent-foreground: #09090b;
+	--focus: #ffffff;
 
-	/* Premium border radius */
-	--radius-xl: 12px;
-	--radius-lg: 8px;
-	--radius-md: 6px;
-	--radius-sm: 4px;
+	/* Crisp Borders & Separators */
+	--border: #27272a;
+	--border-visible: #3f3f46;
+	--border-hover: #52525b;
+	--separator: #18181b;
 
-	/* Smooth transition animations */
-	--transition-smooth: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-	--transition-fast: all 0.12s cubic-bezier(0.16, 1, 0.3, 1);
+	/* Component Defaults & Explicit Hover */
+	--default: #18181b;
+	--default-hover: #27272a;
+	--default-foreground: #f4f4f7;
+
+	/* Form Input Fields & Hover/Focus Boundaries */
+	--field-background: #09090b;
+	--field-foreground: #f4f4f7;
+	--field-border: #27272a;
+	--field-hover: #121215;
+	--field-border-hover: #52525b;
+	--field-border-focus: #ffffff;
+
+	/* Saturated Status Colors & Direct Solid Hover States */
+	--success: #22c55e;
+	--success-hover: #16a34a;
+	--success-foreground: #ffffff;
+
+	--warning: #f59e0b;
+	--warning-hover: #d97706;
+	--warning-foreground: #000000;
+
+	--danger: #ef4444;
+	--danger-hover: #dc2626;
+	--danger-foreground: #ffffff;
+
+	/* High-Contrast Soft Tint Colors & Highly Visible Hover States */
+	--accent-soft: rgba(255, 255, 255, 0.12);
+	--accent-soft-foreground: #ffffff;
+	--accent-soft-hover: rgba(255, 255, 255, 0.24);
+
+	--success-soft: rgba(34, 197, 94, 0.16);
+	--success-soft-foreground: #4ade80;
+	--success-soft-hover: rgba(34, 197, 94, 0.3);
+
+	--warning-soft: rgba(245, 158, 11, 0.16);
+	--warning-soft-foreground: #fcd34d;
+	--warning-soft-hover: rgba(245, 158, 11, 0.3);
+
+	--danger-soft: rgba(239, 68, 68, 0.16);
+	--danger-soft-foreground: #fca5a5;
+	--danger-soft-hover: rgba(239, 68, 68, 0.3);
+
+	--default-soft: rgba(255, 255, 255, 0.08);
+	--default-soft-foreground: #ffffff;
+	--default-soft-hover: rgba(255, 255, 255, 0.18);
+}
+
+@layer base {
+	* {
+		box-sizing: border-box;
+	}
+
+	button,
+	a,
+	input,
+	select,
+	textarea,
+	[role="button"],
+	[role="tab"] {
+		transition-property:
+			color, background-color, border-color, opacity, box-shadow;
+		transition-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+		transition-duration: 150ms;
+	}
+
+	h1,
+	h2,
+	h3,
+	h4,
+	h5,
+	h6 {
+		text-wrap: balance;
+	}
+
+	html,
+	body,
+	#root {
+		height: 100%;
+		margin: 0;
+		padding: 0;
+		background-color: var(--background, #000000);
+		color-scheme: dark;
+		overscroll-behavior: none;
+	}
+
+	body {
+		min-width: 320px;
+		overflow-x: hidden;
+		color: var(--foreground);
+		font-family:
+			ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+		font-kerning: normal;
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+	}
+
+	button,
+	input,
+	select,
+	textarea {
+		font: inherit;
+	}
+
+	::selection {
+		background: color-mix(in oklab, var(--accent) 32%, transparent);
+		color: var(--foreground);
+	}
 }
 
 .tabular-nums {
 	font-variant-numeric: tabular-nums;
 }
 
-* {
-	box-sizing: border-box;
-	margin: 0;
-	padding: 0;
-}
-
-body {
-	background-color: var(--bg-deep);
-	color: var(--text-primary);
-	font-family: var(--font-sans);
-	-webkit-font-smoothing: antialiased;
-	-moz-osx-font-smoothing: grayscale;
-	min-height: 100vh;
-	overflow: hidden;
-}
-
-/* Custom Softer Monochrome Scrollbars */
-::-webkit-scrollbar {
-	width: 6px;
-	height: 6px;
-}
-
-::-webkit-scrollbar-track {
-	background: var(--bg-deep);
-}
-
-::-webkit-scrollbar-thumb {
-	background: rgba(255, 255, 255, 0.08);
-	border-radius: var(--radius-sm);
-}
-
-::-webkit-scrollbar-thumb:hover {
-	background: rgba(255, 255, 255, 0.2);
-}
-
-::selection {
-	background: rgba(255, 255, 255, 0.12);
-	color: #ffffff;
-}
-
-/* Page Entry Animation */
-.animate-fade-in-up {
-	animation: fadeInUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-}
-
-@keyframes fadeInUp {
-	from {
-		opacity: 0;
-		transform: translateY(6px);
-	}
-	to {
-		opacity: 1;
-		transform: translateY(0);
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		scroll-behavior: auto;
+		transition-duration: 0.01ms;
+		animation-duration: 0.01ms;
+		animation-iteration-count: 1;
 	}
 }

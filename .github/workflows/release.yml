@@ -81,6 +81,8 @@ jobs:
           releaseBody: 'DownloadAnything Release'
           releaseDraft: true
           prerelease: false
+          # Let the custom updater-json job generate and upload the combined latest.json.
+          includeUpdaterJson: false
           # Dynamically overrides the plugins object at build-time
           args: --config '{"plugins":{"updater":{"pubkey":"${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}"}}}'
 
@@ -120,24 +122,23 @@ jobs:
               "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(),
               "platforms": {}
           }
-          sig_files = glob.glob("*.sig")
-          for sig_file in sig_files:
+          for sig_file in glob.glob("*.sig"):
               archive_file = sig_file[:-4]
-              if os.path.exists(archive_file):
-                  with open(sig_file, "r") as f:
-                      sig = f.read().strip()
-                  archive_lower = archive_file.lower()
-                  platform_key = None
-                  if "aarch64" in archive_lower or "arm64" in archive_lower:
-                      platform_key = "darwin-aarch64"
-                  elif "x64" in archive_lower or "x86_64" in archive_lower:
-                      if "setup" in archive_lower or "nsis" in archive_lower or "msi" in archive_lower:
-                          platform_key = "windows-x86_64"
-                  if platform_key:
-                      latest["platforms"][platform_key] = {
-                          "signature": sig,
-                          "url": f"https://github.com/{owner_repo}/releases/download/{tag}/{archive_file}"
-                      }
+              if not os.path.exists(archive_file):
+                  continue
+              with open(sig_file, "r") as f:
+                  sig = f.read().strip()
+              lower = archive_file.lower()
+              key = None
+              if lower.endswith(".app.tar.gz") and ("aarch64" in lower or "arm64" in lower):
+                  key = "darwin-aarch64"
+              elif (lower.endswith(".exe") or lower.endswith(".msi")) and ("x86_64" in lower or "x64" in lower):
+                  key = "windows-x86_64"
+              if key:
+                  latest["platforms"][key] = {
+                      "signature": sig,
+                      "url": f"https://github.com/{owner_repo}/releases/download/{tag}/{archive_file}"
+                  }
           with open("latest.json", "w") as f:
               json.dump(latest, f, indent=2)
           print("Generated latest.json:")

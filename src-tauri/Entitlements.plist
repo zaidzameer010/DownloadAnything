@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Tauri app and WebView JIT support. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+
+	<!-- File-system access for browser cookies and user downloads.
+	     Note: Full Disk Access is not automatic on macOS; the user may still
+	     need to approve the app in System Settings > Privacy & Security.
+	     These keys declare the intent and are required for sandboxed or
+	     hardened contexts where they apply. -->
+	<key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+	<array>
+		<string>Library/Application Support/</string>
+		<string>Library/Containers/</string>
+	</array>
+	<key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
+	<array>
+		<string>Library/Cookies/</string>
+		<string>Library/Application Support/</string>
+	</array>
+</dict>
+</plist>

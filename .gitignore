@@ -7,5 +7,7 @@ settings.json
 build/
 dist/
 *.spec
+!backend/server.spec
 src-tauri/target/
 src-tauri/binaries/
+server/tests

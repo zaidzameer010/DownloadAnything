@@ -1,52 +1,70 @@
 {
-	"$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-	"productName": "DownloadAnything",
-	"version": "0.4.0",
-	"identifier": "com.DownloadAnything.dev",
-	"build": {
-		"frontendDist": "../dist",
-		"devUrl": "http://localhost:5173",
-		"beforeDevCommand": "uv run server/app/main.py & bun run dev",
-		"beforeBuildCommand": "bun run build-backend.js && bun run build"
-	},
-	"app": {
-		"withGlobalTauri": true,
-		"windows": [
-			{
-				"title": "DownloadAnything",
-				"width": 1920,
-				"height": 1080,
-				"resizable": true,
-				"fullscreen": false
-			}
-		],
-		"security": {
-			"csp": "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws://127.0.0.1:8765; img-src 'self' data: https: http: asset: https://asset.localhost;"
-		}
-	},
-	"bundle": {
-		"active": true,
-		"targets": ["nsis", "dmg"],
-		"resources": {
-			"../extension/": "browser-extension/",
-			"binaries/backend/": "backend/"
-		},
-		"icon": [
-			"icons/32x32.png",
-			"icons/128x128.png",
-			"icons/128x128@2x.png",
-			"icons/icon.icns",
-			"icons/icon.ico"
-		],
-		"externalBin": [],
-		"createUpdaterArtifacts": true
-	},
-	"plugins": {
-		"updater": {
-			"pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIxOTU1MEIxQjFFRDdCMTkKUldRWmUrMnhzVkNWc1hpVkpYM0NCZHRjZUcxSkJDeEFHQjlnS2x1NkJ1VkZ0eG5vcWFVN1JFWUUK",
-			"endpoints": [
-				"https://github.com/zaidzameer010/DownloadAnything/releases/latest/download/latest.json"
-			]
-		}
-	}
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "DownloadAnything",
+  "version": "0.4.0",
+  "identifier": "com.downloadanything.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "bun dev",
+    "beforeBuildCommand": "bun run backend:build && bun run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "DownloadAnything",
+        "width": 1920,
+        "height": 1080,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ws://127.0.0.1:8765; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "targets": ["app", "dmg", "nsis"],
+    "externalBin": ["binaries/aria2-next"],
+    "resources": {
+      "resources/downloadanything-backend": "downloadanything-backend"
+    },
+    "fileAssociations": [
+      {
+        "ext": ["torrent"],
+        "name": "BitTorrent Seed File",
+        "role": "Viewer",
+        "mimeType": "application/x-bittorrent"
+      }
+    ],
+    "category": "Utility",
+    "shortDescription": "Desktop download manager",
+    "longDescription": "DownloadAnything is a desktop download manager with browser extension and websocket backend integration.",
+    "macOS": {
+      "signingIdentity": "-",
+      "hardenedRuntime": true,
+      "entitlements": "./Entitlements.plist"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI2MTBCNTFFOTdFMDhCNTIKUldSU2krQ1hIclVRSnJOaWt0YzNkQ3ZvRE1vdWZ2ditCSC90ZUdvbTE5emlsOWdYb3ViMnJGS0YK",
+      "endpoints": [
+        "https://github.com/zaidzameer010/DownloadAnything/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
 }
