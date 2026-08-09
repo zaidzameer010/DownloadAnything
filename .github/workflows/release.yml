@@ -63,10 +63,12 @@ jobs:
         run: bun install
 
       - name: Rust cache
+        id: rust-cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
           cache-all-crates: true
+          prefix-key: "rust-cache-${{ matrix.platform }}"
 
       - name: tauri-build
         uses: tauri-apps/tauri-action@v0
@@ -84,10 +86,21 @@ jobs:
           includeUpdaterJson: false
           args: --config '{"plugins":{"updater":{"pubkey":"${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}"}}}'
 
-      - name: Cleanup old caches
+      - name: Cleanup old caches for OS
         shell: bash # Forces Bash on Windows so '|| true' doesn't cause a syntax error
         run: |
-          gh cache delete --all --ref "${{ github.ref }}" || true
+          PLATFORM="${{ matrix.platform }}"
+          echo "Checking for previous caches to clean up for platform: $PLATFORM"
+          CACHES_JSON=$(gh cache list --limit 100 --json id,key 2>/dev/null || echo "[]")
+          CACHE_IDS=$(echo "$CACHES_JSON" | jq -r --arg plat "$PLATFORM" '.[] | select(.key | contains($plat)) | .id')
+          if [ -n "$CACHE_IDS" ]; then
+            for id in $CACHE_IDS; do
+              echo "Deleting previous cache ID $id for platform $PLATFORM..."
+              gh cache delete "$id" || true
+            done
+          else
+            echo "No previous caches found for platform $PLATFORM."
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
