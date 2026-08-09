@@ -109,6 +109,11 @@ pub fn run() {
 
         let child = command.spawn()?;
         app.manage(BackendProcess(Mutex::new(Some(child))));
+
+        // Handle .torrent files passed via CLI (Windows) or at cold start (macOS).
+        if let Some(path) = get_cli_torrent_file() {
+          let _ = app.emit("open-torrent-file", &path);
+        }
       }
 
       Ok(())
@@ -118,6 +123,8 @@ pub fn run() {
     .run(|app, event| {
       #[cfg(desktop)]
       match event {
+        // macOS file-association event.
+        #[cfg(any(target_os = "macos"))]
         RunEvent::Opened { urls } => {
           for url in urls {
             let path_str = url.to_string();
