@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DownloadAnything",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Extract and download video URLs, including HLS, DASH and direct streams.",
   "permissions": [
     "storage",

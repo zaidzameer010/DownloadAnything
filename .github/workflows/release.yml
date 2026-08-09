@@ -46,7 +46,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
@@ -73,7 +73,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_PUBKEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
         with:
           # Uses the manual input if dispatched manually; falls back to the git tag on push
           tagName: ${{ github.event.inputs.version || github.ref_name }}
@@ -83,7 +82,6 @@ jobs:
           prerelease: false
           # Let the custom updater-json job generate and upload the combined latest.json.
           includeUpdaterJson: false
-          # Dynamically overrides the plugins object at build-time
           args: --config '{"plugins":{"updater":{"pubkey":"${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}"}}}'
 
       - name: Cleanup old caches
