@@ -1,4 +1,4 @@
-import { Alert, Button, Typography } from "@heroui/react";
+import { Alert, Button, ProgressBar, Typography } from "@heroui/react";
 import { Info, Loader2, RefreshCw } from "lucide-react";
 import type { Updater } from "../hooks/useUpdater";
 
@@ -114,12 +114,17 @@ export default function AboutSection({
 								: "Downloading update…"}
 						</Alert.Title>
 						<Alert.Description>
-							<div className="mt-2 h-2 w-full max-w-md overflow-hidden rounded-full bg-surface-tertiary">
-								<div
-									className="h-full bg-accent transition-all"
-									style={{ width: `${progress}%` }}
-								/>
-							</div>
+							<ProgressBar
+								aria-label="Update download progress"
+								className="mt-2 w-full max-w-md"
+								color="accent"
+								size="sm"
+								value={progress}
+							>
+								<ProgressBar.Track className="h-2 overflow-hidden rounded-full bg-surface-tertiary">
+									<ProgressBar.Fill className="h-full transition-all" />
+								</ProgressBar.Track>
+							</ProgressBar>
 							{updater.state.status === "downloading" ? (
 								<p className="mt-1 text-sm text-muted">
 									{Math.round(progress)}% downloaded

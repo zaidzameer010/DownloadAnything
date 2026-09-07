@@ -401,7 +401,7 @@ function SettingsNavigation({
 					>
 						<Icon
 							aria-hidden
-							className={`size-4 shrink-0 ${active ? "text-primary font-semibold" : ""}`}
+							className={`size-4 shrink-0 ${active ? "text-accent font-semibold" : ""}`}
 						/>
 						<span className="truncate">{item.label}</span>
 					</button>

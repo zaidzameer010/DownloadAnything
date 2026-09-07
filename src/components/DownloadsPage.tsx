@@ -431,35 +431,12 @@ function JobContextMenu({
 	);
 }
 
-function JobTableHeader({
-	allSelected,
-	isIndeterminate,
-	onToggleAll,
-}: {
-	allSelected: boolean;
-	isIndeterminate: boolean;
-	onToggleAll: () => void;
-}) {
+function JobTableHeader() {
 	return (
 		<div
 			aria-hidden="true"
-			className="mb-2 grid min-w-230 w-full grid-cols-[3rem_minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] rounded-xl border border-separator bg-surface-tertiary text-xs font-semibold text-muted shadow-sm"
+			className="mb-2 grid min-w-230 w-full grid-cols-[minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] rounded-xl border border-separator bg-surface-tertiary text-xs font-semibold text-muted shadow-sm"
 		>
-			<div className="flex items-center justify-center px-4 py-3">
-				<Checkbox
-					aria-label="Select all"
-					isIndeterminate={isIndeterminate}
-					isSelected={allSelected}
-					variant="secondary"
-					onChange={() => onToggleAll()}
-				>
-					<Checkbox.Content>
-						<Checkbox.Control>
-							<Checkbox.Indicator />
-						</Checkbox.Control>
-					</Checkbox.Content>
-				</Checkbox>
-			</div>
 			<span className="px-4 py-3 text-start">Title</span>
 			<span className="px-4 py-3 text-center">Status</span>
 			<span className="px-4 py-3 text-start">Progress</span>
@@ -503,33 +480,40 @@ function JobRow({
 	isChild,
 	className,
 	isSelected,
-	onToggle,
+	onSelect,
 	onContextMenu,
 }: {
 	job: Job;
 	isChild?: boolean;
 	className?: string;
 	isSelected: boolean;
-	onToggle: (id: string) => void;
+	onSelect: (id: string, event: React.MouseEvent) => void;
 	onContextMenu: (job: Job, x: number, y: number) => void;
 }) {
 	const titleIndent = isChild ? "ps-8" : "ps-4";
 	const base = isSelected
-		? "bg-surface-tertiary ring-1 ring-inset ring-accent"
+		? "bg-surface-tertiary ring-1 ring-inset ring-accent/35"
 		: "bg-surface-secondary hover:bg-surface-hover";
 	return (
 		<div
+			data-job-row
 			className={[
-				"group grid cursor-context-menu grid-cols-[3rem_minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
+				"group grid cursor-pointer select-none grid-cols-[minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
 				base,
 				className || "",
 			].join(" ")}
+			onClick={(event) => onSelect(job.id, event)}
 			onContextMenu={(event) => {
 				event.preventDefault();
 				onContextMenu(job, event.clientX, event.clientY);
 			}}
 			tabIndex={0}
 			onKeyDown={(event) => {
+				if (event.key === "Enter" || event.key === " ") {
+					event.preventDefault();
+					onSelect(job.id, event as unknown as React.MouseEvent);
+					return;
+				}
 				if (
 					event.key !== "ContextMenu" &&
 					!(event.shiftKey && event.key === "F10")
@@ -544,24 +528,7 @@ function JobRow({
 				);
 			}}
 		>
-			<div
-				className="flex items-center justify-center px-4 py-4"
-				onClick={(event) => event.stopPropagation()}
-			>
-				<Checkbox
-					aria-label={`Select ${job.title || job.url}`}
-					isSelected={isSelected}
-					variant="secondary"
-					onChange={() => onToggle(job.id)}
-				>
-					<Checkbox.Content>
-						<Checkbox.Control>
-							<Checkbox.Indicator />
-						</Checkbox.Control>
-					</Checkbox.Content>
-				</Checkbox>
-			</div>
-			<div className={`min-w-0 px-4 py-4 ${titleIndent}`}>
+			<div className={`min-w-0 py-4 pe-4 ${titleIndent}`}>
 				<TitleCell job={job} />
 			</div>
 			<div className="px-4 py-4 text-center">
@@ -580,41 +547,49 @@ function JobRow({
 function ParentGroup({
 	group,
 	selectedIds,
-	onToggle,
+	onSelect,
 	onContextMenu,
 }: {
 	group: JobGroup;
 	selectedIds: Set<string>;
-	onToggle: (id: string) => void;
+	onSelect: (id: string, event: React.MouseEvent) => void;
 	onContextMenu: (job: Job, x: number, y: number) => void;
 }) {
 	const { root, children } = group;
 	const isSelected = selectedIds.has(root.id);
 	const rootClass = isSelected
-		? "bg-surface-tertiary ring-1 ring-inset ring-accent"
+		? "bg-surface-tertiary ring-1 ring-inset ring-accent/35"
 		: "bg-surface-secondary hover:bg-surface-hover";
 	return (
 		<Accordion
 			className="w-full overflow-hidden rounded-2xl"
 			hideSeparator
-			variant="surface"
 		>
 			<Accordion.Item
 				className="w-full overflow-hidden rounded-2xl"
 				id={root.id}
 			>
-				<Accordion.Heading>
-					<Accordion.Trigger className="w-full p-0">
+				{({ isExpanded }) => (
+					<>
 						<div
+							data-job-row
 							className={[
-								"group grid w-full cursor-context-menu grid-cols-[3rem_minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
+								"group grid w-full cursor-pointer select-none grid-cols-[minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
+								isExpanded ? "rounded-t-2xl" : "rounded-2xl",
 								rootClass,
 							].join(" ")}
+							onClick={(event) => onSelect(root.id, event)}
 							onContextMenu={(event) => {
 								event.preventDefault();
 								onContextMenu(root, event.clientX, event.clientY);
 							}}
+							tabIndex={0}
 							onKeyDown={(event) => {
+								if (event.key === "Enter" || event.key === " ") {
+									event.preventDefault();
+									onSelect(root.id, event as unknown as React.MouseEvent);
+									return;
+								}
 								if (
 									event.key !== "ContextMenu" &&
 									!(event.shiftKey && event.key === "F10")
@@ -629,25 +604,14 @@ function ParentGroup({
 								);
 							}}
 						>
-							<div
-								className="flex items-center justify-center px-4 py-4"
-								onClick={(event) => event.stopPropagation()}
-							>
-								<Checkbox
-									aria-label={`Select ${root.title || root.url}`}
-									isSelected={selectedIds.has(root.id)}
-									variant="secondary"
-									onChange={() => onToggle(root.id)}
+							<div className="flex min-w-0 items-center gap-2 py-4 pe-4 ps-3">
+								<Accordion.Trigger
+									aria-label={isExpanded ? "Collapse playlist" : "Expand playlist"}
+									className="flex size-7 shrink-0 flex-initial items-center justify-center rounded-lg p-0 text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
+									onClick={(event) => event.stopPropagation()}
 								>
-									<Checkbox.Content>
-										<Checkbox.Control>
-											<Checkbox.Indicator />
-										</Checkbox.Control>
-									</Checkbox.Content>
-								</Checkbox>
-							</div>
-							<div className="flex min-w-0 items-center gap-2 px-4 py-4 ps-4">
-								<Accordion.Indicator className="shrink-0 text-muted" />
+									<Accordion.Indicator className="m-0 size-4 shrink-0 text-muted" />
+								</Accordion.Trigger>
 								<span className="min-w-0 flex-1">
 									<TitleCell job={root} />
 								</span>
@@ -662,27 +626,27 @@ function ParentGroup({
 								<SizeCell job={root} />
 							</div>
 						</div>
-					</Accordion.Trigger>
-				</Accordion.Heading>
-				<Accordion.Panel>
-					<div className="overflow-hidden bg-surface-secondary border-t border-separator">
-						{children.map((child, index) => (
-							<JobRow
-								className={
-									index !== children.length - 1
-										? "border-b border-separator"
-										: ""
-								}
-								isChild
-								isSelected={selectedIds.has(child.id)}
-								job={child}
-								key={child.id}
-								onContextMenu={onContextMenu}
-								onToggle={onToggle}
-							/>
-						))}
-					</div>
-				</Accordion.Panel>
+						<Accordion.Panel>
+							<div className="overflow-hidden bg-surface-secondary border-t border-separator">
+								{children.map((child, index) => (
+									<JobRow
+										className={
+											index !== children.length - 1
+												? "border-b border-separator"
+												: ""
+										}
+										isChild
+										isSelected={selectedIds.has(child.id)}
+										job={child}
+										key={child.id}
+										onContextMenu={onContextMenu}
+										onSelect={onSelect}
+									/>
+								))}
+							</div>
+						</Accordion.Panel>
+					</>
+				)}
 			</Accordion.Item>
 		</Accordion>
 	);
@@ -734,12 +698,12 @@ function TorrentFileRow({
 
 	return (
 		<div
-			className={`grid grid-cols-[3rem_minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center bg-surface-secondary py-3 text-xs ${
+			data-job-row
+			className={`grid grid-cols-[minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center bg-surface-secondary py-3 text-xs ${
 				!isLast ? "border-b border-separator" : ""
 			}`}
 		>
-			<div />
-			<div className="flex min-w-0 items-center gap-2.5 px-4 ps-8">
+			<div className="flex min-w-0 items-center gap-2.5 px-4 ps-10">
 				<Icon className="size-4 shrink-0 text-muted" />
 				<span
 					className="truncate font-medium text-foreground"
@@ -756,10 +720,11 @@ function TorrentFileRow({
 					<ProgressBar
 						aria-label={`${file.filename} progress`}
 						className="h-1.5 w-full"
+						color="accent"
 						value={isQueued ? 0 : Math.max(0, Math.min(100, file.percent))}
 					>
 						<ProgressBar.Track className="h-1.5 overflow-hidden rounded-full bg-surface-tertiary">
-							<ProgressBar.Fill className="h-full bg-primary transition-all duration-300" />
+							<ProgressBar.Fill className="h-full transition-all duration-300" />
 						</ProgressBar.Track>
 					</ProgressBar>
 					<div className="flex justify-between text-[10px] text-muted">
@@ -779,41 +744,49 @@ function TorrentFileRow({
 function TorrentGroup({
 	job,
 	selectedIds,
-	onToggle,
+	onSelect,
 	onContextMenu,
 }: {
 	job: Job;
 	selectedIds: Set<string>;
-	onToggle: (id: string) => void;
+	onSelect: (id: string, event: React.MouseEvent) => void;
 	onContextMenu: (job: Job, x: number, y: number) => void;
 }) {
 	const files = job.files || [];
 	const isSelected = selectedIds.has(job.id);
 	const rootClass = isSelected
-		? "bg-surface-tertiary ring-1 ring-inset ring-accent"
+		? "bg-surface-tertiary ring-1 ring-inset ring-accent/35"
 		: "bg-surface-secondary hover:bg-surface-hover";
 	return (
 		<Accordion
 			className="w-full overflow-hidden rounded-2xl"
 			hideSeparator
-			variant="surface"
 		>
 			<Accordion.Item
 				className="w-full overflow-hidden rounded-2xl"
 				id={job.id}
 			>
-				<Accordion.Heading>
-					<Accordion.Trigger className="w-full p-0">
+				{({ isExpanded }) => (
+					<>
 						<div
+							data-job-row
 							className={[
-								"group grid w-full cursor-context-menu grid-cols-[3rem_minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
+								"group grid w-full cursor-pointer select-none grid-cols-[minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
+								isExpanded ? "rounded-t-2xl" : "rounded-2xl",
 								rootClass,
 							].join(" ")}
+							onClick={(event) => onSelect(job.id, event)}
 							onContextMenu={(event) => {
 								event.preventDefault();
 								onContextMenu(job, event.clientX, event.clientY);
 							}}
+							tabIndex={0}
 							onKeyDown={(event) => {
+								if (event.key === "Enter" || event.key === " ") {
+									event.preventDefault();
+									onSelect(job.id, event as unknown as React.MouseEvent);
+									return;
+								}
 								if (
 									event.key !== "ContextMenu" &&
 									!(event.shiftKey && event.key === "F10")
@@ -828,25 +801,14 @@ function TorrentGroup({
 								);
 							}}
 						>
-							<div
-								className="flex items-center justify-center px-4 py-4"
-								onClick={(event) => event.stopPropagation()}
-							>
-								<Checkbox
-									aria-label={`Select ${job.title || job.url}`}
-									isSelected={selectedIds.has(job.id)}
-									variant="secondary"
-									onChange={() => onToggle(job.id)}
+							<div className="flex min-w-0 items-center gap-2 py-4 pe-4 ps-3">
+								<Accordion.Trigger
+									aria-label={isExpanded ? "Collapse torrent" : "Expand torrent"}
+									className="flex size-7 shrink-0 flex-initial items-center justify-center rounded-lg p-0 text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
+									onClick={(event) => event.stopPropagation()}
 								>
-									<Checkbox.Content>
-										<Checkbox.Control>
-											<Checkbox.Indicator />
-										</Checkbox.Control>
-									</Checkbox.Content>
-								</Checkbox>
-							</div>
-							<div className="flex min-w-0 items-center gap-2 px-4 py-4 ps-4">
-								<Accordion.Indicator className="shrink-0 text-muted" />
+									<Accordion.Indicator className="m-0 size-4 shrink-0 text-muted" />
+								</Accordion.Trigger>
 								<span className="min-w-0 flex-1">
 									<TitleCell job={job} />
 								</span>
@@ -861,20 +823,20 @@ function TorrentGroup({
 								<SizeCell job={job} />
 							</div>
 						</div>
-					</Accordion.Trigger>
-				</Accordion.Heading>
-				<Accordion.Panel>
-					<div className="overflow-hidden bg-surface-secondary border-t border-separator">
-						{files.map((file, index) => (
-							<TorrentFileRow
-								file={file}
-								isLast={index === files.length - 1}
-								jobStatus={job.status}
-								key={file.path || index}
-							/>
-						))}
-					</div>
-				</Accordion.Panel>
+						<Accordion.Panel>
+							<div className="overflow-hidden bg-surface-secondary border-t border-separator">
+								{files.map((file, index) => (
+									<TorrentFileRow
+										file={file}
+										isLast={index === files.length - 1}
+										jobStatus={job.status}
+										key={file.path || index}
+									/>
+								))}
+							</div>
+						</Accordion.Panel>
+					</>
+				)}
 			</Accordion.Item>
 		</Accordion>
 	);
@@ -883,28 +845,18 @@ function TorrentGroup({
 function JobGroupList({
 	groups,
 	selectedIds,
-	allSelected,
-	isIndeterminate,
-	onToggle,
-	onToggleAll,
+	onSelect,
 	onContextMenu,
 }: {
 	groups: JobGroup[];
 	selectedIds: Set<string>;
-	allSelected: boolean;
-	isIndeterminate: boolean;
-	onToggle: (id: string) => void;
-	onToggleAll: () => void;
+	onSelect: (id: string, event: React.MouseEvent) => void;
 	onContextMenu: (job: Job, x: number, y: number) => void;
 }) {
 	return (
 		<div className="w-full overflow-x-auto">
 			<div className="min-w-230 space-y-2">
-				<JobTableHeader
-					allSelected={allSelected}
-					isIndeterminate={isIndeterminate}
-					onToggleAll={onToggleAll}
-				/>
+				<JobTableHeader />
 				<ScrollShadow className="max-h-130 space-y-2 pr-1" visibility="auto">
 					{groups.map((group) =>
 						group.root.isPlaylist || group.children.length > 0 ? (
@@ -913,7 +865,7 @@ function JobGroupList({
 								key={group.root.id}
 								selectedIds={selectedIds}
 								onContextMenu={onContextMenu}
-								onToggle={onToggle}
+								onSelect={onSelect}
 							/>
 						) : (group.root.engine === "torrent" ||
 								group.root.mediaType === "torrent") &&
@@ -924,7 +876,7 @@ function JobGroupList({
 								key={group.root.id}
 								selectedIds={selectedIds}
 								onContextMenu={onContextMenu}
-								onToggle={onToggle}
+								onSelect={onSelect}
 							/>
 						) : (
 							<JobRow
@@ -933,7 +885,7 @@ function JobGroupList({
 								job={group.root}
 								key={group.root.id}
 								onContextMenu={onContextMenu}
-								onToggle={onToggle}
+								onSelect={onSelect}
 							/>
 						),
 					)}
@@ -1059,7 +1011,7 @@ function PlaylistPanel({
 				const isCurrent = currentEntryId && entry.id === currentEntryId;
 				return (
 					<div
-						className={`flex items-start gap-3 rounded-xl border p-3 transition-colors ${selected ? "border-accent bg-surface-tertiary" : "border-separator bg-surface-secondary hover:border-foreground/20 hover:bg-surface-tertiary"}`}
+						className={`flex items-start gap-3 rounded-xl border p-3 transition-colors ${selected ? "border-accent/40 bg-surface-tertiary" : "border-separator bg-surface-secondary hover:border-white/10 hover:bg-surface-tertiary"}`}
 						key={entry.url}
 					>
 						<Checkbox
@@ -1225,7 +1177,7 @@ function FormatPanel({
 					return (
 						<Button
 							aria-pressed={isSelected}
-							className={`h-auto min-h-14 justify-between rounded-xl px-4 py-3 text-start transition-colors ${isSelected ? "border border-accent bg-surface-tertiary" : "border border-separator bg-surface-secondary hover:border-foreground/20"}`}
+							className={`h-auto min-h-14 justify-between rounded-xl px-4 py-3 text-start transition-colors ${isSelected ? "border border-accent/40 bg-surface-tertiary" : "border border-separator bg-surface-secondary hover:border-white/10"}`}
 							fullWidth
 							onPress={() => onSelect(format.id)}
 							variant={isSelected ? "secondary" : "tertiary"}
@@ -1233,7 +1185,7 @@ function FormatPanel({
 						>
 							<span className="flex min-w-0 items-center gap-3">
 								<span
-									className={`flex size-5 items-center justify-center rounded-full border transition-colors ${isSelected ? "border-accent bg-accent text-accent-foreground" : "border-foreground/20"}`}
+									className={`flex size-5 items-center justify-center rounded-full border transition-colors ${isSelected ? "border-accent/50 bg-accent text-accent-foreground" : "border-white/10"}`}
 								>
 									{isSelected ? <Check aria-hidden className="size-3" /> : null}
 								</span>
@@ -1411,36 +1363,36 @@ function ProbeModal({
 								setSelectedKey(String(key) as "video" | "audio" | "playlist")
 							}
 						>
-							<Tabs.ListContainer className="bg-transparent p-0">
+							<Tabs.ListContainer className="rounded-full border border-separator/60 bg-surface-secondary p-1">
 								<Tabs.List
 									aria-label="Download options"
-									className="w-full gap-1 overflow-x-auto rounded-xl bg-surface-secondary p-1"
+									className="gap-1 p-0"
 								>
 									{hasVideo ? (
 										<Tabs.Tab
-											className="gap-2 rounded-lg px-3 py-2 text-xs sm:text-sm aria-selected:bg-surface-tertiary"
+											className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors data-[selected=true]:text-foreground"
 											id="video"
 										>
 											Video
-											<Tabs.Indicator />
+											<Tabs.Indicator className="rounded-full bg-surface-tertiary shadow-sm" />
 										</Tabs.Tab>
 									) : null}
 									{hasAudio ? (
 										<Tabs.Tab
-											className="gap-2 rounded-lg px-3 py-2 text-xs sm:text-sm aria-selected:bg-surface-tertiary"
+											className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors data-[selected=true]:text-foreground"
 											id="audio"
 										>
 											Audio
-											<Tabs.Indicator />
+											<Tabs.Indicator className="rounded-full bg-surface-tertiary shadow-sm" />
 										</Tabs.Tab>
 									) : null}
 									{hasPlaylist ? (
 										<Tabs.Tab
-											className="gap-2 rounded-lg px-3 py-2 text-xs sm:text-sm aria-selected:bg-surface-tertiary"
+											className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors data-[selected=true]:text-foreground"
 											id="playlist"
 										>
 											Playlist
-											<Tabs.Indicator />
+											<Tabs.Indicator className="rounded-full bg-surface-tertiary shadow-sm" />
 										</Tabs.Tab>
 									) : null}
 								</Tabs.List>
@@ -1896,34 +1848,109 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 		[jobs, selectedIds],
 	);
 
-	const allSelected =
-		selectableJobs.length > 0 && selectedIds.size === selectableJobs.length;
-	const isIndeterminate =
-		selectedIds.size > 0 && selectedIds.size < selectableJobs.length;
+	const lastSelectedIdRef = useRef<string | null>(null);
 
-	const toggleJob = useCallback((id: string) => {
-		setSelectedIds((prev) => {
-			const next = new Set(prev);
-			if (next.has(id)) next.delete(id);
-			else next.add(id);
-			return next;
-		});
-	}, []);
+	const handleSelect = useCallback(
+		(id: string, event: React.MouseEvent) => {
+			const isMeta = event.metaKey || event.ctrlKey;
+			const isShift = event.shiftKey;
 
-	const toggleAll = useCallback(() => {
-		setSelectedIds((prev) => {
-			if (selectableJobs.length > 0 && prev.size === selectableJobs.length) {
-				return new Set();
+			if (isShift && lastSelectedIdRef.current) {
+				const anchorId = lastSelectedIdRef.current;
+				const anchorIdx = selectableJobs.findIndex((j) => j.id === anchorId);
+				const currentIdx = selectableJobs.findIndex((j) => j.id === id);
+
+				if (anchorIdx !== -1 && currentIdx !== -1) {
+					const start = Math.min(anchorIdx, currentIdx);
+					const end = Math.max(anchorIdx, currentIdx);
+					const rangeIds = selectableJobs.slice(start, end + 1).map((j) => j.id);
+
+					setSelectedIds((prev) => {
+						if (isMeta) {
+							const next = new Set(prev);
+							for (const rangeId of rangeIds) next.add(rangeId);
+							return next;
+						}
+						return new Set(rangeIds);
+					});
+					return;
+				}
 			}
-			return new Set(selectableJobs.map((job) => job.id));
-		});
-	}, [selectableJobs]);
+
+			lastSelectedIdRef.current = id;
+
+			if (isMeta) {
+				setSelectedIds((prev) => {
+					const next = new Set(prev);
+					if (next.has(id)) next.delete(id);
+					else next.add(id);
+					return next;
+				});
+			} else {
+				setSelectedIds(new Set([id]));
+			}
+		},
+		[selectableJobs],
+	);
+
+	useEffect(() => {
+		const handleKeyDown = (event: KeyboardEvent) => {
+			const target = event.target as HTMLElement | null;
+			const isInput =
+				target &&
+				(target.tagName === "INPUT" ||
+					target.tagName === "TEXTAREA" ||
+					target.isContentEditable);
+			if (isInput) return;
+
+			if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+				if (selectableJobs.length === 0) return;
+				event.preventDefault();
+				setSelectedIds(new Set(selectableJobs.map((j) => j.id)));
+				return;
+			}
+
+			if (event.key === "Escape" && selectedIds.size > 0) {
+				setSelectedIds(new Set());
+			}
+		};
+
+		window.addEventListener("keydown", handleKeyDown);
+		return () => window.removeEventListener("keydown", handleKeyDown);
+	}, [selectableJobs, selectedIds.size]);
+
+	useEffect(() => {
+		if (selectedIds.size === 0) return;
+
+		const handleClickOutside = (event: MouseEvent) => {
+			if (event.button !== 0) return;
+			const target = event.target as HTMLElement | null;
+			if (!target) return;
+
+			if (
+				target.closest("[data-job-row]") ||
+				target.closest("[data-slot='dropdown-popover']") ||
+				target.closest("[role='menu']") ||
+				target.closest("[role='dialog']") ||
+				target.closest("[data-slot='modal']") ||
+				target.closest("[data-slot='drawer']")
+			) {
+				return;
+			}
+
+			setSelectedIds(new Set());
+		};
+
+		window.addEventListener("click", handleClickOutside);
+		return () => window.removeEventListener("click", handleClickOutside);
+	}, [selectedIds.size]);
 
 	const handleJobContextMenu = useCallback((job: Job, x: number, y: number) => {
 		setSelectedIds((prev) => {
 			if (prev.has(job.id)) return prev;
 			return new Set([job.id]);
 		});
+		lastSelectedIdRef.current = job.id;
 		setContextMenu({ x, y });
 	}, []);
 
@@ -2235,27 +2262,27 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 					selectedKey={filter}
 					onSelectionChange={(key) => setFilter(String(key) as Filter)}
 				>
-					<Tabs.ListContainer className="bg-transparent p-0">
+					<Tabs.ListContainer className="rounded-full border border-separator/60 bg-surface-secondary p-1">
 						<Tabs.List
 							aria-label="Filter downloads"
-							className="w-full gap-1 overflow-x-auto rounded-xl bg-surface-secondary p-1"
+							className="gap-1 p-0"
 						>
 							{FILTERS.map(({ key, label }) => (
 								<Tabs.Tab
-									className="gap-2 rounded-lg px-3 py-2 text-xs sm:text-sm aria-selected:bg-surface-tertiary"
+									className="gap-2 rounded-full px-3.5 py-1.5 text-xs sm:text-sm font-medium transition-colors data-[selected=true]:text-foreground"
 									id={key}
 									key={key}
 								>
 									{label}
 									<Chip
-										className="min-w-5 justify-center tabular-nums"
+										className="min-w-5 justify-center rounded-full tabular-nums"
 										color="success"
 										size="sm"
 										variant={filter === key ? "primary" : "soft"}
 									>
 										{counts[key]}
 									</Chip>
-									<Tabs.Indicator />
+									<Tabs.Indicator className="rounded-full bg-surface-tertiary shadow-sm" />
 								</Tabs.Tab>
 							))}
 						</Tabs.List>
@@ -2263,13 +2290,10 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 				</Tabs>
 				{filtered.length ? (
 					<JobGroupList
-						allSelected={allSelected}
 						groups={filtered}
-						isIndeterminate={isIndeterminate}
 						selectedIds={selectedIds}
 						onContextMenu={handleJobContextMenu}
-						onToggle={toggleJob}
-						onToggleAll={toggleAll}
+						onSelect={handleSelect}
 					/>
 				) : (
 					<EmptyQueue />

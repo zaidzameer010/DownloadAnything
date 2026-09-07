@@ -1,4 +1,4 @@
-import { Alert, Button, Chip, Typography } from "@heroui/react";
+import { Alert, Button, Chip, ProgressBar, Typography } from "@heroui/react";
 import { Download, RotateCcw, X } from "lucide-react";
 import type { UpdaterState, useUpdater } from "../hooks/useUpdater";
 import { formatBytes } from "../lib/format";
@@ -65,6 +65,10 @@ export default function UpdateAlert({
 
 	if (state.status === "downloading" || state.status === "installing") {
 		const isInstalling = state.status === "installing";
+		const pct =
+			state.status === "downloading" && state.total
+				? Math.min(100, (state.downloaded / state.total) * 100)
+				: 100;
 		return (
 			<Alert className="z-40 border-b border-separator" status="accent">
 				<Alert.Indicator />
@@ -73,17 +77,17 @@ export default function UpdateAlert({
 						{isInstalling ? "Installing update…" : "Downloading update…"}
 					</Alert.Title>
 					<Alert.Description>
-						<div className="mt-2 h-2 w-full max-w-md overflow-hidden rounded-full bg-surface-tertiary">
-							<div
-								className="h-full bg-accent transition-all"
-								style={{
-									width:
-										state.status === "downloading" && state.total
-											? `${Math.min(100, (state.downloaded / state.total) * 100)}%`
-											: "100%",
-								}}
-							/>
-						</div>
+						<ProgressBar
+							aria-label="Update download progress"
+							className="mt-2 w-full max-w-md"
+							color="accent"
+							size="sm"
+							value={pct}
+						>
+							<ProgressBar.Track className="h-2 overflow-hidden rounded-full bg-surface-tertiary">
+								<ProgressBar.Fill className="h-full transition-all" />
+							</ProgressBar.Track>
+						</ProgressBar>
 						<p className="mt-1 text-sm text-muted">
 							{state.status === "downloading"
 								? progressText(state)

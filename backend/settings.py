@@ -53,7 +53,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "writeSubs": True,
     "writeAutoSubs": False,
     "subLangs": "en,all",
-    "mergeOutputFormat": "mkv",  # default output container
+    "mergeOutputFormat": "mp4",  # default output container
     "multiResolutionExtractor": True,
     # Queue behaviour.
     "maxConcurrentDownloads": 5,
