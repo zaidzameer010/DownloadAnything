@@ -27,14 +27,23 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
-    "targets": ["app", "dmg", "nsis"],
-    "externalBin": ["binaries/aria2-next"],
+    "targets": [
+      "app",
+      "dmg",
+      "nsis"
+    ],
+    "externalBin": [
+      "binaries/aria2-next"
+    ],
     "resources": {
-      "resources/downloadanything-backend": "downloadanything-backend"
+      "resources/downloadanything-backend": "downloadanything-backend",
+      "resources/extention": "extention"
     },
     "fileAssociations": [
       {
-        "ext": ["torrent"],
+        "ext": [
+          "torrent"
+        ],
         "name": "BitTorrent Seed File",
         "role": "Viewer",
         "mimeType": "application/x-bittorrent"
@@ -45,8 +54,7 @@
     "longDescription": "DownloadAnything is a desktop download manager with browser extension and websocket backend integration.",
     "macOS": {
       "signingIdentity": "-",
-      "hardenedRuntime": true,
-      "entitlements": "./Entitlements.plist"
+      "hardenedRuntime": true
     },
     "icon": [
       "icons/32x32.png",

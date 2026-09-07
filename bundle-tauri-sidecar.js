@@ -78,10 +78,6 @@ if (!skipBuild) {
 		'backend',
 		'--collect-all',
 		'yt_dlp',
-		'--exclude-module',
-		'backend.tests',
-		'--exclude-module',
-		'pytest',
 		'--onedir',
 		'--console',
 		'--distpath',
@@ -89,8 +85,6 @@ if (!skipBuild) {
 		'--workpath',
 		'build/backend/work',
 		'--noconfirm',
-		'--osx-entitlements-file',
-		'src-tauri/Entitlements.plist',
 		'backend/server.py',
 	];
 	const pyRes = spawnSync('python', ['-m', 'PyInstaller', ...pyinstallerFlags], { stdio: 'inherit' });
@@ -114,6 +108,17 @@ const backendResourceExecutable = join(backendResourceDir, executableName);
 if (!isWindows) chmodSync(backendResourceExecutable, 0o755);
 console.log(`Bundled backend resource: ${backendResourceDir}`);
 
+// Bundle the browser extension source so the backend can install it into
+// Chromium browsers at runtime (--load-extension).
+const extensionSourceDir = join(projectRoot, 'extention');
+const extensionResourceDir = join(resourceDirectory, 'extention');
+if (!existsSync(join(extensionSourceDir, 'manifest.json'))) {
+	throw new Error(`Extension manifest not found: ${extensionSourceDir}`);
+}
+rmSync(extensionResourceDir, { recursive: true, force: true });
+cpSync(extensionSourceDir, extensionResourceDir, { recursive: true });
+console.log(`Bundled extension resource: ${extensionResourceDir}`);
+
 const binariesDirectory = join(projectRoot, 'src-tauri', 'binaries');
 mkdirSync(binariesDirectory, { recursive: true });
 
@@ -125,6 +130,7 @@ const aria2Candidates = readdirSync(projectRoot, { withFileTypes: true })
 		if (!lower.startsWith('aria2-next-')) return false;
 		return isWindows ? lower.endsWith('.exe') : !lower.endsWith('.exe');
 	})
+	.sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }))
 	.map((name) => join(projectRoot, name));
 
 if (aria2Candidates.length === 0) {

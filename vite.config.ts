@@ -9,4 +9,29 @@ export default defineConfig({
 		react(),
 		babel({presets: [reactCompilerPreset()]}),
 	],
+	build: {
+		rolldownOptions: {
+			output: {
+				codeSplitting: {
+					groups: [
+						{
+							name: "react-vendor",
+							priority: 20,
+							test: /node_modules[\\/](?:react|react-dom|scheduler)[\\/]/,
+						},
+						{
+							name: "ui-vendor",
+							priority: 15,
+							test: /node_modules[\\/](?:@heroui|react-aria|react-aria-components|react-stately|tailwind-variants)[\\/]/,
+						},
+						{
+							name: "vendor",
+							priority: 10,
+							test: /node_modules/,
+						},
+					],
+				},
+			},
+		},
+	},
 });

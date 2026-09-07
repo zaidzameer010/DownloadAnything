@@ -74,36 +74,38 @@ Open **Settings** from the sidebar to configure the app.
 
 ### General
 - Default download directory
-- Concurrent downloads (requires a restart)
-- Rate limit
-- Concurrent fragments
-- Retries
-- Proxy
-- Cookies from a browser (Chrome, Firefox, Safari, Edge, Brave)
+- Concurrent downloads (shared queue limit for yt-dlp, aria2, libtorrent)
 
-### Network
-- aria2 connection and split settings
-- Listen port
-- File allocation mode
-- Extra aria2 arguments
+### Network & Connections
+- Global rate limit & bandwidth controls
+- Concurrent fragments & network retries
+- Proxy configuration (HTTP/HTTPS/SOCKS5)
+- Browser cookie session access (Chrome, Firefox, Safari, Edge, Brave)
 
-### Engines
-- yt-dlp options
-- libtorrent / BitTorrent settings (DHT, peer exchange, UPnP, etc.)
-- aria2-next and torrent limits
+### Media & Subtitles
+- Merged output container format (mkv, mp4, webm, mov)
+- Video metadata & cover thumbnail embedding
+- Official & auto-generated AI subtitle embedding
+- Subtitle language selection
 
-### Post-processing
-- Embed metadata, thumbnail, and subtitles
-- Merge output format (mp4, mkv, webm, mov)
+### aria2-next Downloader
+- Connections per file & piece length
+- File allocation mode & disk reservation options
+- Connection & socket timeouts
+- Per-download rate limit & extra CLI arguments
+
+### libtorrent Engine
+- Listen port & max peer connections
+- Independent download & upload rate limits
+- Sequential downloading (stream video while downloading)
+- PE protocol encryption enforcement
+- P2P protocols (DHT, PEX, LSD, UPnP, NAT-PMP)
 
 ### Locations
-- Preset download folders that appear in the format dialog
-- Default save path
+- Preset download folders for extension & format dialogs
 
 ### About
-- Current version
-- Check for updates
-- Install available updates
+- Version info, update source, and manual update controls
 
 ## Updates
 

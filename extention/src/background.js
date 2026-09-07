@@ -1,18 +1,28 @@
+importScripts('constants.js');
 importScripts('extractor.js');
 importScripts('logger.js');
 
 const STORE_PREFIX = 'media:';
 const MAX_ITEMS = 200;
+const MEDIA_FLUSH_DELAY_MS = 100;
 const mediaWriteChains = new Map();
+const mediaFlushTimers = new Map();
 const mediaGenerations = new Map();
 const mediaCache = new Map();
+const hydratedMediaTabs = new Set();
+
+// Frame & header tracking: tabId -> Map<frameId, { url, referer, origin }>
+const tabFrameUrls = new Map();
 
 function storeKey(tabId) {
   return `${STORE_PREFIX}${tabId}`;
 }
 
-function contentTypeFromHeaders(headers) {
-  return DownloadAnything.getHeader(headers, 'content-type');
+function getFrameContext(tabId, frameId) {
+  if (tabId < 0) return null;
+  const frames = tabFrameUrls.get(tabId);
+  if (!frames) return null;
+  return frames.get(frameId) || frames.get(0) || null;
 }
 
 function queueMediaOperation(tabId, operation) {
@@ -21,7 +31,10 @@ function queueMediaOperation(tabId, operation) {
   const next = previous
     .catch(err => DownloadAnythingLogger.error('media chain error', { tabId, error: err.message }))
     .then(operation)
-    .catch(err => DownloadAnythingLogger.error('media operation error', { tabId, error: err.message }))
+    .catch(err => {
+      DownloadAnythingLogger.error('media operation error', { tabId, error: err.message });
+      throw err;
+    })
     .finally(() => {
       if (mediaWriteChains.get(key) === next) mediaWriteChains.delete(key);
     });
@@ -36,89 +49,220 @@ function invalidateMedia(tabId) {
     id: (prev?.id || 0) + 1,
     invalidatedAt: Date.now(),
   });
+  const flushTimer = mediaFlushTimers.get(tabId);
+  if (flushTimer !== undefined) clearTimeout(flushTimer);
+  mediaFlushTimers.delete(tabId);
   // Prevent a navigation from briefly exposing the previous page's streams.
   mediaCache.delete(tabId);
+  hydratedMediaTabs.delete(tabId);
+  tabFrameUrls.delete(tabId);
   queueMediaOperation(tabId, () => chrome.storage.session.remove(storeKey(tabId)));
 }
 
 function cacheMedia(tabId, entry) {
-  if (tabId < 0) return;
+  if (tabId < 0 || !entry || !entry.url) return;
+  const canonicalUrl = DownloadAnything.normalizeMediaUrl(entry.url);
+  const normalizedEntry = { ...entry, url: canonicalUrl };
+
   let list = mediaCache.get(tabId) || [];
-  list = list.filter(item => item.url !== entry.url);
-  list.unshift(entry);
+  list = list.filter(item => item.url !== normalizedEntry.url);
+  list.unshift(normalizedEntry);
   if (list.length > MAX_ITEMS) list = list.slice(0, MAX_ITEMS);
   mediaCache.set(tabId, list);
 }
 
+async function hydrateMediaCache(tabId) {
+  if (hydratedMediaTabs.has(tabId)) return mediaCache.get(tabId) || [];
+  const generationId = mediaGenerations.get(tabId)?.id || 0;
+  const pending = mediaCache.get(tabId) || [];
+  const result = await chrome.storage.session.get([storeKey(tabId)]);
+  if ((mediaGenerations.get(tabId)?.id || 0) !== generationId) {
+    return mediaCache.get(tabId) || [];
+  }
+  const invalidatedAt = mediaGenerations.get(tabId)?.invalidatedAt || 0;
+  const stored = Array.isArray(result[storeKey(tabId)])
+    ? result[storeKey(tabId)].filter(entry => entry.timestamp >= invalidatedAt)
+    : [];
+  mediaCache.set(tabId, stored);
+  for (const entry of [...pending].reverse()) cacheMedia(tabId, entry);
+  hydratedMediaTabs.add(tabId);
+  return mediaCache.get(tabId) || [];
+}
+
+function flushMedia(tabId, generationId) {
+  queueMediaOperation(tabId, async () => {
+    if (mediaGenerations.get(tabId)?.id !== generationId) return;
+    const list = await hydrateMediaCache(tabId);
+    if (mediaGenerations.get(tabId)?.id !== generationId) return;
+    await chrome.storage.session.set({ [storeKey(tabId)]: list });
+  });
+}
+
+function scheduleMediaFlush(tabId, generationId) {
+  if (mediaFlushTimers.has(tabId)) return;
+  mediaFlushTimers.set(tabId, setTimeout(() => {
+    mediaFlushTimers.delete(tabId);
+    flushMedia(tabId, generationId);
+  }, MEDIA_FLUSH_DELAY_MS));
+}
+
 function persistMedia(tabId, entry) {
-  if (tabId < 0) return;
+  if (tabId < 0 || !entry || !entry.url) return;
+  if (DownloadAnything.isSegmentUrl(entry.url)) return;
+
   let generation = mediaGenerations.get(tabId);
   if (!generation) {
     generation = { id: 0, invalidatedAt: 0 };
     mediaGenerations.set(tabId, generation);
   }
   if (entry.timestamp < generation.invalidatedAt) return;
-  cacheMedia(tabId, entry);
-  const key = storeKey(tabId);
   queueMediaOperation(tabId, async () => {
     if (mediaGenerations.get(tabId)?.id !== generation.id) return;
-    const result = await chrome.storage.session.get([key]);
+    await hydrateMediaCache(tabId);
     if (mediaGenerations.get(tabId)?.id !== generation.id) return;
-    let list = result[key] || [];
-    list = list.filter(item => item.url !== entry.url);
-    list.unshift(entry);
-    if (list.length > MAX_ITEMS) list = list.slice(0, MAX_ITEMS);
-    await chrome.storage.session.set({ [key]: list });
+    cacheMedia(tabId, entry);
+    scheduleMediaFlush(tabId, generation.id);
   });
 }
 
-function mediaEntry(details, type, contentType) {
+function mediaEntry(details, type, contentType, sizeInfo = null) {
+  const frameCtx = getFrameContext(details.tabId, details.frameId);
+  const normalizedUrl = DownloadAnything.normalizeMediaUrl(details.url);
+  const isMaster = DownloadAnything.isMasterUrl(normalizedUrl);
+
   return {
-    url: details.url,
+    url: normalizedUrl,
     type,
     contentType: contentType || '',
     statusCode: details.statusCode,
     resourceType: details.type,
-    timestamp: details.timeStamp
+    timestamp: details.timeStamp || Date.now(),
+    isMaster,
+    size: sizeInfo?.size || null,
+    sizeIsEstimate: sizeInfo?.isEstimate || false,
+    referer: frameCtx?.referer || frameCtx?.url || '',
+    origin: frameCtx?.origin || ''
   };
 }
 
-function captureMediaRequest(details, contentType) {
+function captureMediaRequest(details, contentType, sizeInfo = null) {
+  if (!details.url || DownloadAnything.isSegmentUrl(details.url)) return;
   const type = DownloadAnything.classifyMedia(details.url, contentType);
   if (!type) return;
-  DownloadAnythingLogger.debug('captured media request', { url: details.url, type, tabId: details.tabId });
-  persistMedia(details.tabId, mediaEntry(details, type, contentType));
+  persistMedia(details.tabId, mediaEntry(details, type, contentType, sizeInfo));
 }
 
-// Capture manifest/direct-media URLs before their response completes. This is
-// important for short-lived HLS requests and avoids waiting behind segment
-// writes before the content script asks for fallback URLs.
+// 1. Early capture onBeforeRequest
 chrome.webRequest.onBeforeRequest.addListener(
   details => captureMediaRequest(details, ''),
   { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'other', 'object'] }
 );
 
-chrome.webRequest.onCompleted.addListener(
-  details => captureMediaRequest(details, contentTypeFromHeaders(details.responseHeaders)),
-  { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'other', 'object'] },
-  ['responseHeaders']
+// 2. Frame URL & Header tracking onBeforeSendHeaders
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  details => {
+    if (details.tabId < 0) return;
+    let frames = tabFrameUrls.get(details.tabId);
+    if (!frames) {
+      frames = new Map();
+      tabFrameUrls.set(details.tabId, frames);
+    }
+
+    const referer = DownloadAnything.getHeader(details.requestHeaders, 'referer') || '';
+    const origin = DownloadAnything.getHeader(details.requestHeaders, 'origin') || '';
+
+    if (details.type === 'main_frame' || details.type === 'sub_frame') {
+      frames.set(details.frameId, { url: details.url, referer, origin });
+    }
+  },
+  { urls: ['<all_urls>'] },
+  ['requestHeaders', 'extraHeaders']
 );
 
-chrome.tabs.onRemoved.addListener(tabId => invalidateMedia(tabId));
+// 3. Header inspection & size calculation onHeadersReceived
+chrome.webRequest.onHeadersReceived.addListener(
+  details => {
+    const contentType = DownloadAnything.getHeader(details.responseHeaders, 'content-type');
+    const sizeInfo = DownloadAnything.calculateMediaSize(details.url, details.responseHeaders);
+    captureMediaRequest(details, contentType, sizeInfo);
+  },
+  { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'other', 'object'] },
+  ['responseHeaders', 'extraHeaders']
+);
+
+chrome.tabs.onRemoved.addListener(tabId => {
+  invalidateMedia(tabId);
+  queueMediaOperation(tabId, () => {
+    mediaGenerations.delete(tabId);
+  });
+});
+
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.url) invalidateMedia(tabId);
+  if (changeInfo.url || changeInfo.status === 'loading') invalidateMedia(tabId);
 });
 
 function getMediaForTab(tabId) {
-  const cached = mediaCache.get(tabId);
-  if (cached) return Promise.resolve(cached);
+  return queueMediaOperation(tabId, () => hydrateMediaCache(tabId));
+}
 
-  const key = storeKey(tabId);
-  return chrome.storage.session.get([key]).then(result => {
-    const list = result[key] || [];
-    mediaCache.set(tabId, list);
-    return list;
-  });
+/* --------------------------------------------------------------------------
+ * Mobile Safari UA Fallback Prober
+ * Scans page HTML with iOS Safari User-Agent to bypass desktop DRM/obfuscation.
+ * ------------------------------------------------------------------------ */
+const MOBILE_SAFARI_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1';
+
+async function scanPageWithMobileUA(pageUrl) {
+  if (!pageUrl || !/^https?:\/\//i.test(pageUrl)) return [];
+  try {
+    const resp = await fetch(pageUrl, {
+      headers: {
+        'User-Agent': MOBILE_SAFARI_UA,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      }
+    });
+    if (!resp.ok) return [];
+    const text = await resp.text();
+    const results = [];
+    const seen = new Set();
+
+    // Regex for video/source/track/meta media attributes
+    const tagPattern = /<(?:video|source|track|meta)\s+[^>]*(?:src|content)=['"]([^'"]+)['"][^>]*>/gi;
+    let match;
+    while ((match = tagPattern.exec(text)) !== null) {
+      const rawUrl = match[1];
+      const type = DownloadAnything.classifyMedia(rawUrl, null);
+      if (type && !seen.has(rawUrl)) {
+        seen.add(rawUrl);
+        results.push({
+          url: DownloadAnything.normalizeMediaUrl(rawUrl),
+          type,
+          isMaster: DownloadAnything.isMasterUrl(rawUrl),
+          source: 'mobile_ua:tag'
+        });
+      }
+    }
+
+    // Regex for direct stream/media URLs in scripts/data
+    const streamPattern = /(?:https?:\/\/|\/\/)[^'"\s<>\\]+\.(?:m3u8|mpd|mp4|webm|mkv|mov|m4v|flv|m4a|mp3|aac|flac|wav|ogg|opus)(?:\?[^'"\s<>\\]+)?/gi;
+    while ((match = streamPattern.exec(text)) !== null) {
+      const rawUrl = match[0];
+      const type = DownloadAnything.classifyMedia(rawUrl, null);
+      if (type && !seen.has(rawUrl)) {
+        seen.add(rawUrl);
+        results.push({
+          url: DownloadAnything.normalizeMediaUrl(rawUrl),
+          type,
+          isMaster: DownloadAnything.isMasterUrl(rawUrl),
+          source: 'mobile_ua:regex'
+        });
+      }
+    }
+
+    return results;
+  } catch (err) {
+    DownloadAnythingLogger.debug('Mobile UA probe failed', { pageUrl, error: err.message });
+    return [];
+  }
 }
 
 /* --------------------------------------------------------------------------
@@ -129,10 +273,39 @@ const REQUEST_TIMEOUT_MS = 120000;
 
 let backendWs = null;
 let backendConnected = false;
-let reconnectTimer = null;
-let reconnectDelay = 1000;
 let requestCounter = 0;
+let backendConnecting = false;
+let backendHeartbeatTimer = null;
 const pendingRequests = new Map();
+const backendConnectionWaiters = new Set();
+
+function isBackendOpen() {
+  return backendConnected && backendWs?.readyState === WebSocket.OPEN;
+}
+
+function resolveConnectionWaiters(connected) {
+  const waiters = [...backendConnectionWaiters];
+  backendConnectionWaiters.clear();
+  for (const resolve of waiters) resolve(connected);
+}
+
+function waitForBackendConnection(timeoutMs = 3000) {
+  if (isBackendOpen()) return Promise.resolve(true);
+  connectBackend();
+  return new Promise(resolve => {
+    let settled = false;
+    let timeout;
+    const waiter = connected => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      backendConnectionWaiters.delete(waiter);
+      resolve(connected);
+    };
+    timeout = setTimeout(() => waiter(false), timeoutMs);
+    backendConnectionWaiters.add(waiter);
+  });
+}
 
 function nextReqId() {
   requestCounter += 1;
@@ -146,14 +319,6 @@ function failPendingRequests(reason, socket) {
     pendingRequests.delete(reqId);
     pending.sendResponse({ ok: false, error: reason });
   }
-}
-
-function pushBackendEvent(event) {
-  // Reserved hook for broadcasting backend events.
-  // Currently the content script does not listen for these messages, so the
-  // extension does not forward them to tabs/runtime. Re-enable here once a
-  // consumer (popup, badge, or content UI) is added.
-  void event;
 }
 
 function onBackendMessage(event) {
@@ -170,67 +335,80 @@ function onBackendMessage(event) {
     pendingRequests.delete(message.reqId);
     clearTimeout(pending.timer);
     pending.sendResponse(message);
-    return;
-  }
-
-  if (message.type === 'job_update' || message.type === 'job_removed' || message.type === 'settings') {
-    pushBackendEvent(message);
   }
 }
 
 function connectBackend() {
   if (backendWs && backendWs.readyState !== WebSocket.CLOSED) return;
-  let ws;
-  try {
-    ws = new WebSocket(BACKEND_URL);
-  } catch {
-    scheduleReconnect();
-    return;
-  }
-  backendWs = ws;
+  if (backendConnecting) return;
+  backendConnecting = true;
 
-  ws.onopen = () => {
-    if (backendWs !== ws) return;
-    backendConnected = true;
-    reconnectDelay = 1000;
-    DownloadAnythingLogger.info('backend connected');
-    ws.send(JSON.stringify({ type: 'hello', client: 'extension' }));
-    pushBackendEvent({ type: 'backend_status', connected: true });
-  };
+  // Probe with a silently-catchable HTTP HEAD before opening the WebSocket.
+  // `new WebSocket` logs an uncatchable ERR_CONNECTION_REFUSED to the console
+  // when nothing is listening, so we avoid it until we know a server is there.
+  const probeUrl = BACKEND_URL.replace(/^ws/, 'http');
+  fetch(probeUrl, { method: 'HEAD', mode: 'no-cors' })
+    .then(() => {
+      if (backendWs && backendWs.readyState !== WebSocket.CLOSED) {
+        backendConnecting = false;
+        return;
+      }
 
-  ws.onmessage = event => {
-    if (backendWs === ws) onBackendMessage(event);
-  };
+      let ws;
+      try {
+        ws = new WebSocket(BACKEND_URL);
+      } catch {
+        backendConnecting = false;
+        resolveConnectionWaiters(false);
+        return;
+      }
+      backendWs = ws;
+      backendConnecting = false;
 
-  ws.onclose = event => {
-    const reason = event.wasClean
-      ? `Backend connection closed (code ${event.code})`
-      : `Backend connection lost (code ${event.code})`;
-    failPendingRequests(reason, ws);
-    if (backendWs !== ws) return;
-    backendWs = null;
-    if (backendConnected) {
-      backendConnected = false;
-      DownloadAnythingLogger.warning('backend disconnected', { code: event.code, wasClean: event.wasClean });
-      pushBackendEvent({ type: 'backend_status', connected: false });
-    }
-    scheduleReconnect();
-  };
+      ws.onopen = () => {
+        if (backendWs !== ws) return;
+        backendConnected = true;
+        DownloadAnythingLogger.info('backend connected');
+        ws.send(JSON.stringify({ type: 'hello', client: 'extension' }));
+        // Keep the service worker (and thus the websocket) alive. Chrome
+        // extends the SW lifetime while websocket messages flow at least
+        // once per 30-second window; 20s is the documented safe interval.
+        if (backendHeartbeatTimer) clearInterval(backendHeartbeatTimer);
+        backendHeartbeatTimer = setInterval(() => {
+          if (backendWs === ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 20000);
+        resolveConnectionWaiters(true);
+      };
 
-  ws.onerror = () => {
-    DownloadAnythingLogger.warning('backend websocket error');
-    // onclose follows and handles reconnect.
-  };
-}
+      ws.onmessage = event => {
+        if (backendWs === ws) onBackendMessage(event);
+      };
 
-function scheduleReconnect() {
-  if (reconnectTimer) return;
-  DownloadAnythingLogger.info('scheduling backend reconnect', { delayMs: reconnectDelay });
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    reconnectDelay = Math.min(reconnectDelay * 2, 30000);
-    connectBackend();
-  }, reconnectDelay);
+      ws.onclose = event => {
+        const reason = event.wasClean
+          ? `Backend connection closed (code ${event.code})`
+          : `Backend connection lost (code ${event.code})`;
+        failPendingRequests(reason, ws);
+        if (backendWs !== ws) return;
+        backendWs = null;
+        backendConnected = false;
+        if (backendHeartbeatTimer) {
+          clearInterval(backendHeartbeatTimer);
+          backendHeartbeatTimer = null;
+        }
+        resolveConnectionWaiters(false);
+      };
+
+      ws.onerror = () => {
+        DownloadAnythingLogger.debug('backend websocket error');
+      };
+    })
+    .catch(() => {
+      backendConnecting = false;
+      resolveConnectionWaiters(false);
+    });
 }
 
 function backendRequest(payload, sendResponse) {
@@ -239,7 +417,7 @@ function backendRequest(payload, sendResponse) {
     sendResponse({ ok: false, error: 'yt-dlp backend is not connected' });
     return;
   }
-  const reqId = nextReqId();
+  const reqId = payload.reqId || nextReqId();
   const timer = setTimeout(() => {
     pendingRequests.delete(reqId);
     sendResponse({ ok: false, error: 'Backend request timed out' });
@@ -251,26 +429,13 @@ function backendRequest(payload, sendResponse) {
   } catch (error) {
     clearTimeout(timer);
     pendingRequests.delete(reqId);
-    DownloadAnythingLogger.error('could not send backend request', { type: payload.type, error: error instanceof Error ? error.message : String(error) });
+    DownloadAnythingLogger.warning('could not send backend request', { type: payload.type, error: error instanceof Error ? error.message : String(error) });
     sendResponse({
       ok: false,
       error: error instanceof Error ? error.message : 'Could not send backend request',
     });
   }
 }
-
-connectBackend();
-
-// Keep the service worker (and thus the websocket) alive.
-chrome.alarms.create('da-keepalive', { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name !== 'da-keepalive') return;
-  if (backendWs && backendWs.readyState === WebSocket.OPEN) {
-    backendWs.send(JSON.stringify({ type: 'ping' }));
-  } else {
-    connectBackend();
-  }
-});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'log') {
@@ -291,8 +456,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-  if (message.type === 'backend:event') return false;
-
   if (message.type === 'da:openProbe') {
     const tabId = sender.tab?.id;
     if (tabId == null) {
@@ -309,27 +472,59 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'backendStatus') {
-    sendResponse({ connected: backendConnected });
-    return false;
+    if (isBackendOpen()) {
+      sendResponse({ connected: true });
+      return false;
+    }
+    waitForBackendConnection().then(connected => sendResponse({ connected }));
+    return true;
   }
 
   if (message.type === 'backend') {
-    // Relay a request/response exchange to the yt-dlp backend.
     backendRequest(message.payload || {}, sendResponse);
     return true;
   }
 
   if (message.type === 'getMediaForTab') {
     const tabId = message.tabId ?? sender.tab?.id ?? -1;
-    getMediaForTab(tabId).then(media => sendResponse({ media }));
+    getMediaForTab(tabId)
+      .then(media => sendResponse({ media }))
+      .catch(error => sendResponse({ media: [], error: error.message }));
     return true;
   }
 
-  if (message.type === 'getMediaForActiveTab') {
-    chrome.tabs.query({ active: true, currentWindow: true }).then(tabs => {
-      const tabId = tabs[0]?.id ?? -1;
-      getMediaForTab(tabId).then(media => sendResponse({ tabId, media }));
-    });
+  // Handle media links sent from content script (sniffed or extracted)
+  if (message.type === 'da:addMediaLinks') {
+    const tabId = sender.tab?.id ?? message.tabId ?? -1;
+    const links = Array.isArray(message.media) ? message.media : (message.entry ? [message.entry] : []);
+    for (const link of links) {
+      if (link && link.url) {
+        const frameCtx = getFrameContext(tabId, sender.frameId || 0);
+        persistMedia(tabId, {
+          url: DownloadAnything.normalizeMediaUrl(link.url),
+          type: link.type || DownloadAnything.classifyMedia(link.url, link.contentType) || 'video',
+          contentType: link.contentType || '',
+          timestamp: link.timestamp || Date.now(),
+          isMaster: DownloadAnything.isMasterUrl(link.url),
+          size: link.size || null,
+          sizeIsEstimate: link.sizeIsEstimate || false,
+          label: link.label || '',
+          source: link.source || 'content',
+          referer: link.referer || frameCtx?.referer || frameCtx?.url || '',
+          origin: link.origin || frameCtx?.origin || ''
+        });
+      }
+    }
+    sendResponse({ ok: true, count: links.length });
+    return false;
+  }
+
+  // Handle Mobile UA fallback probe request
+  if (message.type === 'da:probeMobileUA') {
+    const pageUrl = message.pageUrl || sender.tab?.url || '';
+    scanPageWithMobileUA(pageUrl)
+      .then(sources => sendResponse({ ok: true, sources }))
+      .catch(err => sendResponse({ ok: false, error: err.message, sources: [] }));
     return true;
   }
 
@@ -346,31 +541,33 @@ function downloadBasename(filename) {
   return parts[parts.length - 1] || '';
 }
 
-function sendToActiveTab(message) {
-  return chrome.tabs.query({ active: true, currentWindow: true }).then(tabs => {
-    const tab = tabs[0];
+async function sendToActiveTab(message) {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) return null;
-    return chrome.tabs.sendMessage(tab.id, message).catch(err => {
+    try {
+      return await chrome.tabs.sendMessage(tab.id, message);
+    } catch (err) {
       DownloadAnythingLogger.debug('tab not reachable for intercepted download', { tabId: tab.id, error: err.message });
       return null;
-    });
-  }).catch(err => {
+    }
+  } catch (err) {
     DownloadAnythingLogger.debug('tabs query failed for intercepted download', { error: err.message });
     return null;
-  });
+  }
 }
 
 function onDeterminingFilename(item, suggest) {
+  let suggestionSent = false;
+
   // Release helper that always checks runtime.lastError so Chrome does not log
   // an unchecked error when a suggestion is invalid or the download has already
   // finished.
   function safeSuggest(suggestion) {
+    if (suggestionSent) return true;
+    suggestionSent = true;
     try {
-      if (suggestion) {
-        suggest(suggestion);
-      } else {
-        suggest();
-      }
+      suggest(suggestion);
     } catch (err) {
       DownloadAnythingLogger.debug('suggest threw', { id: item.id, error: err?.message });
       return false;
@@ -384,14 +581,15 @@ function onDeterminingFilename(item, suggest) {
   }
 
   function emitInterceptedDownload() {
-    const url = item.finalUrl || item.url;
+    const rawUrl = item.finalUrl || item.url;
+    const url = DownloadAnything.normalizeMediaUrl(rawUrl);
     const filename = downloadBasename(item.filename);
     const mediaType = DownloadAnything.classifyDownload(url, item.mime, filename);
     const size = (Number.isFinite(item.fileSize) && item.fileSize > 0)
       ? item.fileSize
       : (Number.isFinite(item.totalBytes) && item.totalBytes > 0 ? item.totalBytes : null);
 
-    sendToActiveTab({
+    return sendToActiveTab({
       type: 'da:interceptedDownload',
       url,
       pageUrl: item.referrer || url,
@@ -400,88 +598,113 @@ function onDeterminingFilename(item, suggest) {
       mime: item.mime,
       size,
       sizeIsEstimate: false
-    }).catch(err => DownloadAnythingLogger.debug('emit intercepted download failed', { id: item.id, error: err?.message }));
+    });
   }
 
-  // Ignore our own downloads and non-HTTP(S) schemes.
   if (item.byExtensionId === chrome.runtime.id) {
     safeSuggest();
-    return false;
+    return;
   }
   const scheme = (item.url || '').split(':')[0].toLowerCase();
   if (!['http', 'https'].includes(scheme)) {
     safeSuggest();
-    return false;
+    return;
   }
 
-  // If the download has already completed before we got the determination
-  // event, there is nothing to intercept; just release the determiner.
   if (item.state !== 'in_progress') {
-    return false;
+    safeSuggest();
+    return;
   }
 
-  function eraseAndEmit() {
-    chrome.downloads.erase({ id: item.id }, () => {
-      if (chrome.runtime.lastError) {
-        DownloadAnythingLogger.debug('erase failed', { id: item.id, error: chrome.runtime.lastError.message });
+  async function resumeBrowserDownload() {
+    safeSuggest();
+    try {
+      await chrome.downloads.resume(item.id);
+    } catch (err) {
+      DownloadAnythingLogger.debug('resume failed', { id: item.id, error: err.message });
+    }
+  }
+
+  async function eraseAndEmit() {
+    if (!isBackendOpen()) {
+      await resumeBrowserDownload();
+      return;
+    }
+    try {
+      const response = await emitInterceptedDownload();
+      if (!response?.ok) {
+        await resumeBrowserDownload();
+        return;
       }
-      emitInterceptedDownload();
-    });
+      try {
+        await chrome.downloads.erase({ id: item.id });
+      } catch (err) {
+        DownloadAnythingLogger.debug('erase failed', { id: item.id, error: err.message });
+      }
+      // Do NOT call suggest() here. The download was cancelled; releasing the
+      // filename determiner makes Chrome resume it natively, which would show
+      // both the native download and the extension modal. suggest() calls are
+      // ignored for cancelled downloads, so leaving it uncalled is safe.
+    } catch (error) {
+      DownloadAnythingLogger.debug('emit intercepted download failed', { id: item.id, error: error?.message });
+      await resumeBrowserDownload();
+    }
+  }
+
+  async function inspectAfterCancel(attempt) {
+    let download;
+    try {
+      [download] = await chrome.downloads.search({ id: item.id });
+    } catch (err) {
+      DownloadAnythingLogger.debug('search after cancel failed', { id: item.id, error: err.message });
+      safeSuggest();
+      return;
+    }
+
+    if (!download) {
+      await eraseAndEmit();
+      return;
+    }
+
+    if (download.state === 'complete') {
+      safeSuggest();
+      return;
+    }
+
+    if (download.state === 'in_progress') {
+      if (attempt < 2) await cancelAndInspect(attempt + 1);
+      else safeSuggest();
+      return;
+    }
+
+    await eraseAndEmit();
+  }
+
+  async function cancelAndInspect(attempt) {
+    try {
+      await chrome.downloads.cancel(item.id);
+    } catch (err) {
+      DownloadAnythingLogger.debug('cancel failed', { id: item.id, attempt, error: err.message });
+    }
+    await inspectAfterCancel(attempt);
   }
 
   // Cancel while Chrome is still blocked on filename determination. Calling
   // suggest() first releases the download and can open the native Save As dialog
   // before this asynchronous cancellation runs.
-  chrome.downloads.cancel(item.id, () => {
-    if (chrome.runtime.lastError) {
-      DownloadAnythingLogger.debug('cancel runtime error', { id: item.id, error: chrome.runtime.lastError.message });
-    }
+  //
+  // The listener MUST return true synchronously: per the downloads API docs,
+  // if an async listener neither calls suggest() synchronously nor returns
+  // true, Chrome calls suggest() automatically — which would release the
+  // download natively before our cancel runs, showing both the native
+  // download and the extension modal.
+  void (async () => {
+    const connected = await waitForBackendConnection();
+    if (connected) await cancelAndInspect(1);
+    else safeSuggest();
+  })();
 
-    chrome.downloads.search({ id: item.id }, (results) => {
-      if (chrome.runtime.lastError) {
-        DownloadAnythingLogger.debug('search after cancel failed', { id: item.id, error: chrome.runtime.lastError.message });
-        eraseAndEmit();
-        return;
-      }
-
-      const [download] = (results || []);
-      if (!download) {
-        // The item is gone from the manager, so cancel took effect. Erase any
-        // lingering shelf/history entry and hand off to the backend modal.
-        eraseAndEmit();
-        return;
-      }
-
-      if (download.state === 'complete') {
-        // The file finished before cancel could stop it. Remove it from disk
-        // and erase the history entry so the backend download is the only copy.
-        chrome.downloads.removeFile(item.id, () => {
-          if (chrome.runtime.lastError) {
-            DownloadAnythingLogger.debug('removeFile failed', { id: item.id, error: chrome.runtime.lastError.message });
-          }
-          eraseAndEmit();
-        });
-        return;
-      }
-
-      if (download.state === 'in_progress') {
-        // cancel() did not take effect yet. Try once more.
-        chrome.downloads.cancel(item.id, () => {
-          if (chrome.runtime.lastError) {
-            DownloadAnythingLogger.debug('second cancel runtime error', { id: item.id, error: chrome.runtime.lastError.message });
-          }
-          eraseAndEmit();
-        });
-        return;
-      }
-
-      // Cancelled or interrupted — the browser did not finish the file. Erase
-      // the history/shelf entry and open the download modal.
-      eraseAndEmit();
-    });
-  });
-
-  return false;
+  return true;
 }
 
 chrome.downloads.onDeterminingFilename.addListener(onDeterminingFilename);

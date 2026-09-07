@@ -1,4 +1,6 @@
 import { getVersion } from "@tauri-apps/api/app";
+import { isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
 	check,
@@ -20,11 +22,15 @@ export type UpdaterState =
 	| { status: "installing"; update: Update }
 	| { status: "error"; message: string };
 
+export type Updater = ReturnType<typeof useUpdater>;
+
 export function useUpdater() {
 	const [currentVersion, setCurrentVersion] = useState<string | null>(null);
 	const [state, setState] = useState<UpdaterState>({ status: "idle" });
 	const [dismissed, setDismissed] = useState(false);
+	const [tauriReady, setTauriReady] = useState(() => isTauri());
 	const mounted = useRef(true);
+	const updateRef = useRef<Update | null>(null);
 
 	useEffect(() => {
 		mounted.current = true;
@@ -33,16 +39,53 @@ export function useUpdater() {
 		};
 	}, []);
 
+	// Tauri's injected globals can be briefly unavailable on first paint.
+	// Retry once after a short delay so we don't disable the updater in a
+	// running Tauri app.
+	useEffect(() => {
+		if (tauriReady) return;
+		const id = setTimeout(() => setTauriReady(isTauri()), 150);
+		return () => clearTimeout(id);
+	}, [tauriReady]);
+
 	const setSafe = useCallback((next: UpdaterState) => {
 		if (mounted.current) setState(next);
 	}, []);
 
+	const closeUpdate = useCallback(async (update = updateRef.current) => {
+		if (!update) return;
+		if (updateRef.current === update) updateRef.current = null;
+		try {
+			await update.close();
+		} catch (err) {
+			console.warn("Failed to close updater resource:", err);
+		}
+	}, []);
+
+	useEffect(() => {
+		return () => {
+			const update = updateRef.current;
+			updateRef.current = null;
+			if (update) void update.close().catch(() => undefined);
+		};
+	}, []);
+
 	const checkForUpdates = useCallback(async () => {
+		if (!tauriReady) {
+			return null;
+		}
+
 		setDismissed(false);
 		setSafe({ status: "checking" });
+		await closeUpdate();
 		try {
 			const result = await check({ timeout: 30000 });
 			if (result) {
+				if (!mounted.current) {
+					await result.close();
+					return null;
+				}
+				updateRef.current = result;
 				setSafe({ status: "available", update: result });
 				return result;
 			}
@@ -53,7 +96,12 @@ export function useUpdater() {
 			setSafe({ status: "error", message });
 			return null;
 		}
-	}, [setSafe]);
+	}, [tauriReady, setSafe, closeUpdate]);
+
+	const checkForUpdatesRef = useRef(checkForUpdates);
+	useEffect(() => {
+		checkForUpdatesRef.current = checkForUpdates;
+	}, [checkForUpdates]);
 
 	const install = useCallback(async () => {
 		const update = state.status === "available" ? state.update : undefined;
@@ -63,6 +111,7 @@ export function useUpdater() {
 
 		try {
 			await update.downloadAndInstall((progress: DownloadEvent) => {
+				if (!mounted.current) return;
 				switch (progress.event) {
 					case "Started":
 						setState({
@@ -87,18 +136,24 @@ export function useUpdater() {
 				}
 			});
 
+			await closeUpdate(update);
 			await relaunch();
 		} catch (err) {
+			await closeUpdate(update);
 			const message = err instanceof Error ? err.message : String(err);
 			setSafe({ status: "error", message });
 		}
-	}, [state, setSafe]);
+	}, [state, setSafe, closeUpdate]);
 
 	useEffect(() => {
 		let active = true;
 		let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
 		async function init() {
+			if (!tauriReady) {
+				return;
+			}
+
 			try {
 				const version = await getVersion();
 				if (active) setCurrentVersion(version);
@@ -114,7 +169,7 @@ export function useUpdater() {
 			}
 
 			timeoutId = setTimeout(() => {
-				if (active) checkForUpdates();
+				if (active) checkForUpdatesRef.current();
 			}, 2000);
 		}
 
@@ -123,12 +178,38 @@ export function useUpdater() {
 			active = false;
 			if (timeoutId) clearTimeout(timeoutId);
 		};
-	}, [checkForUpdates]);
+	}, [tauriReady]);
+
+	// Listen for the native "Check for Updates" menu item.
+	useEffect(() => {
+		if (!tauriReady) return;
+
+		let active = true;
+		let unlisten: (() => void) | undefined;
+		const setup = async () => {
+			try {
+				const stop = await listen("check-for-updates", () => {
+					checkForUpdatesRef.current();
+				});
+				if (active) unlisten = stop;
+				else stop();
+			} catch (err) {
+				console.warn("Failed to register update menu listener:", err);
+			}
+		};
+		void setup();
+
+		return () => {
+			active = false;
+			unlisten?.();
+		};
+	}, [tauriReady]);
 
 	return {
 		currentVersion,
 		state,
 		dismissed,
+		tauriReady,
 		checkForUpdates,
 		install,
 		dismiss: () => setDismissed(true),

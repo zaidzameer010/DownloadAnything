@@ -14,12 +14,11 @@ from __future__ import annotations
 import os
 import platform
 import time
-
-import orjson
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
+import orjson
 import structlog
 
 log = structlog.get_logger()
@@ -66,6 +65,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     thumbnail TEXT NOT NULL DEFAULT '',
     engine TEXT NOT NULL DEFAULT 'ytdlp',
     media_type TEXT,
+    referer TEXT,
     status TEXT NOT NULL,
     percent REAL NOT NULL DEFAULT 0,
     downloaded INTEGER NOT NULL DEFAULT 0,
@@ -88,6 +88,8 @@ class Database:
     async def connect(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._path)
+        await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.executescript(_SCHEMA)
         await self._migrate_jobs()
         await self._conn.commit()
@@ -111,6 +113,9 @@ class Database:
         if "is_playlist" not in columns:
             await self.conn.execute("ALTER TABLE jobs ADD COLUMN is_playlist INTEGER NOT NULL DEFAULT 0")
             log.info("Migrated jobs table: added is_playlist column")
+        if "referer" not in columns:
+            await self.conn.execute("ALTER TABLE jobs ADD COLUMN referer TEXT")
+            log.info("Migrated jobs table: added referer column")
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -132,7 +137,7 @@ class Database:
             try:
                 out[key] = orjson.loads(raw)
             except orjson.JSONDecodeError:
-                log.warning("Ignoring corrupt settings row: %s", key)
+                log.warning("Ignoring corrupt settings row", key=key)
         return out
 
     async def save_settings(self, settings: dict[str, Any]) -> None:
@@ -151,9 +156,9 @@ class Database:
             INSERT INTO jobs (
                 id, url, directory, format_selector, custom_filename, selected_files,
                 parent_id, child_ids, is_playlist, title,
-                thumbnail, engine, media_type, status, percent, downloaded, total, error,
+                thumbnail, engine, media_type, referer, status, percent, downloaded, total, error,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 status = excluded.status,
                 percent = excluded.percent,
@@ -168,6 +173,7 @@ class Database:
                 child_ids = excluded.child_ids,
                 is_playlist = excluded.is_playlist,
                 media_type = excluded.media_type,
+                referer = excluded.referer,
                 directory = excluded.directory,
                 updated_at = excluded.updated_at
             """,
@@ -185,6 +191,7 @@ class Database:
                 job.get("thumbnail") or "",
                 job.get("engine") or "ytdlp",
                 job.get("mediaType") or "",
+                job.get("referer") or None,
                 job["status"],
                 float(job.get("percent") or 0),
                 int(job.get("downloaded") or 0),

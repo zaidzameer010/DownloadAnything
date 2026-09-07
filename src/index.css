@@ -158,3 +158,18 @@
 		animation-iteration-count: 1;
 	}
 }
+
+.modal-no-press-scale .button,
+.modal-no-press-scale .button:active,
+.modal-no-press-scale .button[data-pressed="true"],
+.modal-no-press-scale .button--sm,
+.modal-no-press-scale .button--sm:active,
+.modal-no-press-scale .button--sm[data-pressed="true"],
+.modal-no-press-scale .button--lg,
+.modal-no-press-scale .button--lg:active,
+.modal-no-press-scale .button--lg[data-pressed="true"],
+.modal-no-press-scale .close-button--default,
+.modal-no-press-scale .close-button--default:active,
+.modal-no-press-scale .close-button--default[data-pressed="true"] {
+	transform: none;
+}

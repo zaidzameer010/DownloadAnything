@@ -7,7 +7,9 @@ cookies, impersonation, and proxy settings are respected.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import re
+import threading
 import xml.etree.ElementTree as ET
 from typing import Any, cast
 from urllib.parse import urljoin
@@ -20,7 +22,7 @@ from yt_dlp.utils import int_or_none, parse_duration
 
 log = structlog.get_logger()
 
-_SIZE_REQUEST_TIMEOUT = 15.0
+_SIZE_REQUEST_TIMEOUT = 5.0
 
 
 def _safe_get_header(response: Any, name: str) -> str | None:
@@ -89,8 +91,8 @@ def _http_content_length(
                     return int(cl)
     except RequestError:
         pass
-    except Exception:  # noqa: BLE001
-        log.debug("HEAD size check failed for %s", url)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("HEAD size check failed", url=url, error=str(exc))
 
     try:
         range_headers = {**req_headers, "Range": "bytes=0-0"}
@@ -107,8 +109,8 @@ def _http_content_length(
                 cl = _safe_get_header(response, "Content-Length")
                 if cl:
                     return int(cl)
-    except Exception:  # noqa: BLE001
-        log.debug("Range size check failed for %s", url)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Range size check failed", url=url, error=str(exc))
 
     return None
 
@@ -139,14 +141,14 @@ def _hls_fetch_playlist(ydl: Any, url: str, headers: dict[str, str] | None) -> m
         )
         with ydl.urlopen(req) as response:
             text = response.read().decode("utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
-        log.debug("Could not fetch HLS playlist %s", url)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Could not fetch HLS playlist", url=url, error=str(exc))
         return None
 
     try:
         playlist = m3u8.loads(text, uri=url)
-    except Exception:  # noqa: BLE001
-        log.debug("Could not parse HLS playlist %s", url)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Could not parse HLS playlist", url=url, error=str(exc))
         return None
 
     cache[url] = playlist
@@ -236,7 +238,8 @@ def _hls_size(
                 best = _hls_pick_best_variant(master)
                 best_bw = getattr(getattr(best, "stream_info", None), "bandwidth", None)
                 if best and best_bw:
-                    return _bytes_from_tbr(float(best_bw), duration) + init_size, True
+                    # HLS BANDWIDTH is bits per second; _bytes_from_tbr wants kbps.
+                    return _bytes_from_tbr(float(best_bw) / 1000.0, duration) + init_size, True
 
     return None
 
@@ -265,15 +268,22 @@ def _dash_representation_info(
     if tbr is not None:
         target_bandwidth = int(tbr * 1000)
 
-    reps = _dash_find_all(root, "Representation")
-    if not reps:
+    adaptation_sets = _dash_find_all(root, "AdaptationSet")
+    rep_parents: list[tuple[ET.Element, ET.Element | None]] = [
+        (rep, adaptation)
+        for adaptation in adaptation_sets
+        for rep in adaptation.findall("{*}Representation")
+    ]
+    if not rep_parents:
+        rep_parents = [(rep, None) for rep in _dash_find_all(root, "Representation")]
+    if not rep_parents:
         return None, mpd_duration, mpd_type
 
     # Prefer an explicit id or bandwidth match.
-    for rep in reps:
+    for rep, _ in rep_parents:
         if target_id and rep.get("id") == target_id:
             return rep, mpd_duration, mpd_type
-    for rep in reps:
+    for rep, _ in rep_parents:
         if target_bandwidth and int(rep.get("bandwidth") or 0) == target_bandwidth:
             return rep, mpd_duration, mpd_type
 
@@ -281,31 +291,50 @@ def _dash_representation_info(
     # the format's codec profile.
     is_video = fmt.get("vcodec") and fmt.get("vcodec") != "none"
     is_audio = fmt.get("acodec") and fmt.get("acodec") != "none"
-    for rep in reps:
-        parent = rep.find("..")
-        if parent is None:
+    for rep, adaptation in rep_parents:
+        if adaptation is None:
             continue
-        content_type = parent.get("contentType") or parent.get("mimeType", "").split("/")[0]
+        content_type = adaptation.get("contentType") or (adaptation.get("mimeType") or "").split("/")[0]
         if is_video and content_type == "video":
             return rep, mpd_duration, mpd_type
         if is_audio and content_type == "audio":
             return rep, mpd_duration, mpd_type
 
-    return reps[0], mpd_duration, mpd_type
+    return rep_parents[0][0], mpd_duration, mpd_type
 
 
-def _dash_nearest_base_url(element: ET.Element, default: str) -> str:
-    parents: list[ET.Element | None] = [
-        element,
-        cast(ET.Element | None, element.find("..")),
-        cast(ET.Element | None, element.find("../..")),
-    ]
-    for parent in parents:
-        if parent is None:
-            continue
-        base = parent.find("{*}BaseURL")
+def _dash_parent_map(root: ET.Element) -> dict[ET.Element, ET.Element]:
+    return {child: parent for parent in root.iter() for child in parent}
+
+
+def _dash_nearest_element(
+    parents: dict[ET.Element, ET.Element],
+    element: ET.Element,
+    local_name: str,
+) -> ET.Element | None:
+    current: ET.Element | None = element
+    while current is not None:
+        match = current.find(f"{{*}}{local_name}")
+        if match is not None:
+            return match
+        current = parents.get(current)
+    return None
+
+
+def _dash_nearest_base_url(
+    parents: dict[ET.Element, ET.Element],
+    element: ET.Element,
+    default: str,
+) -> str:
+    ancestors: list[ET.Element] = []
+    current: ET.Element | None = element
+    while current is not None:
+        ancestors.append(current)
+        current = parents.get(current)
+    for ancestor in reversed(ancestors):
+        base = ancestor.find("{*}BaseURL")
         if base is not None and base.text:
-            return urljoin(default, base.text.strip())
+            default = urljoin(default, base.text.strip())
     return default
 
 
@@ -328,13 +357,16 @@ def _dash_size(
     fmt: Any,
     info: Any,
 ) -> tuple[int, bool] | None:
-    cache: dict[str, str] | None = getattr(ydl, "_stream_size_mpd_cache", None)
+    cache: dict[str, Any] | None = getattr(ydl, "_stream_size_mpd_cache", None)
     if cache is None:
         cache = {}
         ydl._stream_size_mpd_cache = cache
 
-    text = cache.get(url)
-    if text is None:
+    if url in cache:
+        root = cache[url]
+        if root is False:
+            return None
+    else:
         try:
             req = Request(
                 url,
@@ -343,16 +375,17 @@ def _dash_size(
             )
             with ydl.urlopen(req) as response:
                 text = response.read().decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            log.debug("Could not fetch DASH MPD %s", url)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Could not fetch DASH MPD", url=url, error=str(exc))
             return None
-        cache[url] = text
-
-    try:
-        root = ET.fromstring(text)
-    except ET.ParseError:
-        log.debug("Could not parse DASH MPD %s", url)
-        return None
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError as exc:
+            log.debug("Could not parse DASH MPD", url=url, error=str(exc))
+            # Cache the failure so repeated lookups skip the fetch and parse.
+            cache[url] = False
+            return None
+        cache[url] = root
 
     rep, duration, mpd_type = _dash_representation_info(root, fmt)
     if rep is None:
@@ -361,14 +394,12 @@ def _dash_size(
     if mpd_type == "dynamic" and duration is None:
         return None
 
-    base_url = _dash_nearest_base_url(rep, fmt.get("fragment_base_url") or fmt.get("url") or url)
+    parents = _dash_parent_map(root)
+    base_url = _dash_nearest_base_url(parents, rep, url)
     bandwidth = int_or_none(rep.get("bandwidth"))
 
     # SegmentList with explicit mediaRange.
-    segment_list = rep.find("{*}SegmentList")
-    if segment_list is None:
-        # Some manifests put SegmentList under AdaptationSet.
-        segment_list = _dash_find_all(root, "SegmentList")[0] if _dash_find_all(root, "SegmentList") else None
+    segment_list = _dash_nearest_element(parents, rep, "SegmentList")
 
     if segment_list is not None:
         total = 0
@@ -396,8 +427,8 @@ def _dash_size(
             return total, False
 
     # SegmentBase single-file: HEAD the media file.
-    segment_base = rep.find("{*}SegmentBase")
-    if segment_base is not None or _dash_find_all(root, "SegmentBase"):
+    segment_base = _dash_nearest_element(parents, rep, "SegmentBase")
+    if segment_base is not None:
         file_size = _http_content_length(ydl, base_url, headers)
         if file_size:
             return file_size, False
@@ -464,8 +495,13 @@ def resolve_format_size(
     ydl: Any,
     fmt: Any,
     info: Any,
+    *,
+    allow_network: bool = True,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[int, bool] | None:
     """Return (bytes, is_estimate) for a single yt-dlp format."""
+    if cancel_event and cancel_event.is_set():
+        return None
     if not isinstance(fmt, dict):
         return None
     fmt = cast(Any, fmt)
@@ -476,7 +512,9 @@ def resolve_format_size(
         total = 0
         is_estimate = False
         for sub in requested:
-            result = resolve_format_size(ydl, sub, info)
+            if cancel_event and cancel_event.is_set():
+                return None
+            result = resolve_format_size(ydl, sub, info, allow_network=allow_network, cancel_event=cancel_event)
             if result is None:
                 return None
             size, estimate = result
@@ -496,6 +534,13 @@ def resolve_format_size(
         if result:
             return result
 
+    # Fast path 4: Instant bitrate-duration estimate (avoids expensive network roundtrips for HLS/DASH/VOD)
+    duration = info.get("duration") or fmt.get("duration")
+    if duration and duration > 0:
+        estimate = _estimate_from_bitrate(duration, fmt)
+        if estimate:
+            return estimate, True
+
     url = fmt.get("url") or info.get("url")
     if not url or not isinstance(url, str):
         return None
@@ -503,25 +548,23 @@ def resolve_format_size(
     headers = fmt.get("http_headers") or info.get("http_headers")
     category = _protocol_category(fmt)
 
-    if category == "m3u8":
-        result = _hls_size(ydl, url, headers, fmt, info)
-        if result:
-            return result
+    if allow_network:
+        if cancel_event and cancel_event.is_set():
+            return None
+        if category == "m3u8":
+            result = _hls_size(ydl, url, headers, fmt, info)
+            if result:
+                return result
 
-    if category == "dash":
-        result = _dash_size(ydl, url, headers, fmt, info)
-        if result:
-            return result
+        if category == "dash":
+            result = _dash_size(ydl, url, headers, fmt, info)
+            if result:
+                return result
 
-    if category in ("http", "https", "ftp", "ftps"):
-        size = _http_content_length(ydl, url, headers)
-        if size:
-            return size, False
-
-    duration = info.get("duration") or fmt.get("duration")
-    estimate = _estimate_from_bitrate(duration, fmt)
-    if estimate:
-        return estimate, True
+        if category in ("http", "https", "ftp", "ftps"):
+            size = _http_content_length(ydl, url, headers)
+            if size:
+                return size, False
 
     return None
 
@@ -530,12 +573,17 @@ def resolve_selector_size(
     ydl: Any,
     info: Any,
     selector: str | None,
-) -> tuple[int, bool] | None:
+    *,
+    allow_network: bool = True,
+    cancel_event: threading.Event | None = None,
+) -> tuple[int, bool, int] | None:
     """Resolve a yt-dlp format selector and sum the sizes of the chosen formats."""
+    if cancel_event and cancel_event.is_set():
+        return None
     try:
         formats = ydl._get_formats(info)
     except Exception as exc:  # noqa: BLE001
-        log.debug("Could not get formats: %s", exc)
+        log.debug("Could not get formats", error=str(exc))
         return None
 
     if not formats:
@@ -548,23 +596,50 @@ def resolve_selector_size(
             # Some selectors (e.g. 'best') may not match DASH/HLS components that are split across tracks.
             chosen = ydl._select_formats(formats, ydl.build_format_selector(ydl._default_format_spec(info)))
     except Exception as exc:  # noqa: BLE001
-        log.debug("Could not resolve format selector %r: %s", selector, exc)
+        log.debug("Could not resolve format selector", selector=selector, error=str(exc))
         return None
 
     total = 0
     is_estimate = False
     any_known = False
 
-    for fmt in chosen:
-        result = resolve_format_size(ydl, fmt, info)
-        if result is None:
-            return None
-        any_known = True
-        size, estimate = result
-        total += size
-        is_estimate = is_estimate or estimate
+    if len(chosen) > 1:
+        with ThreadPoolExecutor(max_workers=min(4, len(chosen)), thread_name_prefix="selector-size") as executor:
+            futures = [
+                executor.submit(
+                    resolve_format_size,
+                    ydl,
+                    fmt,
+                    info,
+                    allow_network=allow_network,
+                    cancel_event=cancel_event,
+                )
+                for fmt in chosen
+            ]
+            for future in futures:
+                if cancel_event and cancel_event.is_set():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    return None
+                result = future.result()
+                if result is None:
+                    return None
+                any_known = True
+                size, estimate = result
+                total += size
+                is_estimate = is_estimate or estimate
+    else:
+        for fmt in chosen:
+            if cancel_event and cancel_event.is_set():
+                return None
+            result = resolve_format_size(ydl, fmt, info, allow_network=allow_network, cancel_event=cancel_event)
+            if result is None:
+                return None
+            any_known = True
+            size, estimate = result
+            total += size
+            is_estimate = is_estimate or estimate
 
     if not any_known:
         return None
 
-    return total, is_estimate
+    return total, is_estimate, len(chosen)

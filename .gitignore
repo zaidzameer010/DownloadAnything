@@ -10,4 +10,5 @@ dist/
 !backend/server.spec
 src-tauri/target/
 src-tauri/binaries/
-server/tests
+backend/tests
+/aria2-next-*

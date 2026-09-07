@@ -3,9 +3,7 @@ import { Activity, Download, Settings2, Wifi, WifiOff } from "lucide-react";
 import { useState } from "react";
 import DownloadsPage from "./components/DownloadsPage";
 import SettingsPage from "./components/SettingsPage";
-import UpdateAlert from "./components/UpdateAlert";
 import { useBackend } from "./hooks/useBackend";
-import { useUpdater } from "./hooks/useUpdater";
 import { BACKEND_URL } from "./lib/backend";
 
 type Page = "downloads" | "settings";
@@ -59,7 +57,6 @@ function Navigation({
 
 function App() {
 	const backend = useBackend();
-	const updater = useUpdater();
 	const [page, setPage] = useState<Page>("downloads");
 
 	const activeJobs = backend.jobs.filter(
@@ -149,7 +146,6 @@ function App() {
 				</aside>
 
 				<div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
-					<UpdateAlert {...updater} />
 					<header className="border-b border-separator bg-background/95 px-4 py-4 backdrop-blur md:hidden">
 						<div className="mb-4 flex items-center justify-between gap-3">
 							<div className="flex min-w-0 items-center gap-3">

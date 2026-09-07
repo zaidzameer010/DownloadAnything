@@ -11,7 +11,13 @@ from concurrent.futures import ThreadPoolExecutor
 from send2trash import send2trash
 import orjson
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, cast
+
+try:
+    import resource
+except ImportError:
+    resource = None
 
 try:
     import libtorrent as lt
@@ -19,33 +25,74 @@ except ImportError:  # Keep the backend importable with a useful runtime error.
     lt = None  # type: ignore[assignment]
 
 import structlog
+import urllib.parse
 
 try:
     from .db import Database, app_support_dir
+    from .jobbase import JobManager
     from .settings import SettingsStore
 except ImportError:
     from db import Database, app_support_dir
+    from jobbase import JobManager
     from settings import SettingsStore
 
-from urllib.parse import unquote
+
+def unquote(value: str) -> str:
+    """Decode a percent-encoded string with UTF-8 replacement decoding."""
+    return urllib.parse.unquote(value, encoding="utf-8", errors="replace")
 
 log = structlog.get_logger("da.torrent")
 
+_DEFAULT_FILE_POOL_SIZE = 100
+_DESCRIPTOR_LIMIT_THRESHOLD = 1024
+_DESCRIPTOR_RESERVE = 96
+_MAX_CONSTRAINED_FILE_POOL_SIZE = 64
+# libtorrent's default piece priority; used to restore defaults when the
+# sequential playback window is disabled.
+_DEFAULT_PIECE_PRIORITY = 4
+
+
+def _descriptor_budgets(
+    settings: dict[str, Any],
+    *,
+    soft_limit: int | None = None,
+) -> tuple[int, int]:
+    requested_connections = max(1, int(settings.get("torrentMaxConnections") or 200))
+    if soft_limit is None:
+        try:
+            soft_limit = int(resource.getrlimit(resource.RLIMIT_NOFILE)[0]) if resource else 0
+        except (OSError, ValueError):
+            soft_limit = 0
+    if soft_limit <= 0 or soft_limit >= _DESCRIPTOR_LIMIT_THRESHOLD:
+        return requested_connections, _DEFAULT_FILE_POOL_SIZE
+
+    reserve = min(_DESCRIPTOR_RESERVE, max(16, soft_limit // 2))
+    available = max(2, soft_limit - reserve)
+    file_pool_size = max(1, min(_MAX_CONSTRAINED_FILE_POOL_SIZE, available // 3))
+    connection_limit = max(1, min(requested_connections, available - file_pool_size))
+    return connection_limit, file_pool_size
+
 
 def is_magnet_url(url: str) -> bool:
-    return url.strip().lower().startswith("magnet:?")
+    """Check if a target string is a valid BitTorrent magnet URI."""
+    clean = url.strip().strip("'\"")
+    return clean.lower().startswith("magnet:?")
 
 
 def _clean_torrent_path(target: str) -> str:
-    path_str = unquote(target[7:]) if target.startswith("file://") else target
-    return path_str.strip()
+    """Normalize file URLs or quoted string paths pointing to local torrent files."""
+    clean = target.strip().strip("'\"")
+    path_str = unquote(clean[7:]) if clean.startswith("file://") else clean
+    return path_str.strip().strip("'\"")
 
 
 def is_torrent_input(url: str) -> bool:
-    if is_magnet_url(url):
+    """Check if an input string is either a magnet URI or a valid local .torrent file path."""
+    clean = url.strip().strip("'\"")
+    if is_magnet_url(clean):
         return True
-    path_str = _clean_torrent_path(url)
-    return path_str.lower().endswith(".torrent") or (Path(path_str).is_file() and path_str.lower().endswith(".torrent"))
+    path_str = _clean_torrent_path(clean)
+    return path_str.lower().endswith(".torrent")
 
 
 def _require_libtorrent() -> Any:
@@ -58,19 +105,144 @@ def _require_libtorrent() -> Any:
 
 
 _VIDEO_EXTS = frozenset({
-    "mp4", "mkv", "mp3", "avi", "mov", "webm", "m4v", "mpeg",
+    "mp4", "mkv", "avi", "mov", "webm", "m4v", "mpeg", "mpg",
+    "ts", "m2ts", "mts", "wmv", "flv", "3gp", "ogv", "vob",
 })
+_AUDIO_EXTS = frozenset({
+    "mp3", "m4a", "flac", "ogg", "wav", "aac", "opus", "wma",
+})
+# Containers that often keep the index / moov / cues at the end of the file.
+_FOOTER_INDEX_EXTS = frozenset({
+    "mp4", "mov", "m4v", "m4a", "3gp", "avi", "mkv", "webm",
+})
+_PLAYBACK_HEADER_BYTES = 4 * 1024 * 1024
+_PLAYBACK_FOOTER_BYTES = 2 * 1024 * 1024
+_PLAYBACK_WINDOW_BYTES = 16 * 1024 * 1024
+_PLAYBACK_DEADLINE_STEP_MS = 50
+_PLAYBACK_MAX_WINDOW_PIECES = 48
+_PLAYBACK_FILE_DEADLINE_GAP_MS = 15_000
+
+
+def _file_extension(path: str) -> str:
+    return Path(path).suffix.lstrip(".").lower()
 
 
 def _is_video_file(path: str) -> bool:
-    return Path(path).suffix.lstrip(".").lower() in _VIDEO_EXTS
+    return _file_extension(path) in _VIDEO_EXTS
+
+
+def _is_playable_file(path: str) -> bool:
+    return _is_video_file(path) or _file_extension(path) in _AUDIO_EXTS
+
+
+def _needs_footer_index(path: str) -> bool:
+    return _file_extension(path) in _FOOTER_INDEX_EXTS
+
+
+def _playable_sort_rank(path: str) -> int:
+    ext = _file_extension(path)
+    if ext in _VIDEO_EXTS:
+        return 0
+    if ext in _AUDIO_EXTS:
+        return 1
+    return 2
+
+
+def _pieces_for_bytes(byte_count: int, piece_length: int) -> int:
+    length = max(1, piece_length)
+    return max(1, (max(1, byte_count) + length - 1) // length)
+
+
+def _piece_is_missing(have_pieces: Sequence[bool], piece: int) -> bool:
+    if piece < 0 or piece >= len(have_pieces):
+        return True
+    return not have_pieces[piece]
+
+
+def _status_error(status: Any) -> str:
+    """Return the torrent error message, preferring the non-deprecated errc."""
+    errc = getattr(status, "errc", None)
+    if errc is not None and errc.value() != 0:
+        return errc.message()
+    return str(getattr(status, "error", "") or "")
+
+
+def _torrent_file_status(
+    index: int,
+    size: int,
+    downloaded: int,
+    active_files: set[int],
+) -> str:
+    if downloaded >= size:
+        return "completed"
+    if index in active_files:
+        return "downloading"
+    return "queued"
+
+
+def _playback_deadline_plan(
+    first_piece: int,
+    last_piece: int,
+    have_pieces: Sequence[bool],
+    *,
+    header_pieces: int,
+    footer_pieces: int,
+    window_pieces: int,
+    deadline_step_ms: int,
+    include_footer: bool,
+    deadline_offset_ms: int = 0,
+) -> list[tuple[int, int]]:
+    """Build time-critical deadlines for a playable prefix, then a moving window.
+
+    libtorrent's sequential_download flag only affects request order and is a
+    poor fit for streaming. Deadlines make the time-critical picker try to
+    *complete* the header, end-index, and upcoming playback window first.
+    """
+    if last_piece < first_piece:
+        return []
+
+    planned: list[tuple[int, int]] = []
+    seen: set[int] = set()
+    next_deadline = 0
+
+    def add(piece: int) -> None:
+        nonlocal next_deadline
+        if (
+            piece in seen
+            or piece < first_piece
+            or piece > last_piece
+            or not _piece_is_missing(have_pieces, piece)
+        ):
+            return
+        seen.add(piece)
+        planned.append((piece, deadline_offset_ms + next_deadline))
+        next_deadline += deadline_step_ms
+
+    header_count = max(1, header_pieces)
+    header_end = min(last_piece, first_piece + header_count - 1)
+    for piece in range(first_piece, header_end + 1):
+        add(piece)
+
+    footer_start = last_piece + 1
+    if include_footer and last_piece > header_end:
+        footer_count = max(1, footer_pieces)
+        footer_start = max(header_end + 1, last_piece - footer_count + 1)
+        for piece in range(last_piece, footer_start - 1, -1):
+            add(piece)
+
+    cursor = first_piece
+    while cursor <= last_piece and cursor < footer_start and not _piece_is_missing(have_pieces, cursor):
+        cursor += 1
+    cursor = max(cursor, header_end + 1)
+    window_end = min(last_piece, cursor + max(1, window_pieces) - 1, footer_start - 1)
+    if cursor <= window_end:
+        for piece in range(cursor, window_end + 1):
+            add(piece)
+    return planned
 
 
 def _format_hash(value: Any) -> str:
-    try:
-        return str(value)
-    except Exception:  # noqa: BLE001
-        return ""
+    return str(value)
 
 
 def _tracker_url(tracker: Any) -> str:
@@ -185,26 +357,29 @@ class TorrentJob:
         return snapshot
 
 
-class TorrentManager:
+class TorrentManager(JobManager):
     """Own the libtorrent session and expose the backend job-manager contract."""
 
-    def __init__(self, settings_store: SettingsStore, db: Database, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self,
+        settings_store: SettingsStore,
+        db: Database,
+        loop: asyncio.AbstractEventLoop,
+        work_slots: Any,
+        max_workers: int,
+    ) -> None:
         module = _require_libtorrent()
         self._settings_store = settings_store
         self._db = db
         self._loop = loop
+        self._work_slots = work_slots
         self._session = module.session(self._session_settings(settings_store.get()))
         self._executor = ThreadPoolExecutor(
-            max_workers=max(1, settings_store.get()["maxConcurrentDownloads"]),
+            max_workers=max_workers,
             thread_name_prefix="torrent",
         )
-        self._jobs: dict[str, TorrentJob] = {}
-        self._lock = threading.RLock()
+        self._init_job_state()
         self._session_lock = threading.RLock()
-        self._listeners: list[Any] = []
-        self._worker_futures: dict[str, Any] = {}
-        self._db_tasks: dict[str, asyncio.Task[Any]] = {}
-        self._last_emit: dict[str, float] = {}
         self._probe_root = app_support_dir() / "torrent-probes"
         self._probe_root.mkdir(parents=True, exist_ok=True)
         settings_store.subscribe(self._on_settings_changed)
@@ -213,40 +388,65 @@ class TorrentManager:
     @staticmethod
     def _session_settings(settings: dict[str, Any]) -> dict[str, Any]:
         port = int(settings.get("torrentListenPort") or 6881)
-        return {
+        connection_limit, file_pool_size = _descriptor_budgets(settings)
+        sess_opts: dict[str, Any] = {
             # Listen on both IPv4 and IPv6 to maximize peer reachability.
             "listen_interfaces": f"0.0.0.0:{port},[::]:{port}",
             "enable_dht": bool(settings.get("torrentEnableDht", True)),
             "enable_lsd": bool(settings.get("torrentEnableLsd", True)),
             "enable_upnp": bool(settings.get("torrentEnableUpnp", True)),
             "enable_natpmp": bool(settings.get("torrentEnableNatpmp", True)),
-            "connections_limit": int(settings.get("torrentMaxConnections") or 200),
+            "connections_limit": connection_limit,
             "upload_rate_limit": int(settings.get("torrentUploadLimit") or 0),
+            "download_rate_limit": int(settings.get("torrentDownloadLimit") or 0),
             # High-performance session tuning (see libtorrent tuning docs):
             # prefer TCP over uTP, connect faster to more peers, keep larger
             # peer/disk buffers, and announce to all trackers/tiers.
             "mixed_mode_algorithm": 0,  # settings_pack::prefer_tcp
-            "connection_speed": 200,
+            "connection_speed": 500,
+            "listen_queue_size": 128,
             "max_peerlist_size": 10000,
-            "file_pool_size": 100,
-            "aio_threads": 20,
-            "max_out_request_queue": 1000,
-            "max_peer_recv_buffer_size": 5 * 1024 * 1024,
+            "file_pool_size": file_pool_size,
+            "aio_threads": 24,
+            "max_out_request_queue": 2000,
+            "request_queue_time": 3,
+            "recv_socket_buffer_size": 2 * 1024 * 1024,
+            "send_socket_buffer_size": 1024 * 1024,
+            "max_peer_recv_buffer_size": 10 * 1024 * 1024,
             "alert_queue_size": 10000,
-            "max_queued_disk_bytes": 200 * 1024 * 1024,
+            "max_queued_disk_bytes": 256 * 1024 * 1024,
+            "use_disk_read_ahead": True,
+            "contiguous_recv_buffer": True,
+            "close_redundant_connections": True,
+            "allow_multiple_connections_per_ip": True,
+            "unchoke_slots_limit": 64,
+            "num_optimistic_unchoke_slots": 8,
+            "active_downloads": 20,
+            "active_limit": 50,
+            "active_tracker_limit": 50,
+            "active_dht_limit": 50,
             "peer_timeout": 60,
             "inactivity_timeout": 300,
             "announce_to_all_trackers": True,
             "announce_to_all_tiers": True,
-            "dht_announce_interval": 300,
+            "dht_announce_interval": 120,
+            "dht_bootstrap_nodes": (
+                "dht.libtorrent.org:25401,router.bittorrent.com:6881,"
+                "dht.transmissionbt.com:6881,router.utorrent.com:6881,dht.aelitis.com:6881"
+            ),
             "max_pex_peers": 100,
             "send_buffer_watermark": 1024 * 1024,
         }
+        if settings.get("torrentForceEncryption"):
+            # Force PE encryption (pe_forced = 0)
+            sess_opts["out_enc_policy"] = 0
+            sess_opts["in_enc_policy"] = 0
+        return sess_opts
 
     def _torrent_params(self, magnet: str, save_path: Path) -> Any:
         module = _require_libtorrent()
         clean_path = _clean_torrent_path(magnet)
-        if Path(clean_path).is_file():
+        if not is_magnet_url(clean_path) and Path(clean_path).is_file():
             info = module.torrent_info(str(clean_path))
             params = module.add_torrent_params()
             params.ti = info
@@ -254,79 +454,27 @@ class TorrentManager:
         else:
             params = module.parse_magnet_uri(magnet)
             params.save_path = str(save_path)
-        if not self._settings_store.get().get("torrentEnablePex", True):
+        current_settings = self._settings_store.get()
+        if not current_settings.get("torrentEnablePex", True):
             params.flags |= module.torrent_flags.disable_pex
+        # Sequential-download is a torrent-wide request-order hint and is a
+        # poor fit for playable video. Playback uses piece deadlines instead.
         return params
 
     def _on_settings_changed(self, settings: dict[str, Any]) -> None:
         try:
-            self._session.apply_settings(self._session_settings(settings))
+            session_lock = getattr(self, "_session_lock", None)
+            if session_lock is None:
+                self._session.apply_settings(self._session_settings(settings))
+            else:
+                with session_lock:
+                    self._session.apply_settings(self._session_settings(settings))
         except Exception:  # noqa: BLE001
             log.exception("Could not apply libtorrent settings")
 
-    def add_listener(self, callback: Any) -> None:
-        self._listeners.append(callback)
-
-    async def _dispatch_listener(self, listener: Any, snapshot: dict[str, Any]) -> None:
-        try:
-            await listener(snapshot)
-        except Exception:  # noqa: BLE001
-            log.exception("Torrent job listener failed")
-
-    def _persist(self, job: TorrentJob) -> None:
-        snapshot = job.snapshot()
-
-        async def write() -> None:
-            if not job.data.get("removed"):
-                await self._db.upsert_job(snapshot)
-
-        def schedule() -> None:
-            previous = self._db_tasks.get(job.id)
-
-            async def run() -> None:
-                if previous is not None:
-                    await asyncio.gather(previous, return_exceptions=True)
-                await write()
-
-            task = asyncio.ensure_future(run())
-            self._db_tasks[job.id] = task
-            task.add_done_callback(lambda done: self._db_tasks.pop(job.id, None) if self._db_tasks.get(job.id) is done else None)
-
-        self._loop.call_soon_threadsafe(schedule)
-
-    def _delete_persisted(self, job_id: str) -> None:
-        async def delete() -> None:
-            await self._db.delete_job(job_id)
-
-        self._loop.call_soon_threadsafe(lambda: asyncio.ensure_future(delete()))
-
     def _emit(self, job: TorrentJob, *, force: bool = False) -> None:
         with self._lock:
-            if job.data.get("removed"):
-                return
-            now = time.monotonic()
-            if not force and now - self._last_emit.get(job.id, 0) < 0.1:
-                return
-            self._last_emit[job.id] = now
-            job.event_revision += 1
-            snapshot = job.snapshot()
-            if force:
-                self._persist(job)
-            listeners = list(self._listeners)
-
-        def dispatch() -> None:
-            for listener in listeners:
-                asyncio.ensure_future(self._dispatch_listener(listener, snapshot))
-
-        self._loop.call_soon_threadsafe(dispatch)
-
-    def list_jobs(self) -> list[dict[str, Any]]:
-        with self._lock:
-            return [job.snapshot() for job in self._jobs.values()]
-
-    def get(self, job_id: str) -> TorrentJob | None:
-        with self._lock:
-            return self._jobs.get(job_id)
+            self._emit_core(job, force=force)
 
     def restore(self, rows: list[dict[str, Any]]) -> None:
         for row in reversed(rows):
@@ -341,12 +489,12 @@ class TorrentManager:
         if any(row.get("engine") == "torrent" for row in rows):
             log.info("Restored torrent jobs")
 
-    def probe(self, magnet: str) -> dict[str, Any]:
+    def probe(self, magnet: str, cancel_event: threading.Event | None = None) -> dict[str, Any]:
         module = _require_libtorrent()
         target = magnet.strip()
 
         clean_path = _clean_torrent_path(target)
-        if Path(clean_path).is_file() or clean_path.lower().endswith(".torrent"):
+        if not is_magnet_url(clean_path) and (Path(clean_path).is_file() or clean_path.lower().endswith(".torrent")):
             file_path = Path(clean_path)
             if not file_path.exists():
                 return {"ok": False, "engine": "torrent", "error": f"Torrent file not found: {clean_path}"}
@@ -372,12 +520,14 @@ class TorrentManager:
             timeout = max(5, int(self._settings_store.get().get("torrentMetadataTimeout") or 90))
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
+                if cancel_event and cancel_event.is_set():
+                    return {"ok": False, "engine": "torrent", "error": "Probe cancelled"}
                 if handle.has_metadata():
                     info = handle.get_torrent_info()
                     return {"ok": True, "engine": "torrent", "url": target, "torrent": _torrent_summary(info, target)}
                 status = handle.status()
-                if getattr(status, "error", None):
-                    return {"ok": False, "engine": "torrent", "error": str(status.error)}
+                if _status_error(status):
+                    return {"ok": False, "engine": "torrent", "error": _status_error(status)}
                 time.sleep(0.25)
             return {"ok": False, "engine": "torrent", "error": "Timed out while fetching torrent metadata"}
         except Exception as exc:  # noqa: BLE001
@@ -392,7 +542,21 @@ class TorrentManager:
                     log.debug("Could not remove metadata probe torrent", exc_info=True)
             shutil.rmtree(probe_path, ignore_errors=True)
 
-    def resolve_duplicate(self, url: str, directory: str, action: str | None = None) -> dict[str, Any]:
+    @staticmethod
+    def _existing_storage_path(directory: str, torrent_name: str | None) -> Path | None:
+        name = str(torrent_name or "").strip()
+        if not name:
+            return None
+        path = Path(directory).expanduser() / Path(name).name
+        return path if path.exists() else None
+
+    def resolve_duplicate(
+        self,
+        url: str,
+        directory: str,
+        action: str | None = None,
+        torrent_name: str | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             duplicate = next(
                 (
@@ -403,21 +567,39 @@ class TorrentManager:
                 ),
                 None,
             )
-        if duplicate is None:
+
+        if duplicate is not None:
+            if action == "skip":
+                return {"status": "ok", "skipped": True}
+            if action == "override":
+                self.remove(duplicate.id)
+                return {"status": "ok", "filename": None}
+            if action == "rename":
+                return {"status": "ok", "filename": None}
+            return {
+                "status": "duplicate",
+                "type": "job",
+                "existing": duplicate.snapshot(),
+                "filename": duplicate.data.get("filename") or duplicate.data.get("title") or "Torrent",
+                "suggestedName": f"{duplicate.data.get('title') or 'Torrent'} (1)",
+            }
+
+        existing_storage = self._existing_storage_path(directory, torrent_name)
+        if existing_storage is None:
             return {"status": "ok", "filename": None}
         if action == "skip":
             return {"status": "ok", "skipped": True}
-        if action == "override":
-            self.remove(duplicate.id)
+        if action == "resume":
             return {"status": "ok", "filename": None}
-        if action == "rename":
+        if action == "override":
+            self._trash_storage(existing_storage)
             return {"status": "ok", "filename": None}
         return {
             "status": "duplicate",
-            "type": "job",
-            "existing": duplicate.snapshot(),
-            "filename": duplicate.data.get("filename") or duplicate.data.get("title") or "Torrent",
-            "suggestedName": f"{duplicate.data.get('title') or 'Torrent'} (1)",
+            "type": "torrent",
+            "existing": str(existing_storage),
+            "filename": str(existing_storage.name),
+            "suggestedName": "",
         }
 
     def start(
@@ -433,14 +615,22 @@ class TorrentManager:
         with self._lock:
             self._jobs[job.id] = job
         self._emit(job, force=True)
-        future = self._executor.submit(self._run, job)
-        with self._lock:
-            self._worker_futures[job.id] = future
-        future.add_done_callback(lambda done: self._worker_futures.pop(job.id, None) if self._worker_futures.get(job.id) is done else None)
+        self._submit(job)
         return job
 
     def _run(self, job: TorrentJob) -> None:
-        module = _require_libtorrent()
+        if not self._acquire_work_slot(job):
+            with self._lock:
+                if job.pause_requested and job.data["status"] == "queued":
+                    job.data.update(status="paused", speed=None, eta=None)
+                    self._emit(job, force=True)
+            return
+        try:
+            self._run_with_slot(job)
+        finally:
+            self._work_slots.release()
+
+    def _run_with_slot(self, job: TorrentJob) -> None:
         handle = None
         try:
             Path(job.directory).expanduser().mkdir(parents=True, exist_ok=True)
@@ -451,41 +641,107 @@ class TorrentManager:
             with self._lock:
                 job.data["status"] = "downloading"
             self._emit(job, force=True)
-            priorities_applied = False
-            streaming_applied = False
+            last_piece_priorities: list[int] | None = None
+            last_deadline_plan: list[tuple[int, int]] = []
+            ordered_cache: tuple[Any, list[int]] | None = None
+            last_active_files: list[int] | None = None
 
             while True:
                 if job.cancel_event.is_set():
-                    self._remove_handle(handle, delete_files=False)
+                    self._remove_handle(handle)
                     with self._lock:
                         job.data.update(status="paused" if job.pause_requested else "cancelled", speed=None, eta=None)
                     self._emit(job, force=True)
                     return
-
                 status = handle.status()
+                files_list: list[dict[str, Any]] = []
+                all_selected_complete = False
                 if handle.has_metadata():
                     info = handle.get_torrent_info()
-                    if job.selected_files is not None and not priorities_applied:
-                        files = info.files()
-                        priorities = [1 if files.file_path(index) in job.selected_files else 0 for index in range(files.num_files())]
-                        handle.prioritize_files(priorities)
-                        priorities_applied = True
-                    if not streaming_applied:
-                        self._apply_streaming_priorities(handle, info, job)
-                        streaming_applied = True
+                    sequential_enabled = bool(
+                        self._settings_store.get().get("torrentSequentialDownload", True)
+                    )
+                    schedule_key = (
+                        id(info),
+                        tuple(sorted(job.selected_files)) if job.selected_files is not None else None,
+                        sequential_enabled,
+                    )
+                    if ordered_cache is None or ordered_cache[0] != schedule_key:
+                        ordered_cache = (
+                            schedule_key,
+                            self._ordered_file_indices(
+                                info,
+                                job,
+                                prioritize_playable=sequential_enabled,
+                            ),
+                        )
+                    ordered_files = ordered_cache[1]
+                    if job.selected_files is not None and not ordered_files:
+                        raise ValueError("None of the selected torrent files exist")
+                    active_files, last_piece_priorities = self._apply_file_schedule(
+                        handle,
+                        info,
+                        ordered_files,
+                        last_piece_priorities,
+                        last_active_files,
+                        sequential=sequential_enabled,
+                    )
+                    last_active_files = active_files
+                    if sequential_enabled:
+                        last_deadline_plan = self._apply_playback_deadlines(
+                            handle,
+                            info,
+                            active_files,
+                            getattr(status, "pieces", None),
+                            last_deadline_plan,
+                        )
+                    elif last_deadline_plan:
+                        self._clear_playback_deadlines(handle)
+                        last_deadline_plan = []
                     if not job.data.get("torrentName"):
-                        job.data["torrentName"] = str(info.name() or "Torrent")
-                        job.data["title"] = job.data["torrentName"]
-                        job.data["filename"] = job.data["torrentName"]
-                    total = int(info.total_size())
+                        with self._lock:
+                            job.data["torrentName"] = str(info.name() or "Torrent")
+                            # Preserve a user-supplied custom name; only fall
+                            # back to the torrent's own name otherwise.
+                            if not job.custom_filename and not job.data.get("title"):
+                                job.data["title"] = job.data["torrentName"]
+                                job.data["filename"] = job.data["torrentName"]
+                    files = info.files()
+                    file_prog = handle.file_progress()
+                    active_file_set = set(active_files)
+                    total = 0
+                    downloaded = 0
+                    all_selected_complete = bool(ordered_files)
+                    for i in ordered_files:
+                        f_path = str(files.file_path(i))
+                        f_size = int(files.file_size(i))
+                        f_done = min(f_size, int(file_prog[i]) if i < len(file_prog) else 0)
+                        total += f_size
+                        downloaded += f_done
+                        if f_done < f_size:
+                            all_selected_complete = False
+                        f_pct = (f_done / f_size * 100.0) if f_size > 0 else 100.0
+                        files_list.append({
+                            "path": f_path,
+                            "filename": Path(f_path).name,
+                            "size": f_size,
+                            "downloaded": f_done,
+                            "percent": max(0.0, min(100.0, f_pct)),
+                            "status": _torrent_file_status(i, f_size, f_done, active_file_set),
+                        })
+                    total = total or None
+                    # An all-zero-byte selection must not flip the job to
+                    # completed before libtorrent has actually finished it.
+                    if not total:
+                        all_selected_complete = False
                 else:
                     total = int(getattr(status, "total_wanted", 0) or 0) or None
-                downloaded = int(getattr(status, "total_done", 0) or 0)
+                    downloaded = int(getattr(status, "total_wanted_done", 0) or 0)
                 rate = int(getattr(status, "download_payload_rate", 0) or 0)
                 percent = (downloaded / total * 100) if total else float(getattr(status, "progress", 0) or 0) * 100
                 eta = int((total - downloaded) / rate) if total and rate > 0 and downloaded < total else None
                 with self._lock:
-                    job.data.update(
+                    job_update: dict[str, Any] = dict(
                         percent=max(0.0, min(100.0, percent)),
                         downloaded=downloaded,
                         total=total,
@@ -493,19 +749,23 @@ class TorrentManager:
                         eta=eta,
                         peers=int(getattr(status, "num_peers", 0) or 0),
                     )
+                    if files_list:
+                        job_update["files"] = files_list
+                    job.data.update(job_update)
                 self._emit(job)
-                if getattr(status, "is_seeding", False) or getattr(status, "is_finished", False):
-                    self._remove_handle(handle, delete_files=False)
+                status_error = _status_error(status)
+                if status_error:
+                    raise RuntimeError(status_error)
+                if all_selected_complete:
+                    self._remove_handle(handle)
                     with self._lock:
                         job.data.update(status="completed", percent=100.0, speed=None, eta=None)
                     self._emit(job, force=True)
                     return
-                if getattr(status, "error", None):
-                    raise RuntimeError(str(status.error))
                 time.sleep(0.25)
         except Exception as exc:  # noqa: BLE001
             if handle is not None:
-                self._remove_handle(handle, delete_files=False)
+                self._remove_handle(handle)
             with self._lock:
                 if job.cancel_event.is_set():
                     job.data.update(status="paused" if job.pause_requested else "cancelled", speed=None, eta=None)
@@ -515,47 +775,166 @@ class TorrentManager:
         finally:
             job.handle = None
 
-    def _apply_streaming_priorities(self, handle: Any, info: Any, job: TorrentJob) -> None:
-        """Enable sequential download and boost first/last pieces of video files."""
+    @staticmethod
+    def _ordered_file_indices(
+        info: Any,
+        job: TorrentJob,
+        *,
+        prioritize_playable: bool = False,
+    ) -> list[int]:
         files = info.files()
         selected = job.selected_files
-        video_files: list[int] = []
-        for index in range(files.num_files()):
-            path = str(files.file_path(index))
-            if selected is not None and path not in selected:
-                continue
-            if _is_video_file(path):
-                video_files.append(index)
-        if not video_files:
-            return
+        ordered_files = [
+            index
+            for index in range(files.num_files())
+            if selected is None or str(files.file_path(index)) in selected
+        ]
+        if prioritize_playable:
+            ordered_files.sort(
+                key=lambda index: (
+                    _playable_sort_rank(str(files.file_path(index))),
+                    index,
+                )
+            )
+        return ordered_files
 
-        module = _require_libtorrent()
-        try:
-            handle.set_flags(module.torrent_flags.sequential_download)
-        except AttributeError:
-            try:
-                handle.set_sequential_download(True)
-            except Exception:  # noqa: BLE001
-                log.debug("Could not enable sequential download")
+    def _apply_file_schedule(
+        self,
+        handle: Any,
+        info: Any,
+        ordered_files: list[int],
+        previous: list[int] | None,
+        previous_active: list[int] | None = None,
+        *,
+        sequential: bool = True,
+    ) -> tuple[list[int] | None, list[int] | None]:
+        """Prioritize pieces for the sequential playback window.
 
-        for index in video_files:
+        With ``sequential`` disabled the piece priorities are restored to the
+        libtorrent default so every selected file downloads in parallel instead
+        of being gated by the active-file window.
+        """
+        files = info.files()
+        progress = handle.file_progress()
+        # Deliberately reuses the global maxConcurrentDownloads setting as the
+        # per-torrent active-file window size; the cross-engine queue slot
+        # itself is shared via the work-slot limiter.
+        max_concurrent = max(1, int(self._settings_store.get().get("maxConcurrentDownloads") or 1))
+        pending_files = [
+            index
+            for index in ordered_files
+            if int(files.file_size(index)) > int(progress[index] if index < len(progress) else 0)
+        ]
+        active_files = pending_files[:max_concurrent]
+        # Piece priorities depend only on the active file set; skip the O(pieces)
+        # rebuild and the libtorrent call while the window is unchanged.
+        if previous is not None and active_files == previous_active:
+            return active_files, previous
+        if not sequential:
+            # Sequential mode is off: restore default piece priorities so all
+            # selected files download in parallel instead of one window at a time.
+            if previous is not None:
+                handle.prioritize_pieces([_DEFAULT_PIECE_PRIORITY] * int(info.num_pieces()))
+            return active_files, None
+        priorities = [0] * int(info.num_pieces())
+        for rank, index in enumerate(active_files):
             size = int(files.file_size(index))
             if size <= 0:
                 continue
-            first_piece = info.map_file(index, 0, 1).piece
-            last_piece = info.map_file(index, size - 1, 1).piece
-            for piece in {first_piece, last_piece}:
-                try:
-                    handle.piece_priority(piece, 7)
-                except Exception:  # noqa: BLE001
-                    log.debug("Could not set piece priority", piece=piece)
+            priority = max(1, 7 - rank)
+            first_piece = int(info.map_file(index, 0, 1).piece)
+            last_piece = int(info.map_file(index, size - 1, 1).piece)
+            for piece in range(max(0, first_piece), min(len(priorities) - 1, last_piece) + 1):
+                priorities[piece] = max(priorities[piece], priority)
+        if previous != priorities:
+            handle.prioritize_pieces(priorities)
+        return active_files, priorities
 
-    def _remove_handle(self, handle: Any, *, delete_files: bool) -> None:
+    @staticmethod
+    def _clear_playback_deadlines(handle: Any) -> None:
+        try:
+            handle.clear_piece_deadlines()
+        except Exception:  # noqa: BLE001
+            log.debug("Could not clear playback piece deadlines")
+
+    def _apply_playback_deadlines(
+        self,
+        handle: Any,
+        info: Any,
+        active_files: list[int],
+        have_pieces: Sequence[bool] | None,
+        previous: list[tuple[int, int]],
+    ) -> list[tuple[int, int]]:
+        """Keep a time-critical header, footer, and moving playback window."""
+        files = info.files()
+        piece_length = int(info.piece_length() or 0) or 1
+        header_pieces = min(
+            _PLAYBACK_MAX_WINDOW_PIECES,
+            _pieces_for_bytes(_PLAYBACK_HEADER_BYTES, piece_length),
+        )
+        footer_pieces = min(
+            _PLAYBACK_MAX_WINDOW_PIECES,
+            _pieces_for_bytes(_PLAYBACK_FOOTER_BYTES, piece_length),
+        )
+        window_pieces = min(
+            _PLAYBACK_MAX_WINDOW_PIECES,
+            max(4, _pieces_for_bytes(_PLAYBACK_WINDOW_BYTES, piece_length)),
+        )
+        known_pieces: Sequence[bool] = have_pieces or ()
+        planned: list[tuple[int, int]] = []
+        claimed: set[int] = set()
+        for rank, index in enumerate(active_files):
+            path = str(files.file_path(index))
+            if not _is_playable_file(path):
+                continue
+            size = int(files.file_size(index))
+            if size <= 0:
+                continue
+            try:
+                first_piece = int(info.map_file(index, 0, 1).piece)
+                last_piece = int(info.map_file(index, size - 1, 1).piece)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            for piece, deadline in _playback_deadline_plan(
+                first_piece,
+                last_piece,
+                known_pieces,
+                header_pieces=header_pieces,
+                footer_pieces=footer_pieces,
+                window_pieces=window_pieces,
+                deadline_step_ms=_PLAYBACK_DEADLINE_STEP_MS,
+                include_footer=_needs_footer_index(path),
+                deadline_offset_ms=rank * _PLAYBACK_FILE_DEADLINE_GAP_MS,
+            ):
+                if piece in claimed:
+                    continue
+                claimed.add(piece)
+                planned.append((piece, deadline))
+        if planned == previous:
+            return previous
+        previous_pieces = {piece for piece, _deadline in previous}
+        current_pieces = {piece for piece, _deadline in planned}
+        stale = previous_pieces - current_pieces
+        if len(stale) > 16:
+            self._clear_playback_deadlines(handle)
+        else:
+            for piece in stale:
+                try:
+                    handle.reset_piece_deadline(piece)
+                except Exception:  # noqa: BLE001
+                    log.debug("Could not reset playback piece deadline", piece=piece)
+        for piece, deadline in planned:
+            try:
+                handle.set_piece_deadline(piece, deadline)
+            except Exception:  # noqa: BLE001
+                log.debug("Could not set playback piece deadline", piece=piece)
+        return planned
+
+    def _remove_handle(self, handle: Any) -> None:
         module = _require_libtorrent()
-        flags = module.options_t.delete_files if delete_files else 0
         try:
             with self._session_lock:
-                self._session.remove_torrent(handle, flags)
+                self._session.remove_torrent(handle, 0)
         except Exception:  # noqa: BLE001
             log.debug("Could not remove torrent handle", exc_info=True)
 
@@ -564,18 +943,24 @@ class TorrentManager:
         if not job or job.data["status"] not in {"queued", "paused", "downloading", "postprocessing"}:
             return False
         job.cancel_event.set()
-        if job.data["status"] in {"queued", "paused"}:
-            with self._lock:
-                job.data.update(status="cancelled", speed=None, eta=None)
-            self._emit(job, force=True)
+        self._cancel_queued_worker(job_id)
+        with self._lock:
+            job.data.update(status="cancelled", speed=None, eta=None)
+        self._emit(job, force=True)
         return True
 
     def pause(self, job_id: str) -> bool:
         job = self.get(job_id)
         if not job or job.data["status"] not in {"queued", "downloading"}:
             return False
+        status = job.data["status"]
         job.pause_requested = True
         job.cancel_event.set()
+        if status == "queued":
+            self._cancel_queued_worker(job_id)
+            with self._lock:
+                job.data.update(status="paused", speed=None, eta=None)
+            self._emit(job, force=True)
         return True
 
     def resume(self, job_id: str) -> bool:
@@ -587,9 +972,19 @@ class TorrentManager:
         with self._lock:
             job.data.update(status="queued", error=None, speed=None, eta=None)
         self._emit(job, force=True)
-        future = self._executor.submit(self._run, job)
         with self._lock:
-            self._worker_futures[job.id] = future
+            existing = self._worker_futures.get(job.id)
+        if existing is None or existing.done():
+            self._submit(job)
+        else:
+            # The old worker is still winding down after a pause and may emit
+            # "paused" over the resumed state; wait for it, then restart.
+            try:
+                existing.result(timeout=10)
+            except Exception:  # noqa: BLE001
+                pass
+            if not job.data.get("removed"):
+                self._submit(job)
         return True
 
     def _storage_path(self, job: TorrentJob, handle: Any | None = None) -> Path | None:
@@ -618,23 +1013,36 @@ class TorrentManager:
             return
         try:
             send2trash(str(path))
-        except OSError:
+        except Exception:  # noqa: BLE001
             log.exception("Could not move incomplete torrent storage to trash", path=str(path))
 
     def remove(self, job_id: str) -> bool:
         job = self.get(job_id)
         if not job:
             return False
-        status = job.data["status"]
-        handle = job.handle
-        storage_path = self._storage_path(job, handle) if status != "completed" else None
-        job.cancel_event.set()
-        if handle is not None:
-            self._remove_handle(handle, delete_files=False)
-        self._trash_storage(storage_path)
+        # Mark removed and drop from the in-memory index before cancelling so the
+        # worker's final "cancelled" emit is suppressed and the UI does not flicker.
         with self._lock:
             job.data["removed"] = True
             self._jobs.pop(job_id, None)
+            # Tests may build the manager without __init__; tolerate missing maps.
+            getattr(self, "_last_emit", {}).pop(job_id, None)
+            # Keep _db_tasks: _delete_persisted must chain after any in-flight
+            # persist, otherwise a late upsert can resurrect the deleted row.
+        status = job.data["status"]
+        handle = job.handle
+        # Without metadata the real storage name is unknown; trashing a path
+        # derived from the user-supplied filename could hit an unrelated file.
+        # torrentName is only set once metadata has been seen.
+        storage_path = (
+            self._storage_path(job, handle)
+            if status != "completed" and job.data.get("torrentName")
+            else None
+        )
+        job.cancel_event.set()
+        if handle is not None:
+            self._remove_handle(handle)
+        self._trash_storage(storage_path)
         self._delete_persisted(job_id)
         return True
 
@@ -656,6 +1064,9 @@ class TorrentManager:
         await self._loop.run_in_executor(None, lambda: self._executor.shutdown(wait=True, cancel_futures=True))
         with self._session_lock:
             self._session.pause()
+        pending_listeners = list(self._listener_tasks)
+        if pending_listeners:
+            await asyncio.gather(*pending_listeners, return_exceptions=True)
         pending = list(self._db_tasks.values())
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)

@@ -18,11 +18,16 @@ import {
 	Tabs,
 	Typography,
 } from "@heroui/react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
 	Archive,
 	Check,
 	Clipboard,
 	Download,
+	File,
+	FileAudio,
+	FileText,
 	FileVideo,
 	FolderOpen,
 	HardDriveDownload,
@@ -32,9 +37,11 @@ import {
 	Trash2,
 	X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { useBackend } from "../hooks/useBackend";
 import type {
+	DuplicateAction,
+	DuplicateInfo,
 	FormatRow,
 	Job,
 	JobStatus,
@@ -42,6 +49,7 @@ import type {
 	ProbeResponse,
 	Settings,
 	TorrentInfo,
+	TorrentProgressFile,
 } from "../lib/backend";
 import {
 	formatBytes,
@@ -66,6 +74,45 @@ const ACTIVE_STATUSES = new Set<JobStatus>([
 	"paused",
 	"postprocessing",
 ]);
+
+const DIRECT_FILE_EXTENSIONS = new Set([
+	"7z",
+	"bz2",
+	"csv",
+	"deb",
+	"dmg",
+	"doc",
+	"docx",
+	"exe",
+	"gz",
+	"iso",
+	"json",
+	"msi",
+	"pdf",
+	"pkg",
+	"ppt",
+	"pptx",
+	"rar",
+	"rpm",
+	"tar",
+	"txt",
+	"xls",
+	"xlsx",
+	"xml",
+	"xz",
+	"zip",
+]);
+
+function directFileMediaType(value: string): string | undefined {
+	try {
+		const extension = new URL(value).pathname.split(".").pop()?.toLowerCase();
+		return extension && DIRECT_FILE_EXTENSIONS.has(extension)
+			? "file"
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 function matchesFilter(job: Job, filter: Filter): boolean {
 	if (filter === "active") return ACTIVE_STATUSES.has(job.status);
@@ -108,18 +155,56 @@ const FALLBACK_FORMAT: FormatRow = {
 	sizeIsEstimate: false,
 };
 
+function getFormatHeight(format: FormatRow): number | null {
+	if (format.kind === "audio") return null;
+	const text = [format.resolution, format.label].filter(Boolean).join(" ");
+	const heightMatch = text.match(/(\d{2,4})p(?:\d{2,3})?/i);
+	if (heightMatch) return Number.parseInt(heightMatch[1], 10);
+	const dimMatch = text.match(/(\d{3,5})x(\d{3,5})/i);
+	if (dimMatch) return Number.parseInt(dimMatch[2], 10);
+	const wordMatch = text.match(/\b(4k|uhd|8k|fhd|qhd|2k|hd)\b/i);
+	if (wordMatch) {
+		const known: Record<string, number> = {
+			"4k": 2160,
+			uhd: 2160,
+			"8k": 4320,
+			fhd: 1080,
+			qhd: 1440,
+			"2k": 1440,
+			hd: 720,
+		};
+		return known[wordMatch[1].toLowerCase()] ?? null;
+	}
+	return null;
+}
+
+function isLowResolution(format: FormatRow): boolean {
+	if (format.kind === "audio") return false;
+	const height = getFormatHeight(format);
+	return height !== null && height < 240;
+}
+
 function TitleCell({ job }: { job: Job }) {
+	const Icon = getFileIcon(job.filename || job.url, job.mediaType);
+	const [error, setError] = useState(false);
+	// The backend swaps a protected thumbnail URL for a data URI shortly after
+	// start; retry the <img> when the source changes instead of staying latched.
+	useEffect(() => setError(false), [job.thumbnail]);
+
+	const showThumbnail = job.thumbnail && !error;
+
 	return (
 		<div className="flex min-w-0 items-center gap-3">
-			<div className="flex h-11 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-surface-tertiary text-muted">
-				{job.thumbnail ? (
+			<div className="flex h-11 w-20 shrink-0 items-center justify-center overflow-hidden rounded-md bg-surface-tertiary text-muted">
+				{showThumbnail ? (
 					<img
 						alt={job.title || "Download thumbnail"}
-						className="size-full object-contain p-0.5"
+						className="h-full w-full object-cover"
 						src={job.thumbnail}
+						onError={() => setError(true)}
 					/>
 				) : (
-					<FileVideo aria-hidden className="size-5" />
+					<Icon aria-hidden className="size-5" />
 				)}
 			</div>
 			<div className="min-w-0">
@@ -205,34 +290,57 @@ function SizeCell({ job }: { job: Job }) {
 	);
 }
 
-type ContextMenuState = { job: Job; x: number; y: number } | null;
+type ContextMenuState = { x: number; y: number } | null;
+
+const STATUS_ACTIONS = {
+	pause: (status: JobStatus) => status === "queued" || status === "downloading",
+	resume: (status: JobStatus) =>
+		status === "paused" || status === "failed" || status === "cancelled",
+	cancel: (status: JobStatus) =>
+		status === "queued" || status === "downloading",
+};
+
+function actionTargets(
+	jobs: Job[],
+	action: "pause" | "resume" | "cancel" | "remove",
+) {
+	if (action === "remove") return jobs;
+	return jobs.filter((job) => STATUS_ACTIONS[action](job.status));
+}
+
+function canReveal(job: Job) {
+	return (
+		(job.status === "completed" || job.isPlaylist) &&
+		(Boolean(job.finalFilepath) ||
+			Boolean(job.filename && job.directory) ||
+			Boolean(job.directory))
+	);
+}
 
 function JobContextMenu({
 	state,
+	selectedJobs,
 	backend,
 	onProperties,
 	onClose,
 	onError,
 }: {
 	state: Exclude<ContextMenuState, null>;
+	selectedJobs: Job[];
 	backend: Backend;
 	onProperties: (job: Job) => void;
 	onClose: () => void;
 	onError: (message: string) => void;
 }) {
-	const canPause =
-		state.job.status === "queued" || state.job.status === "downloading";
-	const canResume =
-		state.job.status === "paused" ||
-		state.job.status === "failed" ||
-		state.job.status === "cancelled";
-	const canCancel =
-		state.job.status === "queued" || state.job.status === "downloading";
-	const canReveal =
-		(state.job.status === "completed" || state.job.isPlaylist) &&
-		(Boolean(state.job.finalFilepath) ||
-			Boolean(state.job.filename && state.job.directory) ||
-			Boolean(state.job.directory));
+	const isSingle = selectedJobs.length === 1;
+
+	const pauseTargets = actionTargets(selectedJobs, "pause");
+	const resumeTargets = actionTargets(selectedJobs, "resume");
+	const cancelTargets = actionTargets(selectedJobs, "cancel");
+	const removeTargets = actionTargets(selectedJobs, "remove");
+
+	const canShowReveal = isSingle && canReveal(selectedJobs[0]);
+	const canShowProperties = isSingle;
 
 	const left = Math.min(state.x, window.innerWidth - 256);
 	const top = Math.min(state.y, window.innerHeight - 288);
@@ -241,49 +349,64 @@ function JobContextMenu({
 		onClose();
 		if (["pause", "resume", "cancel", "remove"].includes(key)) {
 			const action = key as "pause" | "resume" | "cancel" | "remove";
-			const response = await backend.jobAction(state.job.id, action);
-			if (!response.ok) {
-				onError(response.error ?? `Could not ${action} the download`);
-			}
+			const targets = actionTargets(selectedJobs, action);
+			if (targets.length === 0) return;
+			const results = await Promise.all(
+				targets.map((job) => backend.jobAction(job.id, action)),
+			);
+			const error = results
+				.map((res) => res.error)
+				.filter(Boolean)
+				.join("; ");
+			if (error) onError(`Could not ${action}: ${error}`);
 			return;
 		}
 		if (key === "reveal") {
-			const result = await backend.reveal(state.job.id);
+			const job = selectedJobs[0];
+			if (!job) return;
+			const result = await backend.reveal(job.id);
 			if (!result.ok) {
 				onError(result.error ?? "Could not reveal file");
 			}
 			return;
 		}
-		if (key === "properties") onProperties(state.job);
+		if (key === "properties") onProperties(selectedJobs[0]);
 	};
+
+	const plural = (label: string, count: number) =>
+		count <= 1 ? label : `${label} ${count}`;
+
+	const label = isSingle
+		? selectedJobs[0]?.title || selectedJobs[0]?.url || "selected"
+		: `${selectedJobs.length} selected`;
 
 	return (
 		<Dropdown isOpen onOpenChange={(open) => !open && onClose()}>
 			<Dropdown.Popover
-				aria-label={`Actions for ${state.job.title || state.job.url}`}
+				aria-label={`Actions for ${label}`}
 				className="fixed z-50 min-w-56"
 				style={{ left: Math.max(8, left), top: Math.max(8, top) }}
 			>
 				<Dropdown.Menu onAction={(key) => handleAction(String(key))}>
-					{canPause ? (
+					{pauseTargets.length > 0 ? (
 						<Dropdown.Item id="pause" textValue="Pause">
 							<Pause aria-hidden className="size-4 text-muted" />
-							<Label>Pause</Label>
+							<Label>{plural("Pause", pauseTargets.length)}</Label>
 						</Dropdown.Item>
 					) : null}
-					{canResume ? (
+					{resumeTargets.length > 0 ? (
 						<Dropdown.Item id="resume" textValue="Resume">
 							<Play aria-hidden className="size-4 text-muted" />
-							<Label>Resume</Label>
+							<Label>{plural("Resume", resumeTargets.length)}</Label>
 						</Dropdown.Item>
 					) : null}
-					{canCancel ? (
+					{cancelTargets.length > 0 ? (
 						<Dropdown.Item id="cancel" textValue="Cancel">
 							<X aria-hidden className="size-4 text-muted" />
-							<Label>Cancel</Label>
+							<Label>{plural("Cancel", cancelTargets.length)}</Label>
 						</Dropdown.Item>
 					) : null}
-					{canReveal ? (
+					{canShowReveal ? (
 						<Dropdown.Item id="reveal" textValue="Reveal in Finder or Explorer">
 							<FolderOpen aria-hidden className="size-4 text-muted" />
 							<Label>
@@ -292,13 +415,15 @@ function JobContextMenu({
 							</Label>
 						</Dropdown.Item>
 					) : null}
-					<Dropdown.Item id="properties" textValue="Properties">
-						<Clipboard aria-hidden className="size-4 text-muted" />
-						<Label>Properties</Label>
-					</Dropdown.Item>
+					{canShowProperties ? (
+						<Dropdown.Item id="properties" textValue="Properties">
+							<Clipboard aria-hidden className="size-4 text-muted" />
+							<Label>Properties</Label>
+						</Dropdown.Item>
+					) : null}
 					<Dropdown.Item id="remove" textValue="Remove" variant="danger">
 						<Trash2 aria-hidden className="size-4 text-danger" />
-						<Label>Remove</Label>
+						<Label>{plural("Remove", removeTargets.length)}</Label>
 					</Dropdown.Item>
 				</Dropdown.Menu>
 			</Dropdown.Popover>
@@ -306,12 +431,35 @@ function JobContextMenu({
 	);
 }
 
-function JobTableHeader() {
+function JobTableHeader({
+	allSelected,
+	isIndeterminate,
+	onToggleAll,
+}: {
+	allSelected: boolean;
+	isIndeterminate: boolean;
+	onToggleAll: () => void;
+}) {
 	return (
 		<div
 			aria-hidden="true"
-			className="mb-2 grid min-w-230 w-full grid-cols-[40%_14%_28%_18%] rounded-xl border border-separator bg-surface-tertiary text-xs font-semibold text-muted shadow-sm"
+			className="mb-2 grid min-w-230 w-full grid-cols-[3rem_minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] rounded-xl border border-separator bg-surface-tertiary text-xs font-semibold text-muted shadow-sm"
 		>
+			<div className="flex items-center justify-center px-4 py-3">
+				<Checkbox
+					aria-label="Select all"
+					isIndeterminate={isIndeterminate}
+					isSelected={allSelected}
+					variant="secondary"
+					onChange={() => onToggleAll()}
+				>
+					<Checkbox.Content>
+						<Checkbox.Control>
+							<Checkbox.Indicator />
+						</Checkbox.Control>
+					</Checkbox.Content>
+				</Checkbox>
+			</div>
 			<span className="px-4 py-3 text-start">Title</span>
 			<span className="px-4 py-3 text-center">Status</span>
 			<span className="px-4 py-3 text-start">Progress</span>
@@ -339,12 +487,12 @@ function groupJobs(jobs: Job[]): JobGroup[] {
 	}
 	roots.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
 	return roots.map((root) => {
-		const children = (byParent.get(root.id) ?? []).filter((child) =>
-			(root.childIds ?? []).includes(child.id),
-		);
-		if (root.childIds) {
+		const children = byParent.get(root.id) ?? [];
+		if (root.childIds && root.childIds.length > 0) {
 			const order = new Map(root.childIds.map((id, index) => [id, index]));
-			children.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+			children.sort(
+				(a, b) => (order.get(a.id) ?? 9999) - (order.get(b.id) ?? 9999),
+			);
 		}
 		return { root, children };
 	});
@@ -354,24 +502,33 @@ function JobRow({
 	job,
 	isChild,
 	className,
+	isSelected,
+	onToggle,
 	onContextMenu,
 }: {
 	job: Job;
 	isChild?: boolean;
 	className?: string;
+	isSelected: boolean;
+	onToggle: (id: string) => void;
 	onContextMenu: (job: Job, x: number, y: number) => void;
 }) {
 	const titleIndent = isChild ? "ps-8" : "ps-4";
+	const base = isSelected
+		? "bg-surface-tertiary ring-1 ring-inset ring-accent"
+		: "bg-surface-secondary hover:bg-surface-hover";
 	return (
 		<div
 			className={[
-				"group grid cursor-context-menu grid-cols-[40%_14%_28%_18%] items-center bg-surface-secondary hover:bg-surface-hover",
+				"group grid cursor-context-menu grid-cols-[3rem_minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
+				base,
 				className || "",
 			].join(" ")}
 			onContextMenu={(event) => {
 				event.preventDefault();
 				onContextMenu(job, event.clientX, event.clientY);
 			}}
+			tabIndex={0}
 			onKeyDown={(event) => {
 				if (
 					event.key !== "ContextMenu" &&
@@ -387,6 +544,23 @@ function JobRow({
 				);
 			}}
 		>
+			<div
+				className="flex items-center justify-center px-4 py-4"
+				onClick={(event) => event.stopPropagation()}
+			>
+				<Checkbox
+					aria-label={`Select ${job.title || job.url}`}
+					isSelected={isSelected}
+					variant="secondary"
+					onChange={() => onToggle(job.id)}
+				>
+					<Checkbox.Content>
+						<Checkbox.Control>
+							<Checkbox.Indicator />
+						</Checkbox.Control>
+					</Checkbox.Content>
+				</Checkbox>
+			</div>
 			<div className={`min-w-0 px-4 py-4 ${titleIndent}`}>
 				<TitleCell job={job} />
 			</div>
@@ -405,19 +579,37 @@ function JobRow({
 
 function ParentGroup({
 	group,
+	selectedIds,
+	onToggle,
 	onContextMenu,
 }: {
 	group: JobGroup;
+	selectedIds: Set<string>;
+	onToggle: (id: string) => void;
 	onContextMenu: (job: Job, x: number, y: number) => void;
 }) {
 	const { root, children } = group;
+	const isSelected = selectedIds.has(root.id);
+	const rootClass = isSelected
+		? "bg-surface-tertiary ring-1 ring-inset ring-accent"
+		: "bg-surface-secondary hover:bg-surface-hover";
 	return (
-		<Accordion className="w-full" hideSeparator variant="surface">
-			<Accordion.Item id={root.id}>
+		<Accordion
+			className="w-full overflow-hidden rounded-2xl"
+			hideSeparator
+			variant="surface"
+		>
+			<Accordion.Item
+				className="w-full overflow-hidden rounded-2xl"
+				id={root.id}
+			>
 				<Accordion.Heading>
 					<Accordion.Trigger className="w-full p-0">
 						<div
-							className="group grid w-full cursor-context-menu grid-cols-[40%_14%_28%_18%] items-center rounded-t-2xl bg-surface-secondary hover:bg-surface-hover"
+							className={[
+								"group grid w-full cursor-context-menu grid-cols-[3rem_minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
+								rootClass,
+							].join(" ")}
 							onContextMenu={(event) => {
 								event.preventDefault();
 								onContextMenu(root, event.clientX, event.clientY);
@@ -437,11 +629,28 @@ function ParentGroup({
 								);
 							}}
 						>
+							<div
+								className="flex items-center justify-center px-4 py-4"
+								onClick={(event) => event.stopPropagation()}
+							>
+								<Checkbox
+									aria-label={`Select ${root.title || root.url}`}
+									isSelected={selectedIds.has(root.id)}
+									variant="secondary"
+									onChange={() => onToggle(root.id)}
+								>
+									<Checkbox.Content>
+										<Checkbox.Control>
+											<Checkbox.Indicator />
+										</Checkbox.Control>
+									</Checkbox.Content>
+								</Checkbox>
+							</div>
 							<div className="flex min-w-0 items-center gap-2 px-4 py-4 ps-4">
+								<Accordion.Indicator className="shrink-0 text-muted" />
 								<span className="min-w-0 flex-1">
 									<TitleCell job={root} />
 								</span>
-								<Accordion.Indicator className="shrink-0 text-muted" />
 							</div>
 							<div className="px-4 py-4 text-center">
 								<StatusChip status={root.status} />
@@ -456,7 +665,7 @@ function ParentGroup({
 					</Accordion.Trigger>
 				</Accordion.Heading>
 				<Accordion.Panel>
-					<div className="overflow-hidden rounded-b-2xl bg-surface-secondary">
+					<div className="overflow-hidden bg-surface-secondary border-t border-separator">
 						{children.map((child, index) => (
 							<JobRow
 								className={
@@ -465,9 +674,203 @@ function ParentGroup({
 										: ""
 								}
 								isChild
+								isSelected={selectedIds.has(child.id)}
 								job={child}
 								key={child.id}
 								onContextMenu={onContextMenu}
+								onToggle={onToggle}
+							/>
+						))}
+					</div>
+				</Accordion.Panel>
+			</Accordion.Item>
+		</Accordion>
+	);
+}
+
+function getFileIcon(filename: string, mediaType?: string) {
+	const ext =
+		filename
+			.split(/[?#]/, 1)[0]
+			.split("/")
+			.pop()
+			?.split(".")
+			.pop()
+			?.toLowerCase() || "";
+	if (["mp4", "mkv", "webm", "avi", "mov", "flv", "wmv", "m4v"].includes(ext)) {
+		return FileVideo;
+	}
+	if (["mp3", "m4a", "flac", "aac", "wav", "ogg", "opus"].includes(ext)) {
+		return FileAudio;
+	}
+	if (["txt", "pdf", "doc", "docx", "srt", "vtt", "nfo"].includes(ext)) {
+		return FileText;
+	}
+	if (["zip", "rar", "7z", "tar", "gz", "bz2", "iso"].includes(ext)) {
+		return Archive;
+	}
+	if (mediaType === "audio") return FileAudio;
+	if (mediaType === "video") return FileVideo;
+	return File;
+}
+
+function TorrentFileRow({
+	file,
+	jobStatus,
+	isLast,
+}: {
+	file: TorrentProgressFile;
+	jobStatus: JobStatus;
+	isLast: boolean;
+}) {
+	const Icon = getFileIcon(file.filename);
+	const fileStatus: JobStatus =
+		file.percent >= 100
+			? "completed"
+			: jobStatus === "downloading"
+				? file.status
+				: jobStatus;
+	const isQueued = fileStatus === "queued";
+
+	return (
+		<div
+			className={`grid grid-cols-[3rem_minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center bg-surface-secondary py-3 text-xs ${
+				!isLast ? "border-b border-separator" : ""
+			}`}
+		>
+			<div />
+			<div className="flex min-w-0 items-center gap-2.5 px-4 ps-8">
+				<Icon className="size-4 shrink-0 text-muted" />
+				<span
+					className="truncate font-medium text-foreground"
+					title={file.filename}
+				>
+					{file.filename}
+				</span>
+			</div>
+			<div className="px-4 text-center">
+				<StatusChip status={fileStatus} />
+			</div>
+			<div className="px-4">
+				<div className="space-y-1">
+					<ProgressBar
+						aria-label={`${file.filename} progress`}
+						className="h-1.5 w-full"
+						value={isQueued ? 0 : Math.max(0, Math.min(100, file.percent))}
+					>
+						<ProgressBar.Track className="h-1.5 overflow-hidden rounded-full bg-surface-tertiary">
+							<ProgressBar.Fill className="h-full bg-primary transition-all duration-300" />
+						</ProgressBar.Track>
+					</ProgressBar>
+					<div className="flex justify-between text-[10px] text-muted">
+						<span>{isQueued ? "Waiting" : `${file.percent.toFixed(1)}%`}</span>
+					</div>
+				</div>
+			</div>
+			<div className="px-4 text-center text-muted">
+				{isQueued
+					? formatBytes(file.size)
+					: `${formatBytes(file.downloaded)} / ${formatBytes(file.size)}`}
+			</div>
+		</div>
+	);
+}
+
+function TorrentGroup({
+	job,
+	selectedIds,
+	onToggle,
+	onContextMenu,
+}: {
+	job: Job;
+	selectedIds: Set<string>;
+	onToggle: (id: string) => void;
+	onContextMenu: (job: Job, x: number, y: number) => void;
+}) {
+	const files = job.files || [];
+	const isSelected = selectedIds.has(job.id);
+	const rootClass = isSelected
+		? "bg-surface-tertiary ring-1 ring-inset ring-accent"
+		: "bg-surface-secondary hover:bg-surface-hover";
+	return (
+		<Accordion
+			className="w-full overflow-hidden rounded-2xl"
+			hideSeparator
+			variant="surface"
+		>
+			<Accordion.Item
+				className="w-full overflow-hidden rounded-2xl"
+				id={job.id}
+			>
+				<Accordion.Heading>
+					<Accordion.Trigger className="w-full p-0">
+						<div
+							className={[
+								"group grid w-full cursor-context-menu grid-cols-[3rem_minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
+								rootClass,
+							].join(" ")}
+							onContextMenu={(event) => {
+								event.preventDefault();
+								onContextMenu(job, event.clientX, event.clientY);
+							}}
+							onKeyDown={(event) => {
+								if (
+									event.key !== "ContextMenu" &&
+									!(event.shiftKey && event.key === "F10")
+								)
+									return;
+								event.preventDefault();
+								const rect = event.currentTarget.getBoundingClientRect();
+								onContextMenu(
+									job,
+									rect.left + rect.width / 2,
+									rect.top + rect.height / 2,
+								);
+							}}
+						>
+							<div
+								className="flex items-center justify-center px-4 py-4"
+								onClick={(event) => event.stopPropagation()}
+							>
+								<Checkbox
+									aria-label={`Select ${job.title || job.url}`}
+									isSelected={selectedIds.has(job.id)}
+									variant="secondary"
+									onChange={() => onToggle(job.id)}
+								>
+									<Checkbox.Content>
+										<Checkbox.Control>
+											<Checkbox.Indicator />
+										</Checkbox.Control>
+									</Checkbox.Content>
+								</Checkbox>
+							</div>
+							<div className="flex min-w-0 items-center gap-2 px-4 py-4 ps-4">
+								<Accordion.Indicator className="shrink-0 text-muted" />
+								<span className="min-w-0 flex-1">
+									<TitleCell job={job} />
+								</span>
+							</div>
+							<div className="px-4 py-4 text-center">
+								<StatusChip status={job.status} />
+							</div>
+							<div className="px-4 py-4">
+								<ProgressCell job={job} />
+							</div>
+							<div className="px-4 py-4 text-center">
+								<SizeCell job={job} />
+							</div>
+						</div>
+					</Accordion.Trigger>
+				</Accordion.Heading>
+				<Accordion.Panel>
+					<div className="overflow-hidden bg-surface-secondary border-t border-separator">
+						{files.map((file, index) => (
+							<TorrentFileRow
+								file={file}
+								isLast={index === files.length - 1}
+								jobStatus={job.status}
+								key={file.path || index}
 							/>
 						))}
 					</div>
@@ -479,29 +882,58 @@ function ParentGroup({
 
 function JobGroupList({
 	groups,
+	selectedIds,
+	allSelected,
+	isIndeterminate,
+	onToggle,
+	onToggleAll,
 	onContextMenu,
 }: {
 	groups: JobGroup[];
+	selectedIds: Set<string>;
+	allSelected: boolean;
+	isIndeterminate: boolean;
+	onToggle: (id: string) => void;
+	onToggleAll: () => void;
 	onContextMenu: (job: Job, x: number, y: number) => void;
 }) {
 	return (
 		<div className="w-full overflow-x-auto">
 			<div className="min-w-230 space-y-2">
-				<JobTableHeader />
-				<ScrollShadow className="max-h-[520px] space-y-2 pr-1" visibility="auto">
+				<JobTableHeader
+					allSelected={allSelected}
+					isIndeterminate={isIndeterminate}
+					onToggleAll={onToggleAll}
+				/>
+				<ScrollShadow className="max-h-130 space-y-2 pr-1" visibility="auto">
 					{groups.map((group) =>
-						group.children.length ? (
+						group.root.isPlaylist || group.children.length > 0 ? (
 							<ParentGroup
 								group={group}
 								key={group.root.id}
+								selectedIds={selectedIds}
 								onContextMenu={onContextMenu}
+								onToggle={onToggle}
+							/>
+						) : (group.root.engine === "torrent" ||
+								group.root.mediaType === "torrent") &&
+							group.root.files &&
+							group.root.files.length > 0 ? (
+							<TorrentGroup
+								job={group.root}
+								key={group.root.id}
+								selectedIds={selectedIds}
+								onContextMenu={onContextMenu}
+								onToggle={onToggle}
 							/>
 						) : (
 							<JobRow
 								className="rounded-2xl"
+								isSelected={selectedIds.has(group.root.id)}
 								job={group.root}
 								key={group.root.id}
 								onContextMenu={onContextMenu}
+								onToggle={onToggle}
 							/>
 						),
 					)}
@@ -557,11 +989,11 @@ function PlaylistSummary({ probe }: { probe: ProbeResponse }) {
 
 	return (
 		<Card
-			className="gap-4 border border-separator bg-surface-secondary p-4 shadow-none"
+			className="gap-4 border border-separator bg-surface-tertiary p-4 shadow-sm"
 			variant="transparent"
 		>
 			<div className="flex items-center gap-4">
-				<div className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-surface-tertiary text-muted">
+				<div className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-surface-secondary text-muted">
 					{result.thumbnail ? (
 						<img
 							alt={title || "Playlist thumbnail"}
@@ -627,7 +1059,7 @@ function PlaylistPanel({
 				const isCurrent = currentEntryId && entry.id === currentEntryId;
 				return (
 					<div
-						className="flex items-start gap-3 rounded-xl border border-separator bg-surface-secondary p-3"
+						className={`flex items-start gap-3 rounded-xl border p-3 transition-colors ${selected ? "border-accent bg-surface-tertiary" : "border-separator bg-surface-secondary hover:border-foreground/20 hover:bg-surface-tertiary"}`}
 						key={entry.url}
 					>
 						<Checkbox
@@ -654,7 +1086,10 @@ function PlaylistPanel({
 						</div>
 						<div className="min-w-0 flex-1">
 							<div className="flex flex-wrap items-center gap-2">
-								<Typography className="line-clamp-2 font-medium" type="body-sm">
+								<Typography
+									className={`line-clamp-2 ${selected ? "font-semibold text-foreground" : "font-medium text-foreground"}`}
+									type="body-sm"
+								>
 									{entry.title}
 								</Typography>
 								{isCurrent ? (
@@ -680,23 +1115,41 @@ function PlaylistPanel({
 	);
 }
 
-function MediaSummary({ probe }: { probe: ProbeResponse }) {
+function stemFromName(name: string): string {
+	const lastDot = name.lastIndexOf(".");
+	return lastDot > 0 ? name.slice(0, lastDot) : name;
+}
+
+function MediaSummary({
+	probe,
+	selectedFormat,
+}: {
+	probe: ProbeResponse;
+	selectedFormat?: FormatRow;
+}) {
 	const result = probe.result;
 	if (!result) return null;
 
+	const isAudio = selectedFormat?.kind === "audio";
+	const filename = result.filename || result.webpageUrl;
+	const displayFilename =
+		isAudio && filename ? `${stemFromName(filename)}.mp3` : filename;
+
 	return (
 		<Card
-			className="gap-4 border border-separator bg-surface-secondary p-4 shadow-none"
+			className="gap-4 border border-separator bg-surface-tertiary p-4 shadow-sm"
 			variant="transparent"
 		>
 			<div className="flex items-center gap-4">
-				<div className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-surface-tertiary text-muted">
+				<div className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-surface-secondary text-muted">
 					{result.thumbnail ? (
 						<img
 							alt={result.title || "Media thumbnail"}
 							className="size-full object-cover"
 							src={result.thumbnail}
 						/>
+					) : isAudio ? (
+						<FileAudio aria-hidden className="size-6" />
 					) : (
 						<FileVideo aria-hidden className="size-6" />
 					)}
@@ -732,17 +1185,19 @@ function MediaSummary({ probe }: { probe: ProbeResponse }) {
 				color="muted"
 				type="body-xs"
 			>
-				{result.filename || result.webpageUrl}
+				{displayFilename}
 			</Typography>
 		</Card>
 	);
 }
 
-function VideoPanel({
+function FormatPanel({
+	title = "Quality",
 	formats,
 	selectedId,
 	onSelect,
 }: {
+	title?: string;
 	formats: FormatRow[];
 	selectedId: string;
 	onSelect: (id: string) => void;
@@ -751,19 +1206,26 @@ function VideoPanel({
 		<div className="space-y-3">
 			<div className="flex items-center justify-between">
 				<Typography className="font-semibold" type="h6">
-					Quality
+					{title}
 				</Typography>
 				<Typography color="muted" type="body-xs">
-					{formats.length} formats available
+					{formats.length} {formats.length === 1 ? "format" : "formats"} available
 				</Typography>
 			</div>
 			<div className="space-y-2">
 				{formats.map((format) => {
 					const isSelected = format.id === selectedId;
+					const isAudio = format.kind === "audio";
+					const sublabel = isAudio
+						? [format.ext ? format.ext.toUpperCase() : null, format.acodec || null]
+								.filter(Boolean)
+								.join(" · ") || "Audio"
+						: format.resolution || format.kind;
+
 					return (
 						<Button
 							aria-pressed={isSelected}
-							className="h-auto min-h-14 justify-between rounded-xl px-4 py-3 text-start"
+							className={`h-auto min-h-14 justify-between rounded-xl px-4 py-3 text-start transition-colors ${isSelected ? "border border-accent bg-surface-tertiary" : "border border-separator bg-surface-secondary hover:border-foreground/20"}`}
 							fullWidth
 							onPress={() => onSelect(format.id)}
 							variant={isSelected ? "secondary" : "tertiary"}
@@ -771,16 +1233,19 @@ function VideoPanel({
 						>
 							<span className="flex min-w-0 items-center gap-3">
 								<span
-									className={`flex size-5 items-center justify-center rounded-full border ${isSelected ? "border-accent bg-accent text-accent-foreground" : "border-separator"}`}
+									className={`flex size-5 items-center justify-center rounded-full border transition-colors ${isSelected ? "border-accent bg-accent text-accent-foreground" : "border-foreground/20"}`}
 								>
 									{isSelected ? <Check aria-hidden className="size-3" /> : null}
 								</span>
 								<span className="min-w-0">
-									<Typography className="truncate font-medium" type="body-sm">
+									<Typography
+										className={`truncate ${isSelected ? "font-semibold text-foreground" : "font-medium text-foreground"}`}
+										type="body-sm"
+									>
 										{format.label}
 									</Typography>
 									<Typography color="muted" type="body-xs">
-										{format.resolution || format.kind}
+										{sublabel}
 									</Typography>
 								</span>
 							</span>
@@ -790,7 +1255,7 @@ function VideoPanel({
 									size="sm"
 									variant="soft"
 								>
-									{format.kind}
+									{format.ext ? format.ext.toUpperCase() : format.kind}
 								</Chip>
 								<Typography
 									className="tabular-nums"
@@ -810,6 +1275,22 @@ function VideoPanel({
 	);
 }
 
+function VideoPanel(props: {
+	formats: FormatRow[];
+	selectedId: string;
+	onSelect: (id: string) => void;
+}) {
+	return <FormatPanel title="Quality" {...props} />;
+}
+
+function AudioPanel(props: {
+	formats: FormatRow[];
+	selectedId: string;
+	onSelect: (id: string) => void;
+}) {
+	return <FormatPanel title="Audio quality" {...props} />;
+}
+
 function ProbeModal({
 	probe,
 	settings,
@@ -825,19 +1306,49 @@ function ProbeModal({
 }) {
 	const result = probe.result;
 
-	const formats = result?.formats.length ? result.formats : [FALLBACK_FORMAT];
-	const hasVideo = (result?.formats.length ?? 0) > 0;
-	const hasPlaylist = result?.isPlaylist && (result.entries?.length ?? 0) > 0;
+	const allFormats = result?.formats ?? [];
+	const visibleFormats = allFormats.filter(
+		(format) => format.kind === "audio" || !isLowResolution(format),
+	);
+	const videoFormatsRaw = visibleFormats.filter(
+		(format) => format.kind !== "audio",
+	);
+	const audioFormats = visibleFormats.filter(
+		(format) => format.kind === "audio",
+	);
+	const videoFormats =
+		videoFormatsRaw.length > 0
+			? videoFormatsRaw
+			: audioFormats.length === 0
+				? [FALLBACK_FORMAT]
+				: [];
 
-	const [selectedKey, setSelectedKey] = useState<"video" | "playlist">(
-		hasVideo ? "video" : "playlist",
+	const hasVideo = videoFormats.length > 0;
+	const hasPlaylist = Boolean(
+		result?.isPlaylist && (result.entries?.length ?? 0) > 0,
+	);
+	const hasAudio = audioFormats.length > 0 && !hasPlaylist;
+
+	const [selectedKey, setSelectedKey] = useState<
+		"video" | "audio" | "playlist"
+	>(hasVideo ? "video" : hasAudio ? "audio" : "playlist");
+
+	const [selectedVideoFormatId, setSelectedVideoFormatId] = useState(
+		videoFormats[0]?.id ?? "best",
+	);
+	const [selectedAudioFormatId, setSelectedAudioFormatId] = useState(
+		audioFormats[0]?.id ?? "",
 	);
 
-	const [selectedFormatId, setSelectedFormatId] = useState(
-		formats[0]?.id ?? "best",
-	);
+	const selectedVideoFormat =
+		videoFormats.find((format) => format.id === selectedVideoFormatId) ??
+		videoFormats[0];
+	const selectedAudioFormat =
+		audioFormats.find((format) => format.id === selectedAudioFormatId) ??
+		audioFormats[0];
+
 	const selectedFormat =
-		formats.find((format) => format.id === selectedFormatId) ?? formats[0];
+		selectedKey === "audio" ? selectedAudioFormat : selectedVideoFormat;
 
 	const allEntryUrls = useMemo(
 		() => result?.entries?.map((entry) => entry.url) ?? [],
@@ -882,18 +1393,22 @@ function ProbeModal({
 	return (
 		<Modal.Backdrop isOpen onOpenChange={(open) => !open && onClose()}>
 			<Modal.Container scroll="inside" size="lg">
-				<Modal.Dialog className="w-full sm:max-w-2xl">
+				<Modal.Dialog className="modal-no-press-scale w-full sm:max-w-2xl">
 					<Modal.CloseTrigger />
 					<Modal.Header>
 						<Modal.Heading>
-							{hasVideo && hasPlaylist ? "Download options" : "Select a format"}
+							{(hasVideo || hasAudio) && hasPlaylist
+								? "Download options"
+								: hasAudio && !hasVideo
+									? "Select audio format"
+									: "Select a format"}
 						</Modal.Heading>
 					</Modal.Header>
 					<Modal.Body className="gap-6">
 						<Tabs
 							selectedKey={selectedKey}
 							onSelectionChange={(key) =>
-								setSelectedKey(String(key) as "video" | "playlist")
+								setSelectedKey(String(key) as "video" | "audio" | "playlist")
 							}
 						>
 							<Tabs.ListContainer className="bg-transparent p-0">
@@ -903,16 +1418,25 @@ function ProbeModal({
 								>
 									{hasVideo ? (
 										<Tabs.Tab
-											className="gap-2 rounded-lg px-3 py-2 text-xs sm:text-sm"
+											className="gap-2 rounded-lg px-3 py-2 text-xs sm:text-sm aria-selected:bg-surface-tertiary"
 											id="video"
 										>
 											Video
 											<Tabs.Indicator />
 										</Tabs.Tab>
 									) : null}
+									{hasAudio ? (
+										<Tabs.Tab
+											className="gap-2 rounded-lg px-3 py-2 text-xs sm:text-sm aria-selected:bg-surface-tertiary"
+											id="audio"
+										>
+											Audio
+											<Tabs.Indicator />
+										</Tabs.Tab>
+									) : null}
 									{hasPlaylist ? (
 										<Tabs.Tab
-											className="gap-2 rounded-lg px-3 py-2 text-xs sm:text-sm"
+											className="gap-2 rounded-lg px-3 py-2 text-xs sm:text-sm aria-selected:bg-surface-tertiary"
 											id="playlist"
 										>
 											Playlist
@@ -924,11 +1448,29 @@ function ProbeModal({
 							{hasVideo ? (
 								<Tabs.Panel id="video">
 									<div className="space-y-6 pt-2">
-										<MediaSummary probe={probe} />
+										<MediaSummary
+											probe={probe}
+											selectedFormat={selectedVideoFormat}
+										/>
 										<VideoPanel
-											formats={formats}
-											selectedId={selectedFormatId}
-											onSelect={setSelectedFormatId}
+											formats={videoFormats}
+											selectedId={selectedVideoFormatId}
+											onSelect={setSelectedVideoFormatId}
+										/>
+									</div>
+								</Tabs.Panel>
+							) : null}
+							{hasAudio ? (
+								<Tabs.Panel id="audio">
+									<div className="space-y-6 pt-2">
+										<MediaSummary
+											probe={probe}
+											selectedFormat={selectedAudioFormat}
+										/>
+										<AudioPanel
+											formats={audioFormats}
+											selectedId={selectedAudioFormatId}
+											onSelect={setSelectedAudioFormatId}
 										/>
 									</div>
 								</Tabs.Panel>
@@ -981,14 +1523,7 @@ function ProbeModal({
 						<Button slot="close" variant="tertiary">
 							Cancel
 						</Button>
-						{selectedKey === "video" ? (
-							<Button
-								onPress={() => onDownloadVideo(selectedFormat, directory)}
-							>
-								<Download aria-hidden className="size-4" />
-								Download
-							</Button>
-						) : (
+						{selectedKey === "playlist" ? (
 							<Button
 								isDisabled={selectedCount === 0}
 								onPress={() => onDownloadPlaylist([...selectedUrls], directory)}
@@ -996,6 +1531,16 @@ function ProbeModal({
 								<Download aria-hidden className="size-4" />
 								Download {selectedCount} video
 								{selectedCount === 1 ? "" : "s"}
+							</Button>
+						) : (
+							<Button
+								isDisabled={!selectedFormat}
+								onPress={() =>
+									selectedFormat && onDownloadVideo(selectedFormat, directory)
+								}
+							>
+								<Download aria-hidden className="size-4" />
+								Download
 							</Button>
 						)}
 					</Modal.Footer>
@@ -1148,6 +1693,7 @@ function JobPropertiesModal({
 		["ID", job.id],
 		["Title", job.title],
 		["URL", job.url],
+		["Page URL", job.referer],
 		["Engine", job.engine],
 		["Status", job.status],
 		["Progress", `${job.percent.toFixed(1)}%`],
@@ -1212,6 +1758,78 @@ function JobPropertiesModal({
 	);
 }
 
+type DuplicatePromptState = {
+	info: DuplicateInfo;
+	retry: (action: DuplicateAction) => Promise<void>;
+};
+
+function DuplicatePrompt({
+	state,
+	onClose,
+	onChoose,
+}: {
+	state: DuplicatePromptState;
+	onClose: () => void;
+	onChoose: (action: DuplicateAction) => void;
+}) {
+	const existing =
+		typeof state.info.existing === "string"
+			? state.info.existing
+			: state.info.existing.filename || state.info.existing.title;
+	return (
+		<Modal.Backdrop isOpen onOpenChange={(open) => !open && onClose()}>
+			<Modal.Container size="md">
+				<Modal.Dialog>
+					<Modal.CloseTrigger />
+					<Modal.Header>
+						<Modal.Heading>Duplicate found</Modal.Heading>
+					</Modal.Header>
+					<Modal.Body className="gap-3">
+						<Typography type="body-sm">
+							{state.info.type === "job"
+								? "A matching download is already active."
+								: state.info.type === "torrent"
+									? "Torrent data already exists in the selected destination."
+									: "A file with this name already exists in the destination."}
+						</Typography>
+						{existing ? (
+							<Typography
+								className="wrap-break-word font-mono"
+								color="muted"
+								type="body-xs"
+							>
+								Existing: {existing}
+							</Typography>
+						) : null}
+						{state.info.suggestedName ? (
+							<Typography
+								className="wrap-break-word font-mono"
+								color="muted"
+								type="body-xs"
+							>
+								Suggested: {state.info.suggestedName}
+							</Typography>
+						) : null}
+					</Modal.Body>
+					<Modal.Footer>
+						<Button variant="tertiary" onPress={() => onChoose("skip")}>
+							Skip
+						</Button>
+						<Button variant="danger-soft" onPress={() => onChoose("override")}>
+							Override
+						</Button>
+						{state.info.type === "torrent" ? (
+							<Button onPress={() => onChoose("resume")}>Resume</Button>
+						) : (
+							<Button onPress={() => onChoose("rename")}>Rename</Button>
+						)}
+					</Modal.Footer>
+				</Modal.Dialog>
+			</Modal.Container>
+		</Modal.Backdrop>
+	);
+}
+
 function EmptyQueue() {
 	return (
 		<Card
@@ -1243,6 +1861,12 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 	const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
 	const [propertiesJob, setPropertiesJob] = useState<Job | null>(null);
 	const [downloadError, setDownloadError] = useState("");
+	const [probeSourceUrl, setProbeSourceUrl] = useState("");
+	const [duplicatePrompt, setDuplicatePrompt] =
+		useState<DuplicatePromptState | null>(null);
+	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+	const probeReqIdRef = useRef<string | null>(null);
+	const probeGeneration = useRef(0);
 	const jobGroups = useMemo(() => groupJobs(jobs), [jobs]);
 	const filtered = useMemo(
 		() => jobGroups.filter((group) => matchesFilter(group.root, filter)),
@@ -1258,66 +1882,163 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 		};
 	}, [jobGroups]);
 
+	const selectableJobs = useMemo(() => {
+		const all: Job[] = [];
+		for (const group of filtered) {
+			all.push(group.root);
+			all.push(...group.children);
+		}
+		return all;
+	}, [filtered]);
+
+	const selectedJobs = useMemo(
+		() => jobs.filter((job) => selectedIds.has(job.id)),
+		[jobs, selectedIds],
+	);
+
+	const allSelected =
+		selectableJobs.length > 0 && selectedIds.size === selectableJobs.length;
+	const isIndeterminate =
+		selectedIds.size > 0 && selectedIds.size < selectableJobs.length;
+
+	const toggleJob = useCallback((id: string) => {
+		setSelectedIds((prev) => {
+			const next = new Set(prev);
+			if (next.has(id)) next.delete(id);
+			else next.add(id);
+			return next;
+		});
+	}, []);
+
+	const toggleAll = useCallback(() => {
+		setSelectedIds((prev) => {
+			if (selectableJobs.length > 0 && prev.size === selectableJobs.length) {
+				return new Set();
+			}
+			return new Set(selectableJobs.map((job) => job.id));
+		});
+	}, [selectableJobs]);
+
+	const handleJobContextMenu = useCallback((job: Job, x: number, y: number) => {
+		setSelectedIds((prev) => {
+			if (prev.has(job.id)) return prev;
+			return new Set([job.id]);
+		});
+		setContextMenu({ x, y });
+	}, []);
+
+	// biome-ignore lint/correctness/useExhaustiveDependencies: filter is intentionally the effect trigger
+	useEffect(() => {
+		setSelectedIds(new Set());
+	}, [filter]);
+
 	const runProbe = async (overrideUrl?: string) => {
 		const targetUrl = (overrideUrl ?? url).trim();
 		if (!targetUrl || !connected) return;
+		const generation = ++probeGeneration.current;
 		setProbing(true);
 		setProbeError("");
 		setDownloadError("");
-		const response = await backend.probe(targetUrl);
+		const response = await backend.probe(
+			targetUrl,
+			undefined,
+			(id) => {
+				if (generation === probeGeneration.current) probeReqIdRef.current = id;
+			},
+			directFileMediaType(targetUrl),
+		);
+		if (generation !== probeGeneration.current) return;
 		setProbing(false);
-		if (response.ok) setProbe(response);
-		else
+		probeReqIdRef.current = null;
+		if (response.ok) {
+			setProbeSourceUrl(targetUrl);
+			setProbe(response);
+		} else {
+			setProbeSourceUrl("");
 			setProbeError(
 				response.error || "Probe failed. Check the URL and try again.",
 			);
+		}
 	};
 
+	const cancelProbe = async () => {
+		const reqId = probeReqIdRef.current;
+		if (!reqId) return;
+		++probeGeneration.current;
+		probeReqIdRef.current = null;
+		setProbing(false);
+		await backend.cancelProbe(reqId);
+	};
+
+	const runProbeRef = useRef(runProbe);
+	runProbeRef.current = runProbe;
+
 	useEffect(() => {
+		let active = true;
 		let unlisten: (() => void) | undefined;
 		async function initTorrentFileListeners() {
 			try {
-				const { listen } = await import("@tauri-apps/api/event");
-				unlisten = await listen<string>("open-torrent-file", (event) => {
+				const stop = await listen<string>("open-torrent-file", (event) => {
 					if (event.payload) {
 						setUrl(event.payload);
-						void runProbe(event.payload);
+						void runProbeRef.current(event.payload);
 					}
 				});
+				if (active) unlisten = stop;
+				else stop();
 			} catch {
 				// Not running in Tauri desktop environment
 			}
 			try {
-				const { invoke } = await import("@tauri-apps/api/core");
 				const torrentPath = await invoke<string | null>("get_cli_torrent_file");
-				if (torrentPath) {
+				if (active && torrentPath) {
 					setUrl(torrentPath);
-					void runProbe(torrentPath);
+					void runProbeRef.current(torrentPath);
 				}
 			} catch {
 				// Not running in Tauri desktop environment
 			}
 		}
-		if (connected) {
-			void initTorrentFileListeners();
-		}
+		void initTorrentFileListeners();
 		return () => {
-			if (unlisten) unlisten();
+			active = false;
+			unlisten?.();
 		};
-	}, [connected]);
+	}, []);
 
-	const startDownload = async (format: FormatRow, directory: string) => {
+	const startDownload = async (
+		format: FormatRow,
+		directory: string,
+		duplicateAction?: DuplicateAction,
+	) => {
 		if (!probe?.result || !probe.url) return;
 		const result = probe.result;
+		const isAudio = format.kind === "audio";
+		const useFormatSelector = probe.engine === "ytdlp" || !format.url;
 		const response = await backend.download({
-			url: format.url || probe.url,
-			formatId: format.url ? undefined : format.selector || undefined,
+			url: useFormatSelector ? probe.url : format.url || probe.url,
+			formatId: useFormatSelector ? format.selector || undefined : undefined,
 			directory: directory || undefined,
 			filename: result.filename || undefined,
 			title: result.title,
 			thumbnail: result.thumbnail,
 			engine: probe.engine,
+			mediaType: isAudio ? "audio" : format.kind === "file" ? "file" : undefined,
+			referer: probeSourceUrl || undefined,
+			duplicateAction,
 		});
+		if (
+			!response.ok &&
+			response.error === "duplicate" &&
+			response.duplicate &&
+			!duplicateAction
+		) {
+			setDuplicatePrompt({
+				info: response.duplicate,
+				retry: (action) => startDownload(format, directory, action),
+			});
+			return;
+		}
 		if (!response.ok) {
 			setDownloadError(
 				response.error || "Could not start the download. Try again.",
@@ -1325,13 +2046,16 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 			return;
 		}
 		setDownloadError("");
+		setDuplicatePrompt(null);
 		setProbe(null);
+		setProbeSourceUrl("");
 		setUrl("");
 	};
 
 	const startPlaylistDownload = async (
 		selectedUrls: string[],
 		directory: string,
+		duplicateAction?: DuplicateAction,
 	) => {
 		if (!probe?.result || !probe.url) return;
 		const result = probe.result;
@@ -1342,7 +2066,23 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 			selectedEntryUrls: selectedUrls,
 			title: result.playlistTitle || result.title,
 			thumbnail: result.thumbnail,
+			engine: probe.engine,
+			referer: probeSourceUrl || undefined,
+			duplicateAction,
 		});
+		if (
+			!response.ok &&
+			response.error === "duplicate" &&
+			response.duplicate &&
+			!duplicateAction
+		) {
+			setDuplicatePrompt({
+				info: response.duplicate,
+				retry: (action) =>
+					startPlaylistDownload(selectedUrls, directory, action),
+			});
+			return;
+		}
 		if (!response.ok) {
 			setDownloadError(
 				response.error || "Could not start the playlist download. Try again.",
@@ -1350,13 +2090,16 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 			return;
 		}
 		setDownloadError("");
+		setDuplicatePrompt(null);
 		setProbe(null);
+		setProbeSourceUrl("");
 		setUrl("");
 	};
 
 	const startTorrentDownload = async (
 		directory: string,
 		selectedFiles: string[],
+		duplicateAction?: DuplicateAction,
 	) => {
 		if (!probe?.torrent) return;
 		const response = await backend.download({
@@ -1366,7 +2109,23 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 			filename: probe.torrent.name,
 			title: probe.torrent.name,
 			engine: "torrent",
+			mediaType: "torrent",
+			referer: probeSourceUrl || undefined,
+			duplicateAction,
 		});
+		if (
+			!response.ok &&
+			response.error === "duplicate" &&
+			response.duplicate &&
+			!duplicateAction
+		) {
+			setDuplicatePrompt({
+				info: response.duplicate,
+				retry: (action) =>
+					startTorrentDownload(directory, selectedFiles, action),
+			});
+			return;
+		}
 		if (!response.ok) {
 			setDownloadError(
 				response.error || "Could not start the torrent download. Try again.",
@@ -1374,7 +2133,9 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 			return;
 		}
 		setDownloadError("");
+		setDuplicatePrompt(null);
 		setProbe(null);
+		setProbeSourceUrl("");
 		setUrl("");
 	};
 
@@ -1404,18 +2165,19 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 					</SearchField>
 					<Button
 						className="min-h-12 sm:min-w-28"
-						isDisabled={!connected || probing || !url.trim()}
-						isPending={probing}
-						onPress={() => void runProbe()}
+						isDisabled={!connected || (!probing && !url.trim())}
+						variant={probing ? "danger-soft" : "primary"}
+						onPress={() => void (probing ? cancelProbe() : runProbe())}
 					>
-						{({ isPending }) => (
+						{probing ? (
 							<>
-								{isPending ? (
-									<Spinner color="current" size="sm" />
-								) : (
-									<Search aria-hidden className="size-4" />
-								)}
-								{isPending ? "Probing" : "Probe source"}
+								<Spinner color="current" size="sm" />
+								Cancel probe
+							</>
+						) : (
+							<>
+								<Search aria-hidden className="size-4" />
+								Probe source
 							</>
 						)}
 					</Button>
@@ -1480,7 +2242,7 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 						>
 							{FILTERS.map(({ key, label }) => (
 								<Tabs.Tab
-									className="gap-2 rounded-lg px-3 py-2 text-xs sm:text-sm"
+									className="gap-2 rounded-lg px-3 py-2 text-xs sm:text-sm aria-selected:bg-surface-tertiary"
 									id={key}
 									key={key}
 								>
@@ -1501,8 +2263,13 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 				</Tabs>
 				{filtered.length ? (
 					<JobGroupList
+						allSelected={allSelected}
 						groups={filtered}
-						onContextMenu={(job, x, y) => setContextMenu({ job, x, y })}
+						isIndeterminate={isIndeterminate}
+						selectedIds={selectedIds}
+						onContextMenu={handleJobContextMenu}
+						onToggle={toggleJob}
+						onToggleAll={toggleAll}
 					/>
 				) : (
 					<EmptyQueue />
@@ -1512,6 +2279,7 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 			{contextMenu ? (
 				<JobContextMenu
 					backend={backend}
+					selectedJobs={selectedJobs}
 					onClose={() => setContextMenu(null)}
 					onError={(message) => setDownloadError(message)}
 					onProperties={setPropertiesJob}
@@ -1521,7 +2289,10 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 
 			{probe?.ok && probe.engine === "torrent" && probe.torrent ? (
 				<TorrentDrawer
-					onClose={() => setProbe(null)}
+					onClose={() => {
+						setProbe(null);
+						setProbeSourceUrl("");
+					}}
 					onDownload={(directory, selectedFiles) =>
 						void startTorrentDownload(directory, selectedFiles)
 					}
@@ -1531,7 +2302,10 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 			) : null}
 			{probe?.ok && probe.result ? (
 				<ProbeModal
-					onClose={() => setProbe(null)}
+					onClose={() => {
+						setProbe(null);
+						setProbeSourceUrl("");
+					}}
 					onDownloadPlaylist={(selectedUrls, directory) =>
 						void startPlaylistDownload(selectedUrls, directory)
 					}
@@ -1540,6 +2314,17 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 					}
 					probe={probe}
 					settings={settings}
+				/>
+			) : null}
+			{duplicatePrompt ? (
+				<DuplicatePrompt
+					onChoose={(action) => {
+						const retry = duplicatePrompt.retry;
+						setDuplicatePrompt(null);
+						void retry(action);
+					}}
+					onClose={() => setDuplicatePrompt(null)}
+					state={duplicatePrompt}
 				/>
 			) : null}
 			{propertiesJob ? (

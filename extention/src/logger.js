@@ -5,23 +5,22 @@
  * service worker, in content scripts, and in any other extension context.
  */
 /* global backendWs */
-/* exported DownloadAnythingLogger */
-DownloadAnythingLogger = (function () {
+const DownloadAnythingLogger = (() => {
   'use strict';
 
-  var BACKEND_LEVELS = ['debug', 'info', 'warning', 'error'];
-  var isBackground = typeof window === 'undefined' && typeof importScripts === 'function';
-  var source = isBackground ? 'extension/background' : 'extension/content';
+  const BACKEND_LEVELS = ['debug', 'info', 'warning', 'error'];
+  const isBackground = typeof window === 'undefined' && typeof importScripts === 'function';
+  const source = isBackground ? 'extension/background' : 'extension/content';
 
   function toLevel(level) {
-    var s = String(level || 'info').toLowerCase();
+    let s = String(level || 'info').toLowerCase();
     if (s === 'warn') s = 'warning';
     if (s === 'crit' || s === 'critical') s = 'error';
-    return BACKEND_LEVELS.indexOf(s) >= 0 ? s : 'info';
+    return BACKEND_LEVELS.includes(s) ? s : 'info';
   }
 
   function toConsoleArgs(message, context) {
-    var args = [message];
+    const args = [message];
     if (context && Object.keys(context).length) {
       args.push(context);
     }
@@ -29,22 +28,22 @@ DownloadAnythingLogger = (function () {
   }
 
   function consoleLog(level, message, context) {
-    var args = toConsoleArgs(message, context);
+    const args = toConsoleArgs(message, context);
     if (level === 'debug' && typeof console.debug === 'function') {
-      console.debug.apply(console, args);
+      console.debug(...args);
     } else if (level === 'info') {
-      console.info.apply(console, args);
+      console.info(...args);
     } else if (level === 'warning') {
-      console.warn.apply(console, args);
+      console.warn(...args);
     } else if (level === 'error') {
-      console.error.apply(console, args);
+      console.error(...args);
     } else {
-      console.log.apply(console, args);
+      console.log(...args);
     }
   }
 
   function sendToBackend(level, message, context) {
-    var payload = {
+    const payload = {
       type: 'log',
       level: level,
       message: message,
@@ -52,7 +51,7 @@ DownloadAnythingLogger = (function () {
       client: source,
       ts: Date.now(),
     };
-    var json;
+    let json;
     try {
       json = JSON.stringify(payload);
     } catch (e) {
@@ -71,7 +70,7 @@ DownloadAnythingLogger = (function () {
     } else {
       if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
         try {
-          chrome.runtime.sendMessage(payload);
+          chrome.runtime.sendMessage(payload).catch(() => {});
         } catch {
           // Extension context unavailable.
         }
@@ -88,12 +87,12 @@ DownloadAnythingLogger = (function () {
   }
 
   return {
-    debug: function (message, context) { log('debug', message, context); },
-    info: function (message, context) { log('info', message, context); },
-    warning: function (message, context) { log('warning', message, context); },
-    warn: function (message, context) { log('warning', message, context); },
-    error: function (message, context) { log('error', message, context); },
-    critical: function (message, context) { log('error', message, context); },
-    log: log,
+    debug: (message, context) => log('debug', message, context),
+    info: (message, context) => log('info', message, context),
+    warning: (message, context) => log('warning', message, context),
+    warn: (message, context) => log('warning', message, context),
+    error: (message, context) => log('error', message, context),
+    critical: (message, context) => log('error', message, context),
+    log,
   };
 })();

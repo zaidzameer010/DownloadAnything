@@ -22,6 +22,9 @@ jobs:
         platform: [macos-latest, windows-latest]
     runs-on: ${{ matrix.platform }}
 
+    env:
+      ARIA2_VERSION: 2.7.1
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -31,17 +34,16 @@ jobs:
 
       - name: Download aria2-next binary (macOS)
         if: matrix.platform == 'macos-latest'
-        run: gh release download -R AnInsomniacy/aria2-next --pattern "aria2-next-*-macos-arm64" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download -R AnInsomniacy/aria2-next --tag "v${ARIA2_VERSION}" --pattern "aria2-next-${ARIA2_VERSION}-macos-arm64" --clobber
 
       - name: Download aria2-next binary (Windows)
         if: matrix.platform == 'windows-latest'
         shell: bash
-        run: |
-          gh release download -R AnInsomniacy/aria2-next --pattern "aria2-next-*-windows-x86_64.exe" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download -R AnInsomniacy/aria2-next --tag "v${ARIA2_VERSION}" --pattern "aria2-next-${ARIA2_VERSION}-windows-x86_64.exe" --clobber
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -150,6 +152,10 @@ jobs:
                       "signature": sig,
                       "url": f"https://github.com/{owner_repo}/releases/download/{tag}/{archive_file}"
                   }
+          missing = {"darwin-aarch64", "windows-x86_64"} - latest["platforms"].keys()
+          if missing:
+              missing_text = ", ".join(sorted(missing))
+              raise RuntimeError(f"Missing updater artifacts for: {missing_text}")
           with open("latest.json", "w") as f:
               json.dump(latest, f, indent=2)
           print("Generated latest.json:")

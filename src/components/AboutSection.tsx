@@ -1,11 +1,17 @@
 import { Alert, Button, Typography } from "@heroui/react";
 import { Info, Loader2, RefreshCw } from "lucide-react";
-import { useUpdater } from "../hooks/useUpdater";
+import type { Updater } from "../hooks/useUpdater";
 
-export default function AboutSection() {
-	const updater = useUpdater();
-
+export default function AboutSection({
+	updater,
+}: {
+	updater?: Updater;
+}) {
+	if (!updater) {
+		return null;
+	}
 	const canCheck =
+		updater.tauriReady &&
 		updater.state.status !== "checking" &&
 		updater.state.status !== "downloading" &&
 		updater.state.status !== "installing";
@@ -30,8 +36,15 @@ export default function AboutSection() {
 					<Typography color="muted" type="body-sm">
 						{updater.currentVersion
 							? `Current version: ${updater.currentVersion}`
-							: "Reading version…"}
+							: updater.tauriReady
+								? "Reading version…"
+								: "Current version: not available"}
 					</Typography>
+					{!updater.tauriReady ? (
+						<Typography color="muted" type="body-sm">
+							Update checking requires the desktop app.
+						</Typography>
+					) : null}
 				</div>
 				<Button
 					className="h-8 gap-2"

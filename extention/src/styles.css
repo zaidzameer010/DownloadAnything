@@ -1,142 +1,213 @@
-/* Refined High-Contrast Monochrome OLED Stylesheet for Extension Shadow DOM */
+/* ==========================================================================
+   DownloadAnything Extension - Design System & UI Stylesheet
+   Refined OLED Palette | HeroUI v3 & Emil Kowalski Design Engineering Standards
+   Complies with: better-accessibility, better-colors, better-typography,
+   better-layout, better-ui, modern-css, better-writing.
+   ========================================================================== */
+
 :host {
-	--font-family:
-		ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-	--font-mono: "Space Mono", "JetBrains Mono", "Fira Code", monospace;
+	/* Typography System */
+	--font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+	--font-mono: "Space Mono", "JetBrains Mono", "SF Mono", "Fira Code", monospace;
 
-	/* OLED Pitch Black Palette & High-Contrast Tokens */
-	--bg: #000000;
+	/* OLED Pitch Black Palette & Modern Semantic Tokens */
+	--bg-backdrop: rgba(0, 0, 0, 0.82);
 	--panel: #09090b;
-	--surface-secondary: #101014;
-	--surface-tertiary: #16161b;
+	--surface-secondary: #121215;
+	--surface-tertiary: #18181c;
+	--surface-hover: #222228;
+	--surface-active: #272730;
 
-	--border: #27272a;
-	--border-bright: #3f3f46;
-	--border-visible: #52525b;
+	/* Border Hierarchy */
+	--border-subtle: rgba(255, 255, 255, 0.08);
+	--border: rgba(255, 255, 255, 0.14);
+	--border-bright: rgba(255, 255, 255, 0.24);
+	--border-visible: rgba(255, 255, 255, 0.36);
+	--focus-ring: #ffffff;
 
-	--text: #f4f4f7;
+	/* Text Hierarchy - Tested for WCAG AAA/AA Contrast against panel/surfaces */
+	--text-primary: #f4f4f7;
 	--text-secondary: #a1a1aa;
-	--text-muted: #a1a1aa;
+	--text-muted: #82828c;
 
+	/* Form Controls */
 	--bg-input: #09090b;
+	--border-input: rgba(255, 255, 255, 0.16);
+	--border-input-hover: rgba(255, 255, 255, 0.32);
 
-	/* Status indicators for OLED dark */
+	/* Status Indicators */
 	--status-downloading: #38bdf8;
-	--status-postprocessing: #c084fc;
-	--status-completed: #22c55e;
-	--status-failed: #ef4444;
-	--status-paused: #f59e0b;
+	--status-completed: #4ade80;
+	--status-failed: #f87171;
+	--status-paused: #fbbf24;
 	--status-queued: #a1a1aa;
 
-	/* High Contrast Monochrome Accent */
+	/* Primary & Accent System */
 	--primary: #ffffff;
-	--accent: #e4e4e7;
+	--accent: #ffffff;
 	--accent-foreground: #09090b;
+	--accent-muted: rgba(255, 255, 255, 0.14);
 
+	/* Concentric Border Radii: R_inner = max(0, R_outer - padding) */
+	--radius-3xl: 24px;
+	--radius-2xl: 18px;
+	--radius-xl: 14px;
 	--radius-lg: 12px;
 	--radius-md: 8px;
 	--radius-sm: 6px;
-	--transition-smooth: color, background-color, border-color, opacity, box-shadow, transform 150ms cubic-bezier(0.25, 0.1, 0.25, 1);
+	--radius-full: 9999px;
+
+	/* Animation & Motion System - Emil Kowalski Punchy Curves */
+	--ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+	--ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+	--ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+
+	--transition-fast: 120ms var(--ease-out);
+	--transition-medium: 180ms var(--ease-out);
+	--transition-smooth: transform 160ms var(--ease-out), background-color 150ms var(--ease-out), border-color 150ms var(--ease-out), box-shadow 150ms var(--ease-out), opacity 150ms var(--ease-out);
 
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
+	text-rendering: optimizeLegibility;
+	box-sizing: border-box;
 }
 
-.torrent-summary {
-	color: var(--text-muted);
-	font-family: var(--font-mono);
-	font-size: 10px;
-	margin: 8px 0 12px;
-	word-break: break-all;
-}
-.torrent-file-list {
-	max-height: 220px;
-	overflow: auto;
-	margin: 8px 0 14px;
-	border: 1px solid var(--border);
-	border-radius: var(--radius-md);
-	background: var(--surface-secondary);
-}
-.torrent-file-row {
-	display: grid;
-	grid-template-columns: auto minmax(0, 1fr) auto;
-	gap: 10px;
-	align-items: center;
-	padding: 8px 12px;
-	font-size: 11px;
-	border-bottom: 1px solid var(--border);
-}
-.torrent-file-row:last-child {
-	border-bottom: none;
-}
-.torrent-file-row span {
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-.torrent-file-row small {
-	color: var(--text-muted);
+*, *::before, *::after {
+	box-sizing: border-box;
 }
 
-.playlist-entry-row {
-	display: flex;
-	align-items: center;
-	padding: 10px 16px;
-	border-bottom: 1px solid var(--border);
+/* ==========================================================================
+   Universal Scrollbar Styling (modern-css)
+   ========================================================================== */
+:host {
+	scrollbar-width: thin;
+	scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+::-webkit-scrollbar {
+	width: 6px;
+	height: 6px;
+}
+
+::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+	background: rgba(255, 255, 255, 0.18);
+	border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: rgba(255, 255, 255, 0.32);
+}
+
+/* ==========================================================================
+   Floating Video Download Overlay Button (better-accessibility, better-ui)
+   ========================================================================== */
+.da-video-overlay {
+	position: fixed;
+	z-index: 2147483647;
+	inset-block-start: auto;
+	inset-inline-end: auto;
+	inset-block-end: auto;
+	inset-inline-start: auto;
+	margin: 0;
+	width: 40px;
+	height: 40px;
+	min-width: 40px;
+	min-height: 40px;
+	border: 1px solid var(--border-bright);
+	border-radius: var(--radius-full);
+	background: rgba(9, 9, 11, 0.88);
+	color: var(--text-primary);
 	cursor: pointer;
+	padding: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	pointer-events: auto;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.08);
+	backdrop-filter: blur(16px);
+	-webkit-backdrop-filter: blur(16px);
 	transition: var(--transition-smooth);
-	font-size: 12px;
+	user-select: none;
+	-webkit-user-select: none;
+	touch-action: manipulation;
 }
 
-.playlist-entry-row:last-child {
-	border-bottom: none;
+.da-video-overlay svg {
+	width: 19px;
+	height: 19px;
+	display: block;
+	color: #ffffff;
+	stroke-width: 2.2px;
+	transition: transform var(--transition-fast);
 }
 
-.playlist-entry-row:hover {
-	background: rgba(255, 255, 255, 0.08);
+@media (hover: hover) and (pointer: fine) {
+	.da-video-overlay:hover {
+		background: rgba(24, 24, 30, 0.96);
+		border-color: rgba(255, 255, 255, 0.45);
+		transform: scale(1.05);
+		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.75), 0 0 20px rgba(255, 255, 255, 0.25);
+	}
+	.da-video-overlay:hover svg {
+		transform: translateY(1px);
+	}
 }
 
-.format-list-radio-col input[type="checkbox"] {
-	accent-color: #ffffff;
-	cursor: pointer;
+.da-video-overlay:active {
+	transform: scale(0.96);
+	background: rgba(30, 30, 38, 0.98);
 }
 
-/* Picker Modal Backdrop */
+.da-video-overlay:focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 2px;
+	box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.8);
+}
+
+/* ==========================================================================
+   Modal Backdrop & Dialog Frame (better-layout, better-ui, modern-css)
+   ========================================================================== */
 .modal-backdrop {
 	position: fixed;
-	top: 0;
-	left: 0;
+	inset: 0;
 	width: 100vw;
 	height: 100vh;
-	background: rgba(0, 0, 0, 0.85);
-	backdrop-filter: blur(12px);
-	-webkit-backdrop-filter: blur(12px);
+	background: var(--bg-backdrop);
+	backdrop-filter: blur(16px);
+	-webkit-backdrop-filter: blur(16px);
 	z-index: 2147483640;
 	display: flex;
 	justify-content: center;
 	align-items: center;
+	padding: 16px;
 	font-family: var(--font-family);
+	overscroll-behavior: contain;
+	pointer-events: auto;
 }
 
-/* Modal Box - Premium OLED Glass Frame */
 .modal-box {
 	width: 100%;
 	max-width: 640px;
-	max-height: 88vh;
-	background: #0a0a0c;
-	border: 1px solid var(--border);
-	border-radius: var(--radius-lg);
+	max-height: min(88vh, 760px);
+	background: var(--panel);
+	border: 1px solid var(--border-bright);
+	border-radius: var(--radius-3xl);
 	display: flex;
 	flex-direction: column;
-	color: var(--text);
+	color: var(--text-primary);
 	overflow: hidden;
-	box-shadow: 0 24px 64px rgba(0, 0, 0, 0.98), 0 0 0 1px rgba(255, 255, 255, 0.08);
-	animation: modalScaleIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+	box-shadow: 0 24px 64px rgba(0, 0, 0, 0.95), 0 0 0 1px rgba(255, 255, 255, 0.08);
+	animation: modalScaleIn 0.22s var(--ease-spring);
+	overscroll-behavior: contain;
 }
 
 @keyframes modalScaleIn {
 	from {
-		transform: scale(0.98) translateY(6px);
+		transform: scale(0.96) translateY(4px);
 		opacity: 0;
 	}
 	to {
@@ -145,58 +216,79 @@
 	}
 }
 
-/* Modal Header */
+/* ==========================================================================
+   Modal Header & Close Button (better-accessibility, better-typography)
+   ========================================================================== */
 .modal-header {
-	padding: 16px 20px;
+	padding: 14px 20px;
 	border-bottom: 1px solid var(--border);
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
 	background: var(--surface-secondary);
+	gap: 12px;
 }
 
 .modal-header h2 {
-	font-size: 12px;
-	font-weight: 700;
-	font-family: var(--font-mono);
-	color: var(--text);
-	text-transform: uppercase;
-	letter-spacing: 0.08em;
+	font-size: 15px;
+	font-weight: 600;
+	font-family: var(--font-family);
+	color: var(--text-primary);
 	margin: 0;
+	letter-spacing: -0.01em;
+	text-wrap: balance;
+	line-height: 1.3;
 }
 
 .close-btn {
+	width: 36px;
+	height: 36px;
+	min-width: 36px;
+	min-height: 36px;
 	background: rgba(255, 255, 255, 0.06);
 	border: 1px solid var(--border);
 	color: var(--text-secondary);
 	cursor: pointer;
-	padding: 6px;
-	border-radius: var(--radius-md);
+	padding: 0;
+	border-radius: var(--radius-full);
 	display: flex;
 	align-items: center;
 	justify-content: center;
 	transition: var(--transition-smooth);
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+	.close-btn:hover {
+		background: rgba(255, 255, 255, 0.16);
+		border-color: rgba(255, 255, 255, 0.35);
+		color: #ffffff;
+	}
 }
 
 .close-btn:active {
 	transform: scale(0.96);
 }
 
-.close-btn:hover {
-	background: rgba(255, 255, 255, 0.18);
-	border-color: var(--border-bright);
-	color: #ffffff;
+.close-btn:focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 2px;
 }
 
 .close-btn svg {
 	width: 16px;
 	height: 16px;
+	stroke-width: 2px;
 }
 
-/* Modal Content */
+/* ==========================================================================
+   Modal Content Body (better-layout)
+   ========================================================================== */
 .modal-content {
-	padding: 20px;
+	padding: 18px 20px;
 	overflow-y: auto;
+	overscroll-behavior: contain;
 	flex: 1;
 	display: flex;
 	flex-direction: column;
@@ -204,24 +296,36 @@
 	background: var(--panel);
 }
 
-/* Media Info Segment */
+/* ==========================================================================
+   Media Info Card (better-ui, better-typography)
+   ========================================================================== */
 .media-info {
 	display: grid;
 	grid-template-columns: 104px 1fr;
-	gap: 14px;
-	background: var(--surface-secondary);
-	padding: 12px;
+	gap: 16px;
+	background: var(--surface-tertiary);
+	padding: 14px 16px;
 	border: 1px solid var(--border);
-	border-radius: var(--radius-lg);
+	border-radius: var(--radius-2xl);
+	align-items: center;
 }
 
 .media-thumb {
 	width: 104px;
-	height: 60px;
+	height: 62px;
 	object-fit: cover;
-	background: #000;
-	border: 1px solid var(--border);
-	border-radius: var(--radius-md);
+	background: var(--surface-secondary);
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	border-radius: var(--radius-lg);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 11px;
+	font-weight: 700;
+	font-family: var(--font-mono);
+	color: var(--text-muted);
+	letter-spacing: 0.05em;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 
 .media-details {
@@ -229,23 +333,23 @@
 	flex-direction: column;
 	justify-content: center;
 	min-width: 0;
+	gap: 6px;
 }
 
 .media-title {
-	font-size: 13px;
+	font-size: 13.5px;
 	font-weight: 600;
-	color: var(--text);
+	line-height: 1.35;
+	color: var(--text-primary);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
-	margin-bottom: 4px;
 }
 
 .meta-badges-row {
 	display: flex;
 	align-items: center;
 	gap: 6px;
-	margin: 4px 0;
 	flex-wrap: wrap;
 }
 
@@ -254,491 +358,87 @@
 	align-items: center;
 	padding: 3px 8px;
 	border-radius: var(--radius-sm);
-	font-size: 10px;
+	font-size: 11px;
 	font-weight: 600;
-	letter-spacing: 0.02em;
+	font-family: var(--font-mono);
+	font-variant-numeric: tabular-nums;
 	background: rgba(255, 255, 255, 0.08);
 	border: 1px solid var(--border);
-	color: var(--text);
+	color: var(--text-primary);
+	line-height: 1.2;
 }
 
 .meta-badge-chip.engine {
 	text-transform: uppercase;
 	font-weight: 700;
-	font-family: var(--font-mono);
-}
-
-.meta-badge-chip.engine.ytdlp {
-	background: rgba(192, 132, 252, 0.16);
-	border-color: rgba(192, 132, 252, 0.3);
-	color: #c084fc;
-}
-
-.meta-badge-chip.engine.stream {
-	background: rgba(56, 189, 248, 0.16);
-	border-color: rgba(56, 189, 248, 0.3);
-	color: #38bdf8;
-}
-
-.meta-badge-chip.engine.torrent {
-	background: rgba(245, 158, 11, 0.16);
-	border-color: rgba(245, 158, 11, 0.3);
-	color: #f59e0b;
-}
-
-.meta-badge-chip.engine.browser {
-	background: rgba(192, 132, 252, 0.16);
-	border-color: rgba(192, 132, 252, 0.3);
-	color: #c084fc;
-}
-
-/* Vertical Stream List Layout */
-.format-list {
-	display: flex;
-	flex-direction: column;
-	border: 1px solid var(--border);
-	border-radius: var(--radius-lg);
-	overflow: hidden;
-	background: var(--surface-secondary);
-	max-height: 280px;
-	overflow-y: auto;
-}
-
-.format-list-header {
-	display: flex;
-	align-items: center;
-	padding: 10px 16px;
-	background: var(--surface-tertiary);
-	border-bottom: 1px solid var(--border);
-	font-size: 10px;
-	font-weight: 700;
-	font-family: var(--font-mono);
-	color: var(--text-muted);
-	text-transform: uppercase;
-	letter-spacing: 0.08em;
-	position: sticky;
-	top: 0;
-	z-index: 10;
-}
-
-.format-list-row {
-	display: flex;
-	align-items: center;
-	padding: 12px 16px;
-	border-bottom: 1px solid var(--border);
-	cursor: pointer;
-	transition: var(--transition-smooth);
-}
-
-.format-list-row:last-child {
-	border-bottom: none;
-}
-
-.format-list-row:hover {
-	background: rgba(255, 255, 255, 0.08);
-}
-
-.format-list-row.selected {
-	background: rgba(255, 255, 255, 0.14);
-	border-left: 3px solid #ffffff;
-	padding-left: 13px;
-}
-
-.format-list-radio-col {
-	width: 16px;
-	margin-right: 14px;
-	display: flex;
-	align-items: center;
-	flex-shrink: 0;
-}
-
-.format-list-radio-col input[type="radio"] {
-	accent-color: #ffffff;
-	cursor: pointer;
-}
-
-.format-list-label-col {
-	flex: 3.2;
-	min-width: 0;
-	display: flex;
-	align-items: center;
-}
-
-.format-list-label {
-	font-size: 12.5px;
-	font-weight: 600;
-	color: var(--text);
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-.format-list-ext-col {
-	flex: 0.6;
-	font-size: 11px;
-	font-family: var(--font-mono);
-	color: var(--text-secondary);
-	text-transform: uppercase;
-}
-
-.format-list-size-col {
-	flex: 1;
-	font-size: 11.5px;
-	font-family: var(--font-mono);
-	color: var(--text-secondary);
-	white-space: nowrap;
-}
-
-.format-list-codec {
-	font-size: 9.5px;
-	font-weight: 700;
-	font-family: var(--font-mono);
-	color: var(--text-muted);
-	background: rgba(255, 255, 255, 0.08);
-	border: 1px solid var(--border);
-	border-radius: var(--radius-sm);
-	padding: 1px 6px;
-	text-transform: uppercase;
-	letter-spacing: 0.04em;
-	margin-left: 8px;
-	flex-shrink: 0;
-}
-
-/* Output Row */
-.output-row {
-	display: flex;
-	flex-direction: column;
-	gap: 6px;
-	border: 1px solid var(--border);
-	background: var(--surface-secondary);
-	border-radius: var(--radius-md);
-	padding: 12px;
-}
-
-.output-row label,
-.section-label {
-	font-size: 10px;
-	font-weight: 700;
-	font-family: var(--font-mono);
-	color: var(--text-muted);
-	text-transform: uppercase;
-	letter-spacing: 0.08em;
-}
-
-.section-label {
-	margin-bottom: 6px;
-}
-
-.category-select {
-	background: var(--bg-input) !important;
-	border: 1px solid var(--border) !important;
-	color: var(--text) !important;
-	border-radius: var(--radius-md) !important;
-	padding: 9px 12px !important;
-	font-size: 12px !important;
-	font-family: inherit;
-	outline: none;
-	cursor: pointer;
-	width: 100%;
-	transition: var(--transition-smooth);
-}
-
-.category-select:hover {
-	border-color: var(--border-bright) !important;
-	background: var(--surface-tertiary) !important;
-}
-
-.category-select:focus {
-	border-color: #ffffff !important;
-	box-shadow: 0 0 0 1px #ffffff !important;
-}
-
-/* Output filename preview */
-.filename-preview {
-	font-size: 11px;
-	color: var(--text-secondary);
-	font-family: var(--font-mono);
-	word-break: break-all;
-	line-height: 1.4;
-	margin-top: 0;
-	padding: 0 2px;
-}
-
-/* Warnings and Errors */
-.warning-message {
-	font-size: 11px;
-	color: #fbbf24;
-	border: 1px solid rgba(245, 158, 11, 0.3);
-	background: rgba(245, 158, 11, 0.1);
-	border-radius: var(--radius-md);
-	padding: 10px 12px;
-	line-height: 1.4;
-}
-
-.error-message {
-	font-size: 11px;
-	color: #f87171;
-	border: 1px solid rgba(239, 68, 68, 0.3);
-	background: rgba(239, 68, 68, 0.1);
-	border-radius: var(--radius-md);
-	padding: 10px 12px;
-	font-family: var(--font-mono);
-	word-break: break-all;
-	line-height: 1.4;
-}
-
-.suggestion-btn {
-	background: rgba(255, 255, 255, 0.08);
-	color: #ffffff;
-	border: 1px solid var(--border);
-	border-radius: var(--radius-md);
-	padding: 9px 16px;
-	font-size: 11.5px;
-	font-weight: 700;
-	cursor: pointer;
-	font-family: inherit;
-	transition: var(--transition-smooth);
-}
-
-.suggestion-btn:hover {
-	background: #ffffff;
-	color: #09090b;
-	border-color: #ffffff;
-}
-
-/* Progress Area styling inside extension modal */
-.progress-container {
-	display: flex;
-	flex-direction: column;
-	gap: 8px;
-	border: 1px solid var(--border);
-	background: var(--surface-secondary);
-	border-radius: var(--radius-md);
-	padding: 12px;
-}
-
-.progress-label-row {
-	display: flex;
-	justify-content: space-between;
-	align-items: center;
-	font-size: 11.5px;
-	font-weight: 600;
-}
-
-#progressStage {
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	max-width: 250px;
-}
-
-.progress-track {
-	width: 100%;
-	height: 6px;
-	background: #18181c;
-	border-radius: var(--radius-sm);
-	overflow: hidden;
-	position: relative;
-}
-
-.progress-fill {
-	height: 100%;
-	width: 0%;
-	background: var(--status-downloading);
-	box-shadow: 0 0 8px rgba(56, 189, 248, 0.5);
-	border-radius: var(--radius-sm);
-	transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.progress-fill.indeterminate {
-	width: 40%;
-	position: absolute;
-	background: var(--status-postprocessing);
-	box-shadow: 0 0 8px rgba(192, 132, 252, 0.5);
-	animation: miniIndetMove 1.8s infinite linear;
-}
-
-@keyframes miniIndetMove {
-	0% {
-		left: -40%;
-	}
-	100% {
-		left: 100%;
-	}
-}
-
-.progress-stats {
-	display: flex;
-	justify-content: space-between;
-	font-size: 11px;
-	font-family: var(--font-mono);
-	color: var(--text-secondary);
-}
-
-/* Modal Footer */
-.modal-footer {
-	padding: 16px 20px;
-	border-top: 1px solid var(--border);
-	display: flex;
-	justify-content: flex-end;
-	gap: 10px;
-	background: var(--surface-secondary);
-}
-
-.footer-btn {
-	padding: 9px 18px;
-	font-size: 11.5px;
-	font-weight: 600;
-	cursor: pointer;
-	border-radius: var(--radius-md);
-	border: 1px solid var(--border);
-	background: rgba(255, 255, 255, 0.08);
-	color: var(--text);
-	font-family: inherit;
-	transition: var(--transition-smooth);
-}
-
-.footer-btn:active {
-	transform: scale(0.95);
-}
-
-.footer-btn.cancel {
-	background: rgba(255, 255, 255, 0.06);
-	color: var(--text-secondary);
-	border-color: var(--border);
-}
-
-.footer-btn.cancel:hover {
-	background: rgba(255, 255, 255, 0.18);
+	background: rgba(255, 255, 255, 0.12);
 	border-color: var(--border-bright);
 	color: #ffffff;
 }
 
-.footer-btn.download {
-	background: #ffffff;
-	color: #09090b;
-	border-color: #ffffff;
-	font-weight: 700;
+.meta-badge-chip.engine.torrent {
+	border-color: rgba(56, 189, 248, 0.4);
+	color: var(--status-downloading);
 }
 
-.footer-btn.download:hover:not(:disabled) {
-	background: #ffffff;
-	border-color: #ffffff;
-	transform: translateY(-1px);
-	box-shadow: 0 0 16px rgba(255, 255, 255, 0.25);
-}
-
-.footer-btn.download:active:not(:disabled) {
-	transform: translateY(0) scale(0.95);
-}
-
-.footer-btn.download:disabled {
-	border-color: var(--border);
-	color: var(--text-muted);
-	cursor: not-allowed;
-	background: rgba(255, 255, 255, 0.04);
-	transform: none;
-	box-shadow: none;
-}
-
-/* Duplicate prompt */
-.duplicate-prompt {
-	padding: 12px 4px;
-}
-
-.duplicate-title {
-	font-size: 15px;
-	font-weight: 600;
-	margin-bottom: 12px;
-}
-
-.duplicate-message {
-	font-size: 12px;
-	color: var(--text);
-	margin-bottom: 12px;
-	line-height: 1.5;
-}
-
-.duplicate-existing,
-.duplicate-suggested {
-	font-size: 11px;
-	color: var(--text-secondary);
-	font-family: var(--font-mono);
-	margin-bottom: 6px;
-	word-break: break-all;
-}
-
-/* Toast Notifications */
-.dl-toast {
-	position: fixed;
-	bottom: 24px;
-	right: 24px;
-	background: #121215;
-	backdrop-filter: blur(12px);
-	border: 1px solid var(--border-bright);
-	color: #ffffff;
-	padding: 12px 20px;
-	border-radius: var(--radius-lg);
-	font-family: var(--font-family);
-	font-size: 12px;
-	font-weight: 600;
-	box-shadow: 0 16px 40px rgba(0, 0, 0, 0.95);
-	z-index: 2147483647;
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	transform: translateY(100px);
-	opacity: 0;
-	transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.dl-toast.show {
-	transform: translateY(0);
-	opacity: 1;
-}
-
-.dl-toast-error {
-	border-color: rgba(239, 68, 68, 0.4);
-}
-
-.dl-toast-success {
-	border-color: rgba(34, 197, 94, 0.4);
-}
-
-/* Modal Tabs Selector */
+/* ==========================================================================
+   Segmented Tab Navigation (better-accessibility, better-ui)
+   ========================================================================== */
 .modal-tabs {
 	display: flex;
-	gap: 6px;
-	margin-bottom: 14px;
-	border-bottom: 1px solid var(--border);
-	padding-bottom: 8px;
+	gap: 4px;
+	padding: 4px;
+	background: var(--surface-secondary);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-xl);
 }
 
 .modal-tab-btn {
-	background: none;
+	flex: 1;
+	background: transparent;
 	border: 1px solid transparent;
-	padding: 7px 14px;
-	font-size: 11.5px;
+	padding: 8px 14px;
+	font-size: 12px;
 	font-weight: 600;
-	color: var(--text-muted);
+	font-family: inherit;
+	color: var(--text-secondary);
 	cursor: pointer;
-	border-radius: var(--radius-md);
+	border-radius: var(--radius-lg);
 	transition: var(--transition-smooth);
 	display: flex;
 	align-items: center;
+	justify-content: center;
 	gap: 6px;
+	user-select: none;
+	-webkit-user-select: none;
 }
 
-.modal-tab-btn:hover {
-	color: #ffffff;
-	background: rgba(255, 255, 255, 0.08);
+@media (hover: hover) and (pointer: fine) {
+	.modal-tab-btn:hover:not(.active) {
+		color: var(--text-primary);
+		background: rgba(255, 255, 255, 0.06);
+	}
+}
+
+.modal-tab-btn:active {
+	transform: scale(0.98);
 }
 
 .modal-tab-btn.active {
-	color: #09090b;
-	background: #ffffff;
-	border-color: #ffffff;
-	font-weight: 700;
+	color: #ffffff;
+	background: var(--surface-tertiary);
+	border-color: var(--border);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.modal-tab-btn:focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 1px;
+}
+
+.tab-panels {
+	display: flex;
+	flex-direction: column;
 }
 
 .tab-panel {
@@ -746,41 +446,237 @@
 	flex-direction: column;
 }
 
+/* ==========================================================================
+   Section Labels (better-typography)
+   ========================================================================== */
+.section-label {
+	font-size: 11px;
+	font-weight: 700;
+	font-family: var(--font-mono);
+	color: var(--text-secondary);
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	margin-block-end: 8px;
+	padding-inline: 4px;
+}
+
+/* ==========================================================================
+   Format Selection List (better-layout, better-accessibility, better-ui)
+   ========================================================================== */
+.format-list {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	background: transparent;
+	max-height: 270px;
+	overflow-y: auto;
+	overflow-x: hidden;
+	overscroll-behavior: contain;
+	padding-inline-end: 4px;
+}
+
+.format-list-header {
+	display: flex;
+	align-items: center;
+	padding: 8px 14px;
+	background: var(--surface-tertiary);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	font-size: 11px;
+	font-weight: 700;
+	font-family: var(--font-mono);
+	color: var(--text-secondary);
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	position: sticky;
+	inset-block-start: 0;
+	z-index: 5;
+}
+
+.format-list-row {
+	display: flex;
+	align-items: center;
+	padding: 10px 14px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	background: var(--surface-secondary);
+	cursor: pointer;
+	transition: var(--transition-smooth);
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+	.format-list-row:hover {
+		background: var(--surface-hover);
+		border-color: var(--border-bright);
+	}
+}
+
+.format-list-row:active {
+	transform: scale(0.99);
+}
+
+.format-list-row.selected {
+	background: var(--surface-tertiary);
+	border-color: var(--accent);
+	box-shadow: 0 0 0 1px var(--accent), 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.format-list-radio-col {
+	width: 20px;
+	margin-inline-end: 12px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+
+.format-list-radio-col input[type="radio"],
+.format-list-radio-col input[type="checkbox"] {
+	appearance: auto;
+	accent-color: var(--accent);
+	cursor: pointer;
+	width: 16px;
+	height: 16px;
+	margin: 0;
+}
+
+.format-list-row:focus-within {
+	border-color: var(--accent);
+}
+
+.format-list-label-col {
+	flex: 3.2;
+	min-width: 0;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.format-list-label {
+	font-size: 12.5px;
+	font-weight: 600;
+	color: var(--text-primary);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.format-list-codec {
+	font-size: 10px;
+	font-weight: 700;
+	font-family: var(--font-mono);
+	color: var(--text-secondary);
+	background: rgba(255, 255, 255, 0.08);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	padding: 1px 6px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	flex-shrink: 0;
+}
+
+.format-list-ext-col {
+	flex: 0.8;
+	font-size: 11px;
+	font-weight: 600;
+	font-family: var(--font-mono);
+	color: var(--text-secondary);
+	text-transform: uppercase;
+}
+
+.format-list-size-col {
+	flex: 1.1;
+	font-size: 11.5px;
+	font-weight: 600;
+	font-family: var(--font-mono);
+	font-variant-numeric: tabular-nums;
+	color: var(--text-secondary);
+	white-space: nowrap;
+	text-align: right;
+}
+
+/* ==========================================================================
+   Playlist Component (better-layout, better-ui)
+   ========================================================================== */
 .playlist-header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	margin: 0 0 8px;
+	margin-block-end: 8px;
+	padding-inline: 4px;
+}
+
+.playlist-header .section-label {
+	margin-block-end: 0;
+	padding-inline: 0;
 }
 
 .playlist-select-all {
-	display: flex;
+	display: inline-flex;
 	align-items: center;
 	gap: 6px;
-	font-size: 11px;
-	color: var(--text-muted);
+	font-size: 11.5px;
+	font-weight: 600;
+	color: var(--text-secondary);
 	cursor: pointer;
+	user-select: none;
+	-webkit-user-select: none;
 }
 
-.playlist-select-all input {
+.playlist-select-all input[type="checkbox"] {
+	accent-color: var(--accent);
 	cursor: pointer;
+	width: 15px;
+	height: 15px;
 }
 
 .playlist-list {
-	margin: 0 0 14px;
+	margin-block-end: 4px;
 }
 
 .playlist-entry-row {
-	gap: 10px;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 10px 14px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	background: var(--surface-secondary);
+	cursor: pointer;
+	transition: var(--transition-smooth);
+	font-size: 12px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+	.playlist-entry-row:hover {
+		background: var(--surface-hover);
+		border-color: var(--border-bright);
+	}
+}
+
+.playlist-entry-row:active {
+	transform: scale(0.99);
+}
+
+.playlist-entry-row.selected {
+	background: var(--surface-tertiary);
+	border-color: var(--accent);
+}
+
+.playlist-entry-row.selected .playlist-entry-title {
+	font-weight: 700;
 }
 
 .playlist-entry-thumb {
-	width: 48px;
-	height: 36px;
+	width: 52px;
+	height: 38px;
 	object-fit: cover;
 	border-radius: var(--radius-sm);
+	border: 1px solid rgba(255, 255, 255, 0.1);
 	flex-shrink: 0;
-	background: var(--surface-tertiary);
+	background: var(--surface-secondary);
 }
 
 .playlist-entry-meta {
@@ -794,35 +690,386 @@
 .playlist-entry-title-wrap {
 	display: flex;
 	align-items: center;
-	gap: 6px;
+	gap: 8px;
 	min-width: 0;
 }
 
 .playlist-entry-title {
-	font-size: 12px;
+	font-size: 12.5px;
 	font-weight: 600;
-	color: var(--text);
+	color: var(--text-primary);
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
 .playlist-entry-current {
-	font-size: 9px;
+	font-size: 10px;
 	font-weight: 700;
 	text-transform: uppercase;
 	letter-spacing: 0.05em;
-	color: var(--text);
-	background: rgba(56, 189, 248, 0.16);
-	border: 1px solid rgba(56, 189, 248, 0.3);
+	color: #ffffff;
+	background: rgba(255, 255, 255, 0.14);
+	border: 1px solid var(--border-bright);
 	border-radius: var(--radius-sm);
-	padding: 2px 5px;
+	padding: 1px 6px;
 	flex-shrink: 0;
 }
 
 .playlist-entry-sub {
-	font-size: 10.5px;
-	color: var(--text-muted);
+	font-size: 11px;
+	color: var(--text-secondary);
+	font-variant-numeric: tabular-nums;
 	display: flex;
 	gap: 4px;
+}
+
+/* ==========================================================================
+   Torrent File List Component
+   ========================================================================== */
+.torrent-file-list {
+	max-height: 220px;
+	overflow-y: auto;
+	overflow-x: hidden;
+	overscroll-behavior: contain;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding-inline-end: 4px;
+	margin-block-end: 8px;
+}
+
+.torrent-file-row {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	gap: 12px;
+	align-items: center;
+	padding: 9px 14px;
+	font-size: 11.5px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	background: var(--surface-secondary);
+	cursor: pointer;
+	transition: var(--transition-smooth);
+}
+
+@media (hover: hover) and (pointer: fine) {
+	.torrent-file-row:hover {
+		background: var(--surface-hover);
+		border-color: var(--border-bright);
+	}
+}
+
+.torrent-file-row:active {
+	transform: scale(0.99);
+}
+
+.torrent-file-row span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--text-primary);
+}
+
+.torrent-file-row small {
+	color: var(--text-secondary);
+	font-family: var(--font-mono);
+	font-variant-numeric: tabular-nums;
+	font-size: 11px;
+}
+
+/* ==========================================================================
+   Download Location & Output Card (modern-css, no !important)
+   ========================================================================== */
+.output-row {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	border: 1px solid var(--border);
+	background: var(--surface-tertiary);
+	border-radius: var(--radius-xl);
+	padding: 14px 16px;
+}
+
+.output-row label {
+	font-size: 11px;
+	font-weight: 700;
+	font-family: var(--font-mono);
+	color: var(--text-secondary);
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	display: block;
+}
+
+.category-select {
+	appearance: none;
+	-webkit-appearance: none;
+	background-color: var(--bg-input);
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+	background-repeat: no-repeat;
+	background-position: right 12px center;
+	border: 1px solid var(--border-input);
+	color: var(--text-primary);
+	border-radius: var(--radius-md);
+	padding: 9px 36px 9px 12px;
+	font-size: 12.5px;
+	font-family: inherit;
+	font-weight: 500;
+	outline: none;
+	cursor: pointer;
+	width: 100%;
+	transition: var(--transition-smooth);
+}
+
+@media (hover: hover) and (pointer: fine) {
+	.category-select:hover {
+		border-color: var(--border-input-hover);
+		background-color: var(--surface-secondary);
+	}
+}
+
+.category-select:focus-visible {
+	border-color: var(--accent);
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 1px;
+	box-shadow: 0 0 0 1px var(--accent);
+}
+
+.filename-preview {
+	font-size: 11.5px;
+	color: var(--text-secondary);
+	font-family: var(--font-mono);
+	word-break: break-all;
+	line-height: 1.45;
+	padding: 2px 4px;
+}
+
+/* ==========================================================================
+   Error & Alert Message (better-writing, better-accessibility)
+   ========================================================================== */
+.error-message {
+	font-size: 12px;
+	color: #fca5a5;
+	border: 1px solid rgba(248, 113, 113, 0.35);
+	background: rgba(239, 68, 68, 0.1);
+	border-radius: var(--radius-xl);
+	padding: 12px 16px;
+	font-family: var(--font-mono);
+	word-break: break-word;
+	line-height: 1.5;
+	text-wrap: pretty;
+}
+
+/* ==========================================================================
+   Progress Area (better-ui, modern-css)
+   ========================================================================== */
+.progress-container {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	border: 1px solid var(--border);
+	background: var(--surface-tertiary);
+	border-radius: var(--radius-2xl);
+	padding: 16px 18px;
+}
+
+.progress-label-row {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--text-primary);
+}
+
+.progress-label-row span:last-child {
+	color: var(--text-secondary);
+	font-family: var(--font-mono);
+	font-size: 11px;
+}
+
+.progress-track {
+	width: 100%;
+	height: 6px;
+	background: var(--surface-secondary);
+	border-radius: var(--radius-full);
+	overflow: hidden;
+	position: relative;
+}
+
+.progress-fill {
+	height: 100%;
+	width: 0%;
+	background: var(--accent);
+	box-shadow: 0 0 12px rgba(255, 255, 255, 0.35);
+	border-radius: var(--radius-full);
+	transition: width 0.2s var(--ease-out);
+}
+
+.progress-fill.indeterminate {
+	width: 45%;
+	position: absolute;
+	background: linear-gradient(90deg, rgba(255, 255, 255, 0.3), #ffffff, rgba(255, 255, 255, 0.3));
+	box-shadow: 0 0 14px rgba(255, 255, 255, 0.4);
+	animation: miniIndetMove 1.6s infinite cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes miniIndetMove {
+	0% {
+		inset-inline-start: -45%;
+	}
+	100% {
+		inset-inline-start: 100%;
+	}
+}
+
+/* ==========================================================================
+   Modal Footer & Buttons (emil-design-eng, better-accessibility)
+   ========================================================================== */
+.modal-footer {
+	padding: 14px 20px;
+	border-top: 1px solid var(--border);
+	display: flex;
+	justify-content: flex-end;
+	gap: 10px;
+	background: var(--surface-secondary);
+}
+
+.footer-btn {
+	padding: 9px 20px;
+	font-size: 12.5px;
+	font-weight: 600;
+	cursor: pointer;
+	border-radius: var(--radius-full);
+	border: 1px solid var(--border);
+	background: rgba(255, 255, 255, 0.08);
+	color: var(--text-primary);
+	font-family: inherit;
+	transition: var(--transition-smooth);
+	user-select: none;
+	-webkit-user-select: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.footer-btn:active:not(:disabled) {
+	transform: scale(0.96);
+}
+
+.footer-btn:focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 2px;
+}
+
+.footer-btn.cancel {
+	background: rgba(255, 255, 255, 0.06);
+	color: var(--text-secondary);
+	border-color: var(--border);
+}
+
+@media (hover: hover) and (pointer: fine) {
+	.footer-btn.cancel:hover {
+		background: rgba(255, 255, 255, 0.14);
+		border-color: var(--border-bright);
+		color: #ffffff;
+	}
+}
+
+.footer-btn.download {
+	background: var(--accent);
+	color: var(--accent-foreground);
+	border-color: var(--accent);
+	font-weight: 650;
+	box-shadow: 0 2px 10px rgba(255, 255, 255, 0.15);
+}
+
+@media (hover: hover) and (pointer: fine) {
+	.footer-btn.download:hover:not(:disabled) {
+		background: #ffffff;
+		border-color: #ffffff;
+		box-shadow: 0 0 20px rgba(255, 255, 255, 0.35);
+	}
+}
+
+.footer-btn.download:disabled {
+	border-color: var(--border-subtle);
+	color: var(--text-muted);
+	cursor: not-allowed;
+	background: rgba(255, 255, 255, 0.04);
+	box-shadow: none;
+}
+
+/* ==========================================================================
+   Duplicate Prompt Component (better-writing)
+   ========================================================================== */
+.duplicate-prompt {
+	padding: 14px 6px;
+}
+
+.duplicate-title {
+	font-size: 15px;
+	font-weight: 650;
+	margin-block-end: 10px;
+	color: var(--text-primary);
+	text-wrap: balance;
+}
+
+.duplicate-message {
+	font-size: 12.5px;
+	color: var(--text-secondary);
+	margin-block-end: 14px;
+	line-height: 1.5;
+	text-wrap: pretty;
+}
+
+.duplicate-existing,
+.duplicate-suggested {
+	font-size: 11.5px;
+	color: var(--text-secondary);
+	font-family: var(--font-mono);
+	margin-block-end: 8px;
+	word-break: break-all;
+	padding: 6px 10px;
+	background: var(--surface-tertiary);
+	border-radius: var(--radius-md);
+	border: 1px solid var(--border-subtle);
+}
+
+.duplicate-suggested {
+	color: var(--text-primary);
+	border-color: var(--border);
+}
+
+/* ==========================================================================
+   Reduced Motion Accessibility (better-accessibility, emil-design-eng)
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+	:host {
+		--transition-smooth: none;
+		--transition-fast: none;
+		--transition-medium: none;
+	}
+
+	.modal-box {
+		animation: none;
+	}
+
+	.progress-fill.indeterminate {
+		animation: none;
+		inset-inline-start: 0;
+		width: 100%;
+		opacity: 0.8;
+	}
+
+	.da-video-overlay,
+	.close-btn,
+	.footer-btn,
+	.modal-tab-btn,
+	.format-list-row,
+	.playlist-entry-row,
+	.torrent-file-row {
+		transition: opacity 120ms ease-out, background-color 120ms ease-out, border-color 120ms ease-out !important;
+		transform: none !important;
+	}
 }

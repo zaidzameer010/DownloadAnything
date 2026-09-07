@@ -10,13 +10,11 @@ import {
 	Skeleton,
 	Slider,
 	Switch,
-	Tabs,
 	TextField,
 	Typography,
 } from "@heroui/react";
 import type { LucideIcon } from "lucide-react";
 import {
-	Download,
 	Folder,
 	Globe,
 	HardDrive,
@@ -24,22 +22,28 @@ import {
 	Network,
 	PenLine,
 	Plus,
+	Puzzle,
 	Settings2,
 	Trash2,
 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import type { useBackend } from "../hooks/useBackend";
-import type { Settings } from "../lib/backend";
+import { useUpdater } from "../hooks/useUpdater";
+import { backend, type Settings } from "../lib/backend";
 import { formatBytes } from "../lib/format";
 import AboutSection from "./AboutSection";
 
 type Backend = ReturnType<typeof useBackend>;
+
+
 type Section =
 	| "general"
 	| "network"
-	| "engines"
-	| "postprocessing"
+	| "media"
+	| "aria2"
+	| "torrent"
 	| "locations"
+	| "extension"
 	| "about";
 
 type Option = { value: string; label: string };
@@ -59,26 +63,38 @@ const sections: {
 	{
 		id: "network",
 		label: "Network",
-		description: "Limits and access",
+		description: "Limits & access",
 		icon: Network,
 	},
 	{
-		id: "engines",
-		label: "Engines",
-		description: "HTTP and torrent",
-		icon: Download,
+		id: "media",
+		label: "Media & Subtitles",
+		description: "Formats & metadata",
+		icon: PenLine,
 	},
 	{
-		id: "postprocessing",
-		label: "Post-processing",
-		description: "Metadata and output",
-		icon: PenLine,
+		id: "aria2",
+		label: "aria2-next",
+		description: "Direct HTTP engine",
+		icon: Globe,
+	},
+	{
+		id: "torrent",
+		label: "libtorrent",
+		description: "BitTorrent P2P engine",
+		icon: HardDrive,
 	},
 	{
 		id: "locations",
 		label: "Locations",
 		description: "Folders and presets",
 		icon: Folder,
+	},
+	{
+		id: "extension",
+		label: "Extension",
+		description: "Browser integration",
+		icon: Puzzle,
 	},
 	{
 		id: "about",
@@ -114,6 +130,111 @@ function TextSetting({
 				placeholder={placeholder}
 			/>
 		</TextField>
+	);
+}
+
+type InstalledBrowser = {
+	id: string;
+	name: string;
+	executable: string;
+};
+
+function ExtensionSection() {
+	const [browsers, setBrowsers] = useState<InstalledBrowser[]>([]);
+	const [extensionPath, setExtensionPath] = useState("");
+	const [busyId, setBusyId] = useState<string | null>(null);
+	const [status, setStatus] = useState<{
+		id: string;
+		ok: boolean;
+		message: string;
+	} | null>(null);
+
+	const load = useCallback(async () => {
+		const res = await backend.listBrowsers();
+		if (res.browsers) setBrowsers(res.browsers);
+		if (res.extensionPath) setExtensionPath(res.extensionPath);
+	}, []);
+
+	useEffect(() => {
+		void load();
+	}, [load]);
+
+	const install = async (browserId: string) => {
+		setBusyId(browserId);
+		setStatus(null);
+		const res = await backend.installExtension(browserId);
+		setStatus({
+			id: browserId,
+			ok: Boolean(res.ok),
+			message: res.ok
+				? (res.message ?? "Launched with the extension.")
+				: (res.error ?? "Install failed"),
+		});
+		setBusyId(null);
+		void load();
+	};
+
+	return (
+		<SectionCard
+			description="Load the DownloadAnything extension into an installed Chromium browser. A running browser is gracefully quit and relaunched with the extension."
+			title="Browser Extension"
+		>
+			<div className="space-y-2">
+				{browsers.length ? (
+					browsers.map((browser) => (
+						<div
+							className="flex items-center justify-between gap-4 rounded-xl border border-separator bg-surface-secondary px-4 py-3"
+							key={browser.id}
+						>
+							<div className="min-w-0">
+								<Typography className="font-medium" type="body-sm">
+									{browser.name}
+								</Typography>
+								<Typography
+									className="mt-1 truncate font-mono text-xs"
+									color="muted"
+									type="body-xs"
+								>
+									{browser.executable}
+								</Typography>
+							</div>
+							<Button
+								isDisabled={busyId !== null}
+								onPress={() => install(browser.id)}
+								size="sm"
+							>
+								{busyId === browser.id ? "Installing…" : "Install"}
+							</Button>
+						</div>
+					))
+				) : (
+					<Typography color="muted" type="body-sm">
+						No supported Chromium browsers found on this system.
+					</Typography>
+				)}
+			</div>
+			{status ? (
+				<Alert status={status.ok ? "success" : "danger"}>
+					<Alert.Indicator />
+					<Alert.Content>
+						<Alert.Title>
+							{status.ok ? "Install started" : "Install failed"}
+						</Alert.Title>
+						<Alert.Description>{status.message}</Alert.Description>
+					</Alert.Content>
+				</Alert>
+			) : null}
+			{extensionPath ? (
+				<Typography className="font-mono" color="muted" type="body-xs">
+					Extension source: {extensionPath}
+				</Typography>
+			) : null}
+			<Typography color="muted" type="body-xs">
+				The extension loads for this browser session only. To keep it, enable
+				Developer mode on chrome://extensions and use &quot;Load unpacked&quot;
+				pointing at the extension folder above.
+			</Typography>
+		</SectionCard>
 	);
 }
 
@@ -225,61 +346,33 @@ function ToggleSetting({
 function SectionCard({
 	title,
 	description,
-	children,
-}: {
-	title: string;
-	description: string;
-	children: ReactNode;
-}) {
-	return (
-		<Card
-			className="gap-6 border border-separator bg-surface p-5 shadow-none sm:p-7"
-			variant="default"
-		>
-			<div className="space-y-1">
-				<Typography className="font-semibold" type="h5">
-					{title}
-				</Typography>
-				<Typography color="muted" type="body-sm">
-					{description}
-				</Typography>
-			</div>
-			<div className="space-y-6">{children}</div>
-		</Card>
-	);
-}
-
-function EngineCard({
-	title,
-	description,
 	icon: Icon,
 	children,
 }: {
 	title: string;
 	description: string;
-	icon: LucideIcon;
+	icon?: LucideIcon;
 	children: ReactNode;
 }) {
 	return (
-		<Card
-			className="gap-5 border border-separator bg-surface-secondary p-5 shadow-none"
-			variant="transparent"
-		>
-			<div className="flex items-start gap-3">
-				<div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
-					<Icon aria-hidden className="size-4" />
+		<div className="space-y-4 rounded-2xl border border-separator bg-surface-secondary/60 p-4 sm:p-5">
+			{Icon && (
+				<div className="flex items-start gap-3">
+					<div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-surface-tertiary text-foreground">
+						<Icon className="size-5" />
+					</div>
+					<div>
+						<Typography className="font-medium" type="body-sm">
+							{title}
+						</Typography>
+						<Typography color="muted" type="body-xs">
+							{description}
+						</Typography>
+					</div>
 				</div>
-				<div>
-					<Typography className="font-semibold" type="h6">
-						{title}
-					</Typography>
-					<Typography className="mt-1" color="muted" type="body-sm">
-						{description}
-					</Typography>
-				</div>
-			</div>
-			<div className="space-y-5">{children}</div>
-		</Card>
+			)}
+			<div className="space-y-4">{children}</div>
+		</div>
 	);
 }
 
@@ -291,122 +384,91 @@ function SettingsNavigation({
 	onChange: (section: Section) => void;
 }) {
 	return (
-		<Tabs
-			className="w-full"
-			orientation="vertical"
-			selectedKey={section}
-			onSelectionChange={(key) => onChange(String(key) as Section)}
-		>
-			<Tabs.ListContainer className="bg-transparent p-0">
-				<Tabs.List
-					aria-label="Settings sections"
-					className="w-full flex-col items-stretch gap-1"
-				>
-					{sections.map(({ id, label, description, icon: Icon }) => (
-						<Tabs.Tab
-							className="h-auto justify-start gap-3 rounded-xl px-3 py-3 text-start"
-							id={id}
-							key={id}
-						>
-							<Icon aria-hidden className="mt-0.5 size-4 shrink-0" />
-							<span className="min-w-0">
-								<span className="block text-sm font-medium">{label}</span>
-								<span className="mt-0.5 block text-xs text-muted">
-									{description}
-								</span>
-							</span>
-							<Tabs.Indicator />
-						</Tabs.Tab>
-					))}
-				</Tabs.List>
-			</Tabs.ListContainer>
-		</Tabs>
+		<div className="grid gap-1">
+			{sections.map((item) => {
+				const Icon = item.icon;
+				const active = section === item.id;
+				return (
+					<button
+						className={`flex w-full items-center gap-3 rounded-xl px-3.5 py-2.5 text-left text-sm transition-colors ${
+							active
+								? "bg-surface-tertiary font-medium text-foreground"
+								: "text-muted hover:bg-surface-secondary-hover hover:text-foreground"
+						}`}
+						key={item.id}
+						onClick={() => onChange(item.id)}
+						type="button"
+					>
+						<Icon
+							aria-hidden
+							className={`size-4 shrink-0 ${active ? "text-primary font-semibold" : ""}`}
+						/>
+						<span className="truncate">{item.label}</span>
+					</button>
+				);
+			})}
+		</div>
 	);
 }
 
 export default function SettingsPage({ backend }: { backend: Backend }) {
-	const { settings, updateSettings, connected } = backend;
+	const updater = useUpdater();
+	const { settings, updateSettings } = backend;
 	const [section, setSection] = useState<Section>("general");
 	const [newPresetName, setNewPresetName] = useState("");
 	const [newPresetPath, setNewPresetPath] = useState("");
-	const [settingsError, setSettingsError] = useState("");
+	const [localError, setLocalError] = useState<string | null>(null);
 
 	if (!settings) {
 		return (
-			<Card
-				className="border border-separator bg-surface p-6 shadow-none"
-				variant="default"
-			>
-				{connected ? (
-					<div className="space-y-4">
-						<Skeleton className="h-6 w-40 rounded-lg" />
-						<Skeleton className="h-12 w-full rounded-xl" />
-						<Skeleton className="h-12 w-full rounded-xl" />
-					</div>
-				) : (
-					<Alert status="danger">
-						<Alert.Indicator />
-						<Alert.Content>
-							<Alert.Title>Backend unavailable</Alert.Title>
-							<Alert.Description>
-								Start backend/server.py to load and edit settings.
-							</Alert.Description>
-						</Alert.Content>
-					</Alert>
-				)}
-			</Card>
+			<div className="p-6">
+				<Skeleton className="h-64 rounded-2xl" />
+			</div>
 		);
 	}
 
-	const set = async (partial: Partial<Settings>, debounceMs = 350) => {
-		const result = await updateSettings(partial, debounceMs);
-		if (!result.ok) {
-			setSettingsError(
-				result.error ||
-					"Could not save settings. Check the backend connection.",
-			);
+	const set = async (patch: Partial<Settings>, debounceMs = 350) => {
+		const res = await updateSettings(patch, debounceMs);
+		if (res?.error) {
+			setLocalError(res.error);
 		} else {
-			setSettingsError("");
+			setLocalError(null);
 		}
 	};
-	const setImmediate = async (partial: Partial<Settings>) => {
-		const result = await updateSettings(partial, 0);
-		if (!result.ok) {
-			setSettingsError(
-				result.error ||
-					"Could not save settings. Check the backend connection.",
-			);
+
+	const setImmediate = async (patch: Partial<Settings>) => {
+		const res = await updateSettings(patch, 0);
+		if (res?.error) {
+			setLocalError(res.error);
 		} else {
-			setSettingsError("");
+			setLocalError(null);
 		}
 	};
+
 	const addPreset = () => {
-		const path = newPresetPath.trim();
-		if (!path) return;
-		setImmediate({
-			presetPaths: [
-				...settings.presetPaths,
-				{ name: newPresetName.trim() || path, path },
-			],
-		});
+		if (!newPresetName.trim() || !newPresetPath.trim()) return;
+		const next = [
+			...settings.presetPaths.filter((p) => p.path !== newPresetPath.trim()),
+			{ name: newPresetName.trim(), path: newPresetPath.trim() },
+		];
+		setImmediate({ presetPaths: next });
 		setNewPresetName("");
 		setNewPresetPath("");
 	};
-	const removePreset = (path: string) =>
+
+	const removePreset = (path: string) => {
 		setImmediate({
-			presetPaths: settings.presetPaths.filter(
-				(preset) => preset.path !== path,
-			),
+			presetPaths: settings.presetPaths.filter((p) => p.path !== path),
 		});
+	};
+
+	const settingsError = localError;
 
 	return (
-		<div className="space-y-8">
-			<header className="space-y-2">
-				<Typography color="muted" type="body-xs">
-					WORKSPACE / SETTINGS
-				</Typography>
+		<div className="space-y-6">
+			<header className="space-y-1">
 				<div className="flex items-center gap-3">
-					<Typography className="font-semibold tracking-tight" type="h2">
+					<Typography className="font-bold tracking-tight" type="h3">
 						Settings
 					</Typography>
 					<Chip color="success" size="sm" variant="soft">
@@ -414,8 +476,8 @@ export default function SettingsPage({ backend }: { backend: Backend }) {
 					</Chip>
 				</div>
 				<Typography className="max-w-2xl" color="muted" type="body-sm">
-					Tune the engines and destinations behind your download queue. Changes
-					sync to the backend as you make them.
+					Tune queue behavior, network speed, engine configurations, and
+					download paths.
 				</Typography>
 			</header>
 			<div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)] lg:items-start">
@@ -426,26 +488,41 @@ export default function SettingsPage({ backend }: { backend: Backend }) {
 					<SettingsNavigation onChange={setSection} section={section} />
 				</Card>
 				<div className="min-w-0">
+					{settingsError ? (
+						<Alert className="mb-5" status="danger">
+							<Alert.Indicator />
+							<Alert.Content>
+								<Alert.Title>Settings could not be saved</Alert.Title>
+								<Alert.Description>{settingsError}</Alert.Description>
+							</Alert.Content>
+						</Alert>
+					) : null}
+
 					{section === "general" ? (
 						<SectionCard
-							description="Set the baseline behavior for the shared queue."
+							description="Set baseline queue limits and default destination directory."
 							title="General"
 						>
 							<SliderSetting
 								display={String(settings.maxConcurrentDownloads)}
-								label="Concurrent downloads (next restart)"
+								label="Concurrent downloads (shared limit for all engines)"
 								maxValue={8}
 								minValue={1}
 								onChange={(value) => set({ maxConcurrentDownloads: value })}
 								value={settings.maxConcurrentDownloads}
+							/>
+							<TextSetting
+								label="Default download directory"
+								onCommit={(value) => set({ downloadDir: value })}
+								value={settings.downloadDir}
 							/>
 						</SectionCard>
 					) : null}
 
 					{section === "network" ? (
 						<SectionCard
-							description="Control throughput and browser session access."
-							title="Network"
+							description="Control network throughput, proxies, and browser cookies."
+							title="Network & Connections"
 						>
 							<div className="grid gap-6 md:grid-cols-3">
 								<SliderSetting
@@ -481,7 +558,7 @@ export default function SettingsPage({ backend }: { backend: Backend }) {
 							<TextSetting
 								label="Proxy"
 								onCommit={(value) => set({ proxy: value })}
-								placeholder="http://127.0.0.1:8080 (empty = direct)"
+								placeholder="http://127.0.0.1:8080 or socks5://127.0.0.1:1080"
 								value={settings.proxy}
 							/>
 							<SelectSetting
@@ -504,208 +581,257 @@ export default function SettingsPage({ backend }: { backend: Backend }) {
 						</SectionCard>
 					) : null}
 
-					{section === "engines" ? (
+					{section === "media" ? (
 						<SectionCard
-							description="Configure the direct HTTP engine and libtorrent runtime."
-							title="Download engines"
+							description="Configure media container formats, metadata embedding, and subtitles."
+							title="Media & Subtitles"
 						>
-							{settingsError ? (
-								<Alert className="mb-5" status="danger">
-									<Alert.Indicator />
-									<Alert.Content>
-										<Alert.Title>Settings could not be saved</Alert.Title>
-										<Alert.Description>{settingsError}</Alert.Description>
-									</Alert.Content>
-								</Alert>
-							) : null}
-							<div className="grid gap-5 xl:grid-cols-2">
-								<EngineCard
-									description="HTTP, HLS, and DASH fragment fetching."
-									icon={Globe}
-									title="aria2-next"
-								>
-									<SliderSetting
-										display={String(settings.aria2NextConnections)}
-										label="Connections per server"
-										maxValue={32}
-										minValue={1}
-										onChange={(value) => set({ aria2NextConnections: value })}
-										value={settings.aria2NextConnections}
-									/>
-									<SliderSetting
-										display={String(settings.aria2NextMaxConcurrent)}
-										label="Concurrent downloads"
-										maxValue={32}
-										minValue={1}
-										onChange={(value) => set({ aria2NextMaxConcurrent: value })}
-										value={settings.aria2NextMaxConcurrent}
-									/>
-									<TextSetting
-										label="Minimum split size"
-										onCommit={(value) =>
-											setImmediate({ aria2NextMinSplitSize: value })
-										}
-										placeholder="1M"
-										value={settings.aria2NextMinSplitSize}
-									/>
-									<SelectSetting
-										label="File allocation"
-										onChange={(value) =>
-											setImmediate({ aria2NextFileAllocation: value })
-										}
-										options={["none", "trunc", "prealloc", "falloc"].map(
-											(value) => ({ label: value, value }),
-										)}
-										value={settings.aria2NextFileAllocation}
-									/>
-									{settings.aria2NextFileAllocation !== "none" ? (
-										<Alert status="warning">
-											<Alert.Indicator />
-											<Alert.Content>
-												<Alert.Title>
-													Upfront disk allocation is enabled
-												</Alert.Title>
-												<Alert.Description>
-													This mode tries to reserve the full file size before
-													downloading and can fail with &apos;No space left on
-													device&apos; if the destination volume does not have
-													enough free space. Set File allocation to
-													&quot;none&quot; to avoid the pre-allocation step (the
-													final file must still fit).
-												</Alert.Description>
-											</Alert.Content>
-										</Alert>
-									) : null}
-									<TextSetting
-										label="Extra aria2-next arguments"
-										onCommit={(value) =>
-											setImmediate({ aria2NextExtraArgs: value })
-										}
-										placeholder="--max-tries=3 --timeout=30"
-										value={settings.aria2NextExtraArgs}
-									/>
-								</EngineCard>
-								<EngineCard
-									description="Magnet links and torrent jobs in the shared queue."
-									icon={HardDrive}
-									title="libtorrent"
-								>
-									<SliderSetting
-										display={String(settings.torrentListenPort)}
-										label="Listen port"
-										maxValue={65535}
-										minValue={1}
-										onChange={(value) => set({ torrentListenPort: value })}
-										value={settings.torrentListenPort}
-									/>
-									<SliderSetting
-										display={String(settings.torrentMaxConnections)}
-										label="Max connections"
-										maxValue={1000}
-										minValue={10}
-										onChange={(value) => set({ torrentMaxConnections: value })}
-										value={settings.torrentMaxConnections}
-									/>
-									<SliderSetting
-										display={`${settings.torrentMetadataTimeout}s`}
-										label="Metadata timeout"
-										maxValue={300}
-										minValue={15}
-										onChange={(value) => set({ torrentMetadataTimeout: value })}
-										value={settings.torrentMetadataTimeout}
-									/>
-									<TextSetting
-										label="Upload limit"
-										onCommit={(value) =>
-											setImmediate({
-												torrentUploadLimit: Math.max(0, Number(value) || 0),
-											})
-										}
-										placeholder="0 = unlimited bytes/sec"
-										value={String(settings.torrentUploadLimit)}
-									/>
-									<div className="space-y-2">
-										<ToggleSetting
-											checked={settings.torrentEnableDht}
-											label="Enable DHT"
-											onChange={(value) =>
-												setImmediate({ torrentEnableDht: value })
-											}
-										/>
-										<ToggleSetting
-											checked={settings.torrentEnablePex}
-											label="Enable peer exchange"
-											onChange={(value) =>
-												setImmediate({ torrentEnablePex: value })
-											}
-										/>
-										<ToggleSetting
-											checked={settings.torrentEnableLsd}
-											label="Enable local peer discovery"
-											onChange={(value) =>
-												setImmediate({ torrentEnableLsd: value })
-											}
-										/>
-										<ToggleSetting
-											checked={settings.torrentEnableUpnp}
-											label="Enable UPnP"
-											onChange={(value) =>
-												setImmediate({ torrentEnableUpnp: value })
-											}
-										/>
-										<ToggleSetting
-											checked={settings.torrentEnableNatpmp}
-											label="Enable NAT-PMP"
-											onChange={(value) =>
-												setImmediate({ torrentEnableNatpmp: value })
-											}
-										/>
-									</div>
-								</EngineCard>
-							</div>
-						</SectionCard>
-					) : null}
-
-					{section === "postprocessing" ? (
-						<SectionCard
-							description="Choose which metadata is embedded and how media is merged."
-							title="Post-processing"
-						>
-							<div className="space-y-2">
-								<ToggleSetting
-									checked={settings.addMetadata}
-									label="Embed metadata"
-									onChange={(value) => setImmediate({ addMetadata: value })}
-								/>
-								<ToggleSetting
-									checked={settings.writeThumbnail}
-									label="Embed thumbnail"
-									onChange={(value) => setImmediate({ writeThumbnail: value })}
-								/>
-								<ToggleSetting
-									checked={settings.writeSubs}
-									label="Embed all subtitles"
-									onChange={(value) => setImmediate({ writeSubs: value })}
-								/>
-							</div>
 							<SelectSetting
 								label="Merge output format"
 								onChange={(value) => setImmediate({ mergeOutputFormat: value })}
-								options={["mp4", "mkv", "webm", "mov"].map((value) => ({
-									label: value,
+								options={["mkv", "mp4", "webm", "mov"].map((value) => ({
+									label: value.toUpperCase(),
 									value,
 								}))}
 								value={settings.mergeOutputFormat}
 							/>
+							<div className="space-y-2">
+								<ToggleSetting
+									checked={settings.multiResolutionExtractor}
+									label="Extract multiple resolutions from direct media"
+									onChange={(value) =>
+										setImmediate({ multiResolutionExtractor: value })
+									}
+								/>
+								<ToggleSetting
+									checked={settings.addMetadata}
+									label="Embed video metadata (title, uploader, date)"
+									onChange={(value) => setImmediate({ addMetadata: value })}
+								/>
+								<ToggleSetting
+									checked={settings.writeThumbnail}
+									label="Embed thumbnail artwork as cover"
+									onChange={(value) => setImmediate({ writeThumbnail: value })}
+								/>
+								<ToggleSetting
+									checked={settings.writeSubs}
+									label="Embed official creator subtitles"
+									onChange={(value) => setImmediate({ writeSubs: value })}
+								/>
+								<ToggleSetting
+									checked={settings.writeAutoSubs}
+									label="Embed auto-generated AI subtitles"
+									onChange={(value) => setImmediate({ writeAutoSubs: value })}
+								/>
+							</div>
+							<TextSetting
+								label="Subtitle languages"
+								onCommit={(value) => setImmediate({ subLangs: value })}
+								placeholder="en,es,ja,all"
+								value={settings.subLangs}
+							/>
 						</SectionCard>
 					) : null}
+
+					{section === "aria2" ? (
+						<SectionCard
+							description="Fine-tune the aria2-next multi-connection HTTP downloader."
+							title="aria2-next Downloader"
+						>
+							<div className="grid gap-6 md:grid-cols-2">
+								<SliderSetting
+									display={String(settings.aria2NextConnections)}
+									label="Connections per file"
+									maxValue={64}
+									minValue={1}
+									onChange={(value) => set({ aria2NextConnections: value })}
+									value={settings.aria2NextConnections}
+								/>
+								<SliderSetting
+									display={`${settings.aria2NextTimeout}s`}
+									label="Connection & socket timeout"
+									maxValue={300}
+									minValue={5}
+									onChange={(value) => set({ aria2NextTimeout: value })}
+									value={settings.aria2NextTimeout}
+								/>
+							</div>
+							<TextSetting
+								label="Piece length"
+								onCommit={(value) =>
+									setImmediate({ aria2NextMinSplitSize: value })
+								}
+								placeholder="1M"
+								value={settings.aria2NextMinSplitSize}
+							/>
+							<SelectSetting
+								label="File allocation mode"
+								onChange={(value) =>
+									setImmediate({ aria2NextFileAllocation: value })
+								}
+								options={["none", "trunc", "prealloc", "falloc"].map(
+									(value) => ({ label: value, value }),
+								)}
+								value={settings.aria2NextFileAllocation}
+							/>
+							{settings.aria2NextFileAllocation !== "none" ? (
+								<Alert status="warning">
+									<Alert.Indicator />
+									<Alert.Content>
+										<Alert.Title>
+											Upfront disk allocation is enabled
+										</Alert.Title>
+										<Alert.Description>
+											Reserves full file size upfront. May fail if free disk
+											space is insufficient. Set to &quot;none&quot; to allocate
+											dynamically.
+										</Alert.Description>
+									</Alert.Content>
+								</Alert>
+							) : null}
+							<TextSetting
+								label="Per-download rate limit (bytes/sec, 0 = unlimited)"
+								onCommit={(value) =>
+									setImmediate({
+										aria2NextMaxDownloadLimit: Math.max(0, Number(value) || 0),
+									})
+								}
+								placeholder="0 = unlimited"
+								value={String(settings.aria2NextMaxDownloadLimit)}
+							/>
+							<TextSetting
+								label="Extra aria2-next arguments"
+								onCommit={(value) =>
+									setImmediate({ aria2NextExtraArgs: value })
+								}
+								placeholder="--max-tries=10 --retry-wait=2"
+								value={settings.aria2NextExtraArgs}
+							/>
+						</SectionCard>
+					) : null}
+
+					{section === "torrent" ? (
+						<SectionCard
+							description="Configure BitTorrent session tuning, encryption, and P2P protocols."
+							title="libtorrent Engine"
+						>
+							<div className="grid gap-6 md:grid-cols-3">
+								<SliderSetting
+									display={String(settings.torrentListenPort)}
+									label="Listen port"
+									maxValue={65535}
+									minValue={1}
+									onChange={(value) => set({ torrentListenPort: value })}
+									value={settings.torrentListenPort}
+								/>
+								<SliderSetting
+									display={String(settings.torrentMaxConnections)}
+									label="Max peer connections"
+									maxValue={1000}
+									minValue={10}
+									onChange={(value) => set({ torrentMaxConnections: value })}
+									value={settings.torrentMaxConnections}
+								/>
+								<SliderSetting
+									display={`${settings.torrentMetadataTimeout}s`}
+									label="Metadata timeout"
+									maxValue={300}
+									minValue={15}
+									onChange={(value) => set({ torrentMetadataTimeout: value })}
+									value={settings.torrentMetadataTimeout}
+								/>
+							</div>
+							<div className="grid gap-6 md:grid-cols-2">
+								<TextSetting
+									label="Download rate limit (bytes/sec)"
+									onCommit={(value) =>
+										setImmediate({
+											torrentDownloadLimit: Math.max(0, Number(value) || 0),
+										})
+									}
+									placeholder="0 = unlimited"
+									value={String(settings.torrentDownloadLimit)}
+								/>
+								<TextSetting
+									label="Upload rate limit (bytes/sec)"
+									onCommit={(value) =>
+										setImmediate({
+											torrentUploadLimit: Math.max(0, Number(value) || 0),
+										})
+									}
+									placeholder="0 = unlimited"
+									value={String(settings.torrentUploadLimit)}
+								/>
+							</div>
+							<div className="space-y-2">
+								<ToggleSetting
+									checked={settings.torrentSequentialDownload}
+									label="Sequential downloading (stream video as it downloads)"
+									onChange={(value) =>
+										setImmediate({ torrentSequentialDownload: value })
+									}
+								/>
+								<ToggleSetting
+									checked={settings.torrentForceEncryption}
+									label="Require BitTorrent protocol encryption (PE forced)"
+									onChange={(value) =>
+										setImmediate({ torrentForceEncryption: value })
+									}
+								/>
+							</div>
+							<div className="space-y-2">
+								<Typography className="font-medium" type="body-sm">
+									P2P Discovery Protocols
+								</Typography>
+								<div className="grid gap-2 sm:grid-cols-2">
+									<ToggleSetting
+										checked={settings.torrentEnableDht}
+										label="Enable DHT"
+										onChange={(value) =>
+											setImmediate({ torrentEnableDht: value })
+										}
+									/>
+									<ToggleSetting
+										checked={settings.torrentEnablePex}
+										label="Enable peer exchange (PEX)"
+										onChange={(value) =>
+											setImmediate({ torrentEnablePex: value })
+										}
+									/>
+									<ToggleSetting
+										checked={settings.torrentEnableLsd}
+										label="Enable local peer discovery (LSD)"
+										onChange={(value) =>
+											setImmediate({ torrentEnableLsd: value })
+										}
+									/>
+									<ToggleSetting
+										checked={settings.torrentEnableUpnp}
+										label="Enable UPnP"
+										onChange={(value) =>
+											setImmediate({ torrentEnableUpnp: value })
+										}
+									/>
+									<ToggleSetting
+										checked={settings.torrentEnableNatpmp}
+										label="Enable NAT-PMP"
+										onChange={(value) =>
+											setImmediate({ torrentEnableNatpmp: value })
+										}
+									/>
+								</div>
+							</div>
+						</SectionCard>
+					) : null}
+
+					{section === "extension" ? <ExtensionSection /> : null}
 
 					{section === "about" ? (
 						<SectionCard
 							description="Version, update source, and manual update controls."
 							title="About"
 						>
-							<AboutSection />
+							<AboutSection updater={updater} />
 						</SectionCard>
 					) : null}
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import math
 import os
 import threading
 from collections.abc import Callable
@@ -29,6 +30,9 @@ except ImportError:
 
 log = structlog.get_logger()
 
+MAX_CONCURRENT_DOWNLOADS = 8
+MAX_ARIA2_CONNECTIONS = 64
+
 DEFAULT_SETTINGS: dict[str, Any] = {
     # Download destinations. `downloadDir` is the active default;
     # `presetPaths` feed the location selector in the extension modal.
@@ -36,7 +40,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "presetPaths": [
         {"name": "Downloads", "path": os.path.join(os.path.expanduser("~"), "Downloads")},
         {"name": "Desktop", "path": os.path.join(os.path.expanduser("~"), "Desktop")},
-        {"name": "Movies", "path": os.path.join(os.path.expanduser("~"), "Movies")},
     ],
     # Network / performance.
     "rateLimit": 0,  # bytes/sec, 0 = unlimited
@@ -48,14 +51,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "addMetadata": True,
     "writeThumbnail": True,
     "writeSubs": True,
+    "writeAutoSubs": False,
+    "subLangs": "en,all",
     "mergeOutputFormat": "mkv",  # default output container
+    "multiResolutionExtractor": True,
     # Queue behaviour.
     "maxConcurrentDownloads": 5,
     # aria2-next external downloader options.
-    "aria2NextConnections": 32,
-    "aria2NextMaxConcurrent": 32,
+    "aria2NextConnections": MAX_ARIA2_CONNECTIONS,
     "aria2NextMinSplitSize": "1M",
     "aria2NextFileAllocation": "none",
+    "aria2NextTimeout": 60,
+    "aria2NextMaxDownloadLimit": 0,
     "aria2NextExtraArgs": "",
     # libtorrent session options.
     "torrentListenPort": 6881,
@@ -66,6 +73,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "torrentEnablePex": True,
     "torrentMaxConnections": 500,
     "torrentUploadLimit": 0,
+    "torrentDownloadLimit": 0,
+    "torrentSequentialDownload": True,
+    "torrentForceEncryption": False,
     "torrentMetadataTimeout": 120,
 }
 
@@ -81,12 +91,16 @@ _SCHEMA: dict[str, type | tuple[type, ...]] = {
     "addMetadata": bool,
     "writeThumbnail": bool,
     "writeSubs": bool,
+    "writeAutoSubs": bool,
+    "subLangs": str,
     "mergeOutputFormat": str,
+    "multiResolutionExtractor": bool,
     "maxConcurrentDownloads": int,
     "aria2NextConnections": int,
-    "aria2NextMaxConcurrent": int,
     "aria2NextMinSplitSize": str,
     "aria2NextFileAllocation": str,
+    "aria2NextTimeout": int,
+    "aria2NextMaxDownloadLimit": (int, float),
     "aria2NextExtraArgs": str,
     "torrentListenPort": int,
     "torrentEnableDht": bool,
@@ -96,6 +110,9 @@ _SCHEMA: dict[str, type | tuple[type, ...]] = {
     "torrentEnablePex": bool,
     "torrentMaxConnections": int,
     "torrentUploadLimit": (int, float),
+    "torrentDownloadLimit": (int, float),
+    "torrentSequentialDownload": bool,
+    "torrentForceEncryption": bool,
     "torrentMetadataTimeout": int,
 }
 
@@ -109,22 +126,48 @@ class SettingsStore:
         self._lock = threading.RLock()
         self._subscribers: list[Callable[[dict[str, Any]], None]] = []
         self._settings = copy.deepcopy(DEFAULT_SETTINGS)
+        self._persist_task: asyncio.Task[None] | None = None
 
     async def load(self) -> None:
         """Load settings from the database over the built-in defaults."""
         stored = await self._db.load_settings()
         with self._lock:
             self._settings.update(self._validate(stored))
-        log.info("Settings loaded", keys=list(stored.keys()) if isinstance(stored, dict) else [])
+        log.info("Settings loaded", keys=list(stored.keys()))
 
     def _persist(self, snapshot: dict[str, Any]) -> None:
         def schedule() -> None:
-            asyncio.ensure_future(self._db.save_settings(snapshot))
+            previous = self._persist_task
+
+            async def persist() -> None:
+                if previous is not None:
+                    await asyncio.gather(previous, return_exceptions=True)
+                try:
+                    await self._db.save_settings(snapshot)
+                except Exception:  # noqa: BLE001
+                    log.exception("Could not persist settings")
+
+            task = asyncio.create_task(persist())
+            self._persist_task = task
+
+            def cleanup(done: asyncio.Task[None]) -> None:
+                if self._persist_task is done:
+                    self._persist_task = None
+
+            task.add_done_callback(cleanup)
 
         try:
-            self._loop.call_soon_threadsafe(schedule)
+            if asyncio.get_running_loop() is self._loop:
+                schedule()
+            else:
+                self._loop.call_soon_threadsafe(schedule)
         except RuntimeError:
             log.error("Could not persist settings: event loop is closed")
+
+    async def shutdown(self) -> None:
+        task = self._persist_task
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
 
     @staticmethod
     def _clean_preset_paths(value: list[object]) -> list[dict[str, str]]:
@@ -155,12 +198,16 @@ class SettingsStore:
                 or (isinstance(expected, tuple) and any(t in numeric_types for t in expected))
             ):
                 continue
+            if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                continue
             if key == "presetPaths":
                 value = SettingsStore._clean_preset_paths(cast(list[object], value))
             if key == "mergeOutputFormat":
                 value = str(value).strip().lower()
-                if not value:
-                    value = DEFAULT_SETTINGS["mergeOutputFormat"]
+                if value not in {"mkv", "mp4", "webm", "mov"}:
+                    continue
+            if key == "aria2NextFileAllocation" and value not in {"none", "trunc", "prealloc", "falloc"}:
+                continue
             if key == "downloadDir" and not str(value).strip():
                 continue
             if key in {
@@ -169,17 +216,23 @@ class SettingsStore:
                 "retries",
                 "maxConcurrentDownloads",
                 "aria2NextConnections",
-                "aria2NextMaxConcurrent",
+                "aria2NextTimeout",
+                "aria2NextMaxDownloadLimit",
                 "torrentListenPort",
                 "torrentMaxConnections",
                 "torrentUploadLimit",
+                "torrentDownloadLimit",
                 "torrentMetadataTimeout",
             }:
                 if not isinstance(value, (int, float)) or value < 0:
                     continue
-                if key in {"concurrentFragments", "retries", "maxConcurrentDownloads", "aria2NextConnections", "aria2NextMaxConcurrent", "torrentMaxConnections", "torrentMetadataTimeout"}:
+                if key in {"concurrentFragments", "maxConcurrentDownloads", "aria2NextConnections", "aria2NextTimeout", "torrentMaxConnections", "torrentMetadataTimeout"}:
                     if value < 1:
                         continue
+                if key == "maxConcurrentDownloads" and value > MAX_CONCURRENT_DOWNLOADS:
+                    continue
+                if key == "aria2NextConnections" and value > MAX_ARIA2_CONNECTIONS:
+                    continue
                 if key == "torrentListenPort" and not 1 <= value <= 65535:
                     continue
             clean[key] = value
@@ -193,7 +246,7 @@ class SettingsStore:
         """Merge a validated partial update, persist, and notify subscribers."""
         clean = self._validate(partial)
         if not clean:
-            log.warning("Settings update empty after validation", requested_keys=list(partial.keys()) if isinstance(partial, dict) else [])
+            log.warning("Settings update empty after validation", requested_keys=list(partial.keys()))
             return self.get()
         with self._lock:
             self._settings.update(clean)

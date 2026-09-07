@@ -1,5 +1,4 @@
 fastapi[standard]
-uvicorn
 yt-dlp
 pycryptodomex
 pydantic
@@ -12,5 +11,4 @@ m3u8
 libtorrent
 send2trash
 structlog
-curl_cffi
-yt-dlp-ejs
+cachebox

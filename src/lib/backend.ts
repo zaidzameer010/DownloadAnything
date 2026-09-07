@@ -24,12 +24,16 @@ export interface Settings {
 	addMetadata: boolean;
 	writeThumbnail: boolean;
 	writeSubs: boolean;
+	writeAutoSubs: boolean;
+	subLangs: string;
 	mergeOutputFormat: string;
+	multiResolutionExtractor: boolean;
 	maxConcurrentDownloads: number;
 	aria2NextConnections: number;
-	aria2NextMaxConcurrent: number;
 	aria2NextMinSplitSize: string;
 	aria2NextFileAllocation: string;
+	aria2NextTimeout: number;
+	aria2NextMaxDownloadLimit: number;
 	aria2NextExtraArgs: string;
 	torrentListenPort: number;
 	torrentEnableDht: boolean;
@@ -39,6 +43,9 @@ export interface Settings {
 	torrentEnablePex: boolean;
 	torrentMaxConnections: number;
 	torrentUploadLimit: number;
+	torrentDownloadLimit: number;
+	torrentSequentialDownload: boolean;
+	torrentForceEncryption: boolean;
 	torrentMetadataTimeout: number;
 }
 
@@ -50,6 +57,15 @@ export type JobStatus =
 	| "completed"
 	| "failed"
 	| "cancelled";
+
+export interface TorrentProgressFile {
+	path: string;
+	filename: string;
+	size: number;
+	downloaded: number;
+	percent: number;
+	status: JobStatus;
+}
 
 export interface Job {
 	id: string;
@@ -76,6 +92,9 @@ export interface Job {
 	isPlaylist?: boolean;
 	childIds?: string[];
 	playlistCount?: number | null;
+	files?: TorrentProgressFile[];
+	mediaType?: string;
+	referer?: string;
 }
 
 export interface FormatRow {
@@ -88,9 +107,9 @@ export interface FormatRow {
 	fps: number | null;
 	vcodec: string;
 	acodec: string;
-	kind: "video" | "audio";
-	size: number | null;
-	sizeIsEstimate: boolean;
+	kind: "video" | "audio" | "file";
+	size?: number | null;
+	sizeIsEstimate?: boolean;
 	url?: string;
 }
 
@@ -147,10 +166,37 @@ export interface ProbeResponse {
 	error?: string;
 }
 
+export type DuplicateAction = "override" | "rename" | "skip" | "resume";
+
+export interface DuplicateInfo {
+	type: "job" | "file" | "torrent";
+	existing: Job | string;
+	filename: string;
+	suggestedName: string;
+}
+
 export interface DownloadResponse {
 	ok: boolean;
 	jobId?: string;
+	skipped?: boolean;
+	duplicate?: DuplicateInfo;
 	error?: string;
+}
+
+export interface DownloadPayload {
+	url: string;
+	formatId?: string;
+	directory?: string;
+	selectedFiles?: string[];
+	filename?: string;
+	title?: string;
+	thumbnail?: string;
+	engine?: string;
+	mediaType?: string;
+	referer?: string;
+	downloadPlaylist?: boolean;
+	selectedEntryUrls?: string[];
+	duplicateAction?: DuplicateAction;
 }
 
 type Listener = () => void;
@@ -198,6 +244,7 @@ function isSettings(value: unknown): value is Settings {
 		"downloadDir",
 		"proxy",
 		"cookiesFromBrowser",
+		"subLangs",
 		"mergeOutputFormat",
 		"aria2NextMinSplitSize",
 		"aria2NextFileAllocation",
@@ -209,21 +256,27 @@ function isSettings(value: unknown): value is Settings {
 		"retries",
 		"maxConcurrentDownloads",
 		"aria2NextConnections",
-		"aria2NextMaxConcurrent",
+		"aria2NextTimeout",
+		"aria2NextMaxDownloadLimit",
 		"torrentListenPort",
 		"torrentMaxConnections",
 		"torrentUploadLimit",
+		"torrentDownloadLimit",
 		"torrentMetadataTimeout",
 	];
 	const booleanKeys = [
 		"addMetadata",
 		"writeThumbnail",
 		"writeSubs",
+		"writeAutoSubs",
+		"multiResolutionExtractor",
 		"torrentEnableDht",
 		"torrentEnableLsd",
 		"torrentEnableUpnp",
 		"torrentEnableNatpmp",
 		"torrentEnablePex",
+		"torrentSequentialDownload",
+		"torrentForceEncryption",
 	];
 	return (
 		stringKeys.every((key) => typeof value[key] === "string") &&
@@ -274,6 +327,10 @@ class BackendClient {
 			if (this.ws !== ws) return;
 			this.connected = true;
 			this.reconnectDelay = 1000;
+			if (this.reconnectTimer) {
+				clearTimeout(this.reconnectTimer);
+				this.reconnectTimer = null;
+			}
 			ws.send(JSON.stringify({ type: "hello", client: "dashboard" }));
 			this.notify();
 		};
@@ -363,7 +420,10 @@ class BackendClient {
 		}
 	}
 
-	private request<T>(payload: Record<string, unknown>): Promise<T> {
+	private request<T>(
+		payload: Record<string, unknown>,
+		onReqId?: (reqId: string) => void,
+	): Promise<T> {
 		const ws = this.ws;
 		if (!ws || ws.readyState !== WebSocket.OPEN) {
 			return Promise.resolve({
@@ -372,6 +432,7 @@ class BackendClient {
 			} as T);
 		}
 		const reqId = `dash-${Date.now()}-${++this.reqCounter}`;
+		onReqId?.(reqId);
 		return new Promise<T>((resolve) => {
 			const timer = setTimeout(() => {
 				this.pending.delete(reqId);
@@ -395,26 +456,31 @@ class BackendClient {
 		});
 	}
 
-	probe(url: string, fallbackUrl?: string) {
-		return this.request<ProbeResponse & { reqId: string }>({
-			type: "probe",
-			url,
-			fallbackUrl,
+	probe(
+		url: string,
+		fallbackUrl?: string,
+		onReqId?: (reqId: string) => void,
+		mediaType?: string,
+	) {
+		return this.request<ProbeResponse & { reqId: string }>(
+			{
+				type: "probe",
+				url,
+				fallbackUrl,
+				mediaType,
+			},
+			onReqId,
+		);
+	}
+
+	cancelProbe(reqId: string) {
+		return this.request<{ ok: boolean; error?: string }>({
+			type: "probe_cancel",
+			probeReqId: reqId,
 		});
 	}
 
-	download(payload: {
-		url: string;
-		formatId?: string;
-		directory?: string;
-		selectedFiles?: string[];
-		filename?: string;
-		title?: string;
-		thumbnail?: string;
-		engine?: string;
-		downloadPlaylist?: boolean;
-		selectedEntryUrls?: string[];
-	}) {
+	download(payload: DownloadPayload) {
 		return this.request<DownloadResponse>({ type: "download", ...payload });
 	}
 
@@ -441,6 +507,22 @@ class BackendClient {
 		return this.request<{ ok?: boolean; error?: string }>({
 			type: "reveal",
 			jobId,
+		});
+	}
+
+	listBrowsers() {
+		return this.request<{
+			ok?: boolean;
+			error?: string;
+			browsers?: { id: string; name: string; executable: string }[];
+			extensionPath?: string;
+		}>({ type: "browsers_list" });
+	}
+
+	installExtension(browserId: string) {
+		return this.request<{ ok?: boolean; error?: string; message?: string }>({
+			type: "install_extension",
+			browserId,
 		});
 	}
 }
