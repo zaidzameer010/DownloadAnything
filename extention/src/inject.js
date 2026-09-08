@@ -89,6 +89,8 @@
       const ct = contentType.toLowerCase().split(';')[0].trim();
       if (ct === 'application/vnd.apple.mpegurl' || ct === 'application/x-mpegurl' || ct === 'audio/mpegurl') return 'hls';
       if (ct === 'application/dash+xml') return 'dash';
+      // MPEG-TS is transport-segment content, never a standalone download.
+      if (ct === 'video/mp2t' || ct === 'video/mp2ts') return null;
       if (ct.startsWith('video/')) return 'video';
       if (ct.startsWith('audio/')) return 'audio';
     }

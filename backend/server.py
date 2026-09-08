@@ -95,6 +95,9 @@ def _is_allowed_websocket_origin(origin: str | None, client_host: str | None) ->
 
 configure_logging(level=logging.INFO)
 log = structlog.get_logger("da.server")
+# Extension logs arrive over the websocket; keep them under their own logger
+# name so they stay separate from backend log output.
+ext_log = structlog.get_logger("da.extension")
 
 CLIENTS: set[WebSocket] = set()
 IN_FLIGHT: dict[WebSocket, dict[str, dict[str, Any]]] = {}
@@ -121,8 +124,10 @@ async def broadcast(payload: dict[str, Any]) -> None:
     if not CLIENTS:
         return
     text = orjson.dumps(payload).decode("utf-8")
+    # Snapshot: CLIENTS is mutated concurrently by connect/disconnect.
+    clients = list(CLIENTS)
     await asyncio.gather(
-        *(_send_text(ws, text) for ws in CLIENTS),
+        *(_send_text(ws, text) for ws in clients),
         return_exceptions=True,
     )
 
@@ -206,7 +211,7 @@ async def handle_message(
             )
             probe_handle["future"] = future
 
-            probe_task = asyncio.ensure_future(future)
+            probe_task = future
             cancel_task = asyncio.create_task(async_cancel_event.wait())
 
             done, pending = await asyncio.wait(
@@ -322,10 +327,12 @@ async def handle_message(
                             "ok": False, "error": "Missing URL"})
             return
         raw_directory = message.get("directory")
+        loop = asyncio.get_running_loop()
+        default_directory = (await loop.run_in_executor(None, settings_store.get))["downloadDir"]
         directory = (
             raw_directory.strip()
             if isinstance(raw_directory, str) and raw_directory.strip()
-            else settings_store.get()["downloadDir"]
+            else default_directory
         )
         format_selector = message.get("formatId")
         if not isinstance(format_selector, str) or not format_selector.strip():
@@ -348,8 +355,6 @@ async def handle_message(
         duplicate_action = str(message.get("duplicateAction") or "")
         if duplicate_action not in ("override", "rename", "skip", "resume"):
             duplicate_action = None
-
-        loop = asyncio.get_running_loop()
 
         def resolve() -> dict[str, Any]:
             resolve_media_type = "playlist" if download_playlist else media_type
@@ -454,13 +459,19 @@ async def handle_message(
 
     elif msg_type == "clear_finished":
         loop = asyncio.get_running_loop()
-        for job_id in await loop.run_in_executor(None, manager.clear_finished):
-            await broadcast({"type": "job_removed", "jobId": job_id})
+        job_ids = await loop.run_in_executor(None, manager.clear_finished)
+        if job_ids:
+            await asyncio.gather(
+                *(broadcast({"type": "job_removed", "jobId": job_id}) for job_id in job_ids),
+                return_exceptions=True,
+            )
         if req_id:
             await send(ws, {"type": "clear_finished_result", "reqId": req_id, "ok": True})
 
     elif msg_type == "settings_get":
-        await send(ws, {"type": "settings", "reqId": req_id, "settings": settings_store.get()})
+        loop = asyncio.get_running_loop()
+        settings = await loop.run_in_executor(None, settings_store.get)
+        await send(ws, {"type": "settings", "reqId": req_id, "settings": settings})
 
     elif msg_type == "settings_set":
         partial = message.get("settings")
@@ -473,13 +484,16 @@ async def handle_message(
 
     elif msg_type == "browsers_list":
         loop = asyncio.get_running_loop()
-        browsers = await loop.run_in_executor(None, list_browsers)
+        browsers, extension_path = await asyncio.gather(
+            loop.run_in_executor(None, list_browsers),
+            loop.run_in_executor(None, extension_dir),
+        )
         await send(ws, {
             "type": "browsers_list_result",
             "reqId": req_id,
             "ok": True,
             "browsers": browsers,
-            "extensionPath": str(extension_dir()),
+            "extensionPath": str(extension_path),
         })
 
     elif msg_type == "install_extension":
@@ -498,7 +512,7 @@ async def handle_message(
         client = str(message.get("client") or "extension")
         if not isinstance(context, dict):
             context = {"raw": context}
-        getattr(log, level)(msg, client=client, context=context)
+        getattr(ext_log, level)(msg, **{"client": client, **context})
 
     else:
         log.warning("Unknown websocket message type", msg_type=msg_type)
@@ -514,7 +528,10 @@ async def lifespan(app: FastAPI):
     settings_store = SettingsStore(db, loop)
     await settings_store.load()
     manager = DownloadManager(settings_store, db, loop)
-    manager.add_listener(lambda job: broadcast({"type": "job_update", "job": job}))
+    async def on_job_update(job_snapshot: dict[str, Any]) -> None:
+        await broadcast({"type": "job_update", "job": job_snapshot})
+
+    manager.add_listener(on_job_update)
     await manager.restore()
     settings_broadcast_tasks: set[asyncio.Task[None]] = set()
 
@@ -587,12 +604,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
             if message.get("type") == "hello":
                 loop = asyncio.get_running_loop()
-                jobs = await loop.run_in_executor(None, manager.list_jobs)
+                jobs, settings = await asyncio.gather(
+                    loop.run_in_executor(None, manager.list_jobs),
+                    loop.run_in_executor(None, settings_store.get),
+                )
                 await send(websocket, {
                     "type": "hello",
                     "ok": True,
                     "client": message.get("client"),
-                    "settings": settings_store.get(),
+                    "settings": settings,
                     "jobs": jobs,
                 })
                 continue
@@ -623,10 +643,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 handle["async_cancel_event"].set()
             if handle.get("future") is not None:
                 handle["future"].cancel()
-        for task in probe_tasks:
+        tasks = list(probe_tasks)
+        for task in tasks:
             task.cancel()
-        if probe_tasks:
-            await asyncio.gather(*probe_tasks, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         SEND_LOCKS.pop(websocket, None)
 
 

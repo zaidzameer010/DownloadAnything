@@ -1,88 +1,254 @@
 @import "tailwindcss";
 @import "@heroui/styles";
 
-.dark {
-	/* Refined Dark Palette & Subtle Contrast */
+.dark,
+[data-theme="dark"] {
+	color-scheme: dark;
+
+	/* Primitives */
+	--white: oklch(100% 0 0);
+	--black: oklch(0% 0 0);
+	--snow: oklch(0.9911 0 0);
+	--eclipse: oklch(0.2103 0.0059 285.89);
+
+	/* OLED Canvas & High-Contrast Foreground */
 	--background: #000000;
-	--foreground: #ededf0;
-	--muted: #8e8e96;
+	--background-secondary: color-mix(
+		in oklab,
+		var(--background) 96%,
+		var(--foreground) 4%
+	);
+	--background-tertiary: color-mix(
+		in oklab,
+		var(--background) 92%,
+		var(--foreground) 8%
+	);
+	--background-inverse: var(--foreground);
+	--foreground: var(--snow);
+	--muted: oklch(71% 0.015 286.067);
+	--link: var(--foreground);
 
-	/* Elevated Surfaces & Explicit Hover States */
-	--surface: #09090b;
-	--surface-hover: #121215;
-	--surface-foreground: #ededf0;
+	/* OLED Stepped Elevation Surfaces - Subtle, Refined Hover & Active */
+	--surface: #08080a;
+	--surface-foreground: var(--foreground);
+	--surface-hover: color-mix(
+		in oklab,
+		var(--surface) 96%,
+		var(--surface-foreground) 4%
+	);
+	--surface-active: color-mix(
+		in oklab,
+		var(--surface) 92%,
+		var(--surface-foreground) 8%
+	);
 
-	--surface-secondary: #0e0e11;
-	--surface-secondary-hover: #16161a;
+	--surface-secondary: #0d0d11;
+	--surface-secondary-foreground: var(--foreground);
+	--surface-secondary-hover: color-mix(
+		in oklab,
+		var(--surface-secondary) 96%,
+		var(--surface-foreground) 4%
+	);
+	--surface-secondary-active: color-mix(
+		in oklab,
+		var(--surface-secondary) 92%,
+		var(--surface-foreground) 8%
+	);
 
-	--surface-tertiary: #141418;
-	--surface-tertiary-hover: #1c1c23;
+	--surface-tertiary: #131318;
+	--surface-tertiary-foreground: var(--foreground);
+	--surface-tertiary-hover: color-mix(
+		in oklab,
+		var(--surface-tertiary) 96%,
+		var(--surface-foreground) 4%
+	);
+	--surface-tertiary-active: color-mix(
+		in oklab,
+		var(--surface-tertiary) 92%,
+		var(--surface-foreground) 8%
+	);
 
-	--overlay: #16161b;
-	--overlay-hover: #212128;
-	--overlay-foreground: #ededf0;
+	/* Elevated Overlays (Modals, Popovers, Menus) */
+	--overlay: #141419;
+	--overlay-foreground: var(--foreground);
+	--overlay-hover: color-mix(
+		in oklab,
+		var(--overlay) 96%,
+		var(--overlay-foreground) 4%
+	);
+	--overlay-active: color-mix(
+		in oklab,
+		var(--overlay) 92%,
+		var(--overlay-foreground) 8%
+	);
 
-	/* Sleek, Soft Monochromatic Accent */
-	--accent: #d4d4d8;
-	--accent-hover: #f4f4f7;
-	--accent-foreground: #09090b;
-	--focus: rgba(255, 255, 255, 0.4);
-
-	/* Thin, Subtle Borders & Separators */
-	--border: rgba(255, 255, 255, 0.08);
-	--border-visible: rgba(255, 255, 255, 0.12);
-	--border-hover: rgba(255, 255, 255, 0.16);
-	--separator: rgba(255, 255, 255, 0.05);
-
-	/* Component Defaults & Explicit Hover */
-	--default: #141418;
-	--default-hover: #1c1c23;
-	--default-foreground: #ededf0;
-
-	--segment: #141418;
-	--segment-foreground: #ededf0;
-
-	/* Form Input Fields & Subtle Boundaries */
-	--field-background: #09090b;
-	--field-foreground: #ededf0;
-	--field-border: rgba(255, 255, 255, 0.08);
-	--field-hover: #101013;
-	--field-border-hover: rgba(255, 255, 255, 0.16);
-	--field-border-focus: rgba(255, 255, 255, 0.35);
-
-	/* Saturated Status Colors & Direct Solid Hover States */
-	--success: #22c55e;
-	--success-hover: #16a34a;
-	--success-foreground: #ffffff;
-
-	--warning: #f59e0b;
-	--warning-hover: #d97706;
-	--warning-foreground: #000000;
-
-	--danger: #ef4444;
-	--danger-hover: #dc2626;
-	--danger-foreground: #ffffff;
-
-	/* High-Contrast Soft Tint Colors & Highly Visible Hover States */
-	--accent-soft: rgba(255, 255, 255, 0.07);
+	/* Sleek Monochrome / Silver Accent - Default, Hover, Active, Soft */
+	--accent: #ededf0;
+	--accent-foreground: #050507;
+	--accent-hover: #ffffff;
+	--accent-active: #d4d4d8;
+	--accent-soft: color-mix(in oklab, var(--accent) 10%, transparent);
 	--accent-soft-foreground: #ededf0;
-	--accent-soft-hover: rgba(255, 255, 255, 0.12);
+	--accent-soft-hover: color-mix(in oklab, var(--accent) 16%, transparent);
+	--accent-soft-active: color-mix(in oklab, var(--accent) 22%, transparent);
+	--focus: rgba(255, 255, 255, 0.45);
 
-	--success-soft: rgba(34, 197, 94, 0.14);
+	/* Delicate OLED Borders & Separators - Stateful */
+	--border: rgba(255, 255, 255, 0.08);
+	--border-visible: rgba(255, 255, 255, 0.13);
+	--border-hover: rgba(255, 255, 255, 0.18);
+	--border-active: rgba(255, 255, 255, 0.24);
+	--border-secondary: color-mix(
+		in oklab,
+		var(--surface) 80%,
+		var(--surface-foreground) 20%
+	);
+	--border-tertiary: color-mix(
+		in oklab,
+		var(--surface) 70%,
+		var(--surface-foreground) 30%
+	);
+	--separator: rgba(255, 255, 255, 0.05);
+	--separator-hover: rgba(255, 255, 255, 0.09);
+	--separator-secondary: color-mix(
+		in oklab,
+		var(--surface) 88%,
+		var(--surface-foreground) 12%
+	);
+	--separator-tertiary: color-mix(
+		in oklab,
+		var(--surface) 84%,
+		var(--surface-foreground) 16%
+	);
+
+	/* Component Defaults - Default, Hover, Active */
+	--default: #141419;
+	--default-foreground: var(--foreground);
+	--default-hover: color-mix(
+		in oklab,
+		var(--default) 95%,
+		var(--default-foreground) 5%
+	);
+	--default-active: color-mix(
+		in oklab,
+		var(--default) 91%,
+		var(--default-foreground) 9%
+	);
+	--default-soft: color-mix(in oklab, var(--default) 50%, transparent);
+	--default-soft-foreground: var(--default-foreground);
+	--default-soft-hover: color-mix(in oklab, var(--default) 60%, transparent);
+	--default-soft-active: color-mix(in oklab, var(--default) 70%, transparent);
+
+	/* Segment & Indicator States */
+	--segment: #1c1c23;
+	--segment-foreground: var(--foreground);
+	--segment-hover: #22222a;
+	--segment-active: #282832;
+
+	/* Form Input Fields - Default, Hover, Focus, Active */
+	--field-background: #08080a;
+	--field-foreground: var(--foreground);
+	--field-placeholder: var(--muted);
+	--field-border: rgba(255, 255, 255, 0.08);
+	--field-hover: color-mix(
+		in oklab,
+		var(--field-background) 96%,
+		var(--field-foreground) 4%
+	);
+	--field-active: color-mix(
+		in oklab,
+		var(--field-background) 92%,
+		var(--field-foreground) 8%
+	);
+	--field-focus: var(--field-background);
+	--field-border-hover: rgba(255, 255, 255, 0.16);
+	--field-border-focus: rgba(255, 255, 255, 0.38);
+
+	/* HeroUI v3 Status Colors - Default, Hover, Active, Soft */
+	--success: oklch(0.7329 0.1935 150.81);
+	--success-foreground: #050507;
+	--success-hover: color-mix(
+		in oklab,
+		var(--success) 92%,
+		var(--success-foreground) 8%
+	);
+	--success-active: color-mix(
+		in oklab,
+		var(--success) 85%,
+		var(--success-foreground) 15%
+	);
+	--success-soft: color-mix(in oklab, var(--success) 12%, transparent);
 	--success-soft-foreground: #4ade80;
-	--success-soft-hover: rgba(34, 197, 94, 0.22);
+	--success-soft-hover: color-mix(in oklab, var(--success) 18%, transparent);
+	--success-soft-active: color-mix(in oklab, var(--success) 24%, transparent);
 
-	--warning-soft: rgba(245, 158, 11, 0.14);
+	--warning: oklch(0.8203 0.1388 76.34);
+	--warning-foreground: #050507;
+	--warning-hover: color-mix(
+		in oklab,
+		var(--warning) 92%,
+		var(--warning-foreground) 8%
+	);
+	--warning-active: color-mix(
+		in oklab,
+		var(--warning) 85%,
+		var(--warning-foreground) 15%
+	);
+	--warning-soft: color-mix(in oklab, var(--warning) 12%, transparent);
 	--warning-soft-foreground: #fcd34d;
-	--warning-soft-hover: rgba(245, 158, 11, 0.22);
+	--warning-soft-hover: color-mix(in oklab, var(--warning) 18%, transparent);
+	--warning-soft-active: color-mix(in oklab, var(--warning) 24%, transparent);
 
-	--danger-soft: rgba(239, 68, 68, 0.14);
+	--danger: oklch(0.594 0.1967 24.63);
+	--danger-foreground: var(--snow);
+	--danger-hover: color-mix(
+		in oklab,
+		var(--danger) 92%,
+		var(--danger-foreground) 8%
+	);
+	--danger-active: color-mix(
+		in oklab,
+		var(--danger) 85%,
+		var(--danger-foreground) 15%
+	);
+	--danger-soft: color-mix(in oklab, var(--danger) 13%, transparent);
 	--danger-soft-foreground: #fca5a5;
-	--danger-soft-hover: rgba(239, 68, 68, 0.22);
+	--danger-soft-hover: color-mix(in oklab, var(--danger) 19%, transparent);
+	--danger-soft-active: color-mix(in oklab, var(--danger) 25%, transparent);
 
-	--default-soft: rgba(255, 255, 255, 0.05);
-	--default-soft-foreground: #ededf0;
-	--default-soft-hover: rgba(255, 255, 255, 0.10);
+	/* Backdrop & OLED Shadows */
+	--backdrop: rgba(0, 0, 0, 0.75);
+	--surface-shadow: 0 0 0 0 transparent inset;
+	--overlay-shadow:
+		0 0 1px 0 rgba(255, 255, 255, 0.15) inset, 0 16px 40px rgba(0, 0, 0, 0.9);
+	--field-shadow: 0 0 0 0 transparent inset;
+
+	/* Scrollbars */
+	--scrollbar-thumb: rgba(255, 255, 255, 0.18);
+	--scrollbar-track: transparent;
+	--scrollbar: var(--scrollbar-thumb);
+	--scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+@theme inline {
+	--color-surface-hover: var(--surface-hover);
+	--color-surface-active: var(--surface-active);
+	--color-surface-secondary-hover: var(--surface-secondary-hover);
+	--color-surface-secondary-active: var(--surface-secondary-active);
+	--color-surface-tertiary-hover: var(--surface-tertiary-hover);
+	--color-surface-tertiary-active: var(--surface-tertiary-active);
+	--color-overlay-hover: var(--overlay-hover);
+	--color-overlay-active: var(--overlay-active);
+	--color-accent-active: var(--accent-active);
+	--color-accent-soft-active: var(--accent-soft-active);
+	--color-default-active: var(--default-active);
+	--color-default-soft-active: var(--default-soft-active);
+	--color-border-visible: var(--border-visible);
+	--color-border-hover: var(--border-hover);
+	--color-border-active: var(--border-active);
+	--color-separator-hover: var(--separator-hover);
+	--color-segment-hover: var(--segment-hover);
+	--color-segment-active: var(--segment-active);
 }
 
 @layer base {
@@ -175,4 +341,29 @@
 .modal-no-press-scale .close-button--default:active,
 .modal-no-press-scale .close-button--default[data-pressed="true"] {
 	transform: none;
+}
+
+/* OLED Modal & Dialog Borders */
+.modal__dialog {
+	border: 1px solid var(--border-visible);
+}
+
+/* HeroUI Tabs Smooth Transition - Prevent layout jitter and absolute position jumping */
+.tabs__panel[data-exiting="true"] {
+	display: none !important;
+}
+
+.tabs__panel {
+	animation: tab-panel-enter 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes tab-panel-enter {
+	from {
+		opacity: 0;
+		transform: translateY(2px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
 }

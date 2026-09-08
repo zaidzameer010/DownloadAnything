@@ -2,11 +2,7 @@ import { Alert, Button, ProgressBar, Typography } from "@heroui/react";
 import { Info, Loader2, RefreshCw } from "lucide-react";
 import type { Updater } from "../hooks/useUpdater";
 
-export default function AboutSection({
-	updater,
-}: {
-	updater?: Updater;
-}) {
+export default function AboutSection({ updater }: { updater?: Updater }) {
 	if (!updater) {
 		return null;
 	}

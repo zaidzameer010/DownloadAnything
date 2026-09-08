@@ -87,7 +87,7 @@ except ImportError:
     from stream_size import resolve_format_size, resolve_selector_size
     from torrent import TorrentManager, is_magnet_url, is_torrent_input
 
-log = structlog.get_logger()
+log = structlog.get_logger("da.engine")
 
 # yt-dlp disallows non-media extensions by default for security. We allow them
 # only when downloading arbitrary intercepted files (.dmg, .zip, .pdf, etc.).
@@ -550,6 +550,11 @@ def _download_error_message(exc: BaseException) -> str:
 _THUMBNAIL_DATA_URI_MAX_BYTES = 300_000
 _THUMBNAIL_MIME_BY_EXT = {"png": "image/png", "webp": "image/webp", "gif": "image/gif", "jpg": "image/jpeg", "jpeg": "image/jpeg"}
 
+# ponytail: process-lifetime cache; thumbnails are immutable per (url, referer).
+# Bound it so a long session with many playlist entries cannot grow unbounded.
+_THUMBNAIL_CACHE: dict[tuple[str, str], str | None] = {}
+_THUMBNAIL_CACHE_MAX = 128
+
 
 def _fetch_thumbnail_data_uri(url: str, referer: str) -> str | None:
     """Fetch a thumbnail with the job's referer and inline it as a data URI.
@@ -558,16 +563,25 @@ def _fetch_thumbnail_data_uri(url: str, referer: str) -> str | None:
     403 the direct fetch. Fetch once here; data: URIs are also the only image
     source the Tauri CSP allows for arbitrary hosts.
     """
+    cache_key = (url, referer)
+    if cache_key in _THUMBNAIL_CACHE:
+        return _THUMBNAIL_CACHE[cache_key]
+    result: str | None = None
     try:
         with YoutubeDL({"quiet": True, "skip_download": True, "http_headers": {"Referer": referer}}) as ydl:
-            data = ydl.urlopen(url).read()
+            # Cap the read at the size limit + 1 so a huge body cannot be
+            # buffered into memory before the check.
+            data = ydl.urlopen(url).read(_THUMBNAIL_DATA_URI_MAX_BYTES + 1)
+        if data and len(data) <= _THUMBNAIL_DATA_URI_MAX_BYTES:
+            ext = _ext_from_name(url)
+            mime = _THUMBNAIL_MIME_BY_EXT.get(ext, "image/jpeg")
+            result = f"data:{mime};base64,{base64.b64encode(data).decode()}"
     except Exception:  # noqa: BLE001 - display-only; keep the original URL
-        return None
-    if not data or len(data) > _THUMBNAIL_DATA_URI_MAX_BYTES:
-        return None
-    ext = _ext_from_name(url)
-    mime = _THUMBNAIL_MIME_BY_EXT.get(ext, "image/jpeg")
-    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+        result = None
+    if len(_THUMBNAIL_CACHE) >= _THUMBNAIL_CACHE_MAX:
+        _THUMBNAIL_CACHE.clear()
+    _THUMBNAIL_CACHE[cache_key] = result
+    return result
 
 
 def _should_embed_thumbnail(job: DownloadJob, settings: dict[str, Any] | None = None) -> bool:
@@ -1174,7 +1188,7 @@ def _build_probe_result(
         # unless this is a generic file that must keep its original extension.
         if media_type == "file":
             # Generic files keep the URL filename exactly; do not synthesize an extension.
-            name = Path(unsmuggle_url(request_url, {})[0].split("?")[0].split("#")[0]).name or "download"
+            name = _url_filename(request_url)
             info["title"] = name
             filename = Path(ydl.prepare_filename(info, outtmpl="%(title)s")).name
         else:
@@ -1196,15 +1210,40 @@ def _build_probe_result(
     }
 
 
+_SEGMENT_NAME_RE = re.compile(
+    r"(?:seg(?:ment)?|chunk|frag|init)(?:[-_.]?(?:\d+|v\d+|a\d+))(?:[-_.].*)?",
+    re.IGNORECASE,
+)
+_B64_TOKEN_RE = re.compile(r"[A-Za-z0-9+/=_-]+")
+
+
+def _url_filename(url: str) -> str:
+    """Best-effort filename from a (possibly smuggled) URL, query/fragment stripped."""
+    clean_url = unsmuggle_url(url, {})[0]
+    return Path(clean_url.split("?")[0].split("#")[0]).name or "download"
+
+
 def _is_segment_candidate(url: str) -> bool:
-    filename = urlsplit(url).path.lower().rsplit("/", 1)[-1]
-    return bool(
-        re.fullmatch(
-            r"(?:seg(?:ment)?|chunk|frag|init)(?:[-_.]?(?:\d+|v\d+|a\d+))(?:[-_.].*)?",
-            filename,
-            re.IGNORECASE,
-        )
-    )
+    parsed = urlsplit(url)
+    filename = parsed.path.lower().rsplit("/", 1)[-1]
+    if _SEGMENT_NAME_RE.fullmatch(filename):
+        return True
+    # Tokenized gateways hide the real target in base64 query params
+    # (video.php?oid=<b64("1/show_hls/seg00000.ts")>) — decode and re-check
+    # so segments captured through them never reach the probe.
+    for _, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if len(value) < 8 or not _B64_TOKEN_RE.fullmatch(value):
+            continue
+        try:
+            decoded = base64.b64decode(value + "=" * (-len(value) % 4), validate=True).decode("utf-8")
+        except Exception:  # noqa: BLE001 - not base64, not a hidden path
+            continue
+        if not decoded.isprintable():
+            continue
+        name = decoded.lower().rsplit("/", 1)[-1]
+        if _SEGMENT_NAME_RE.fullmatch(name) or name.endswith((".ts", ".m4s")):
+            return True
+    return False
 
 
 def _is_master_candidate(url: str) -> bool:
@@ -1234,11 +1273,20 @@ _REMINT_UA = (
 )
 _REMINT_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 
+_PACKER_RE = re.compile(r"return p\}\('(.*)',(\d+),(\d+),'(.*?)'\.split\('\|'\)")
+_WORD_RE = re.compile(r"\b\w+\b")
+_M3U8_RE = re.compile(r"https?://[^\s'\"<>]+\.m3u8[^\s'\"<>]*")
+_EMBED_RE = re.compile(
+    r'<iframe[^>]+src=["\'](https?://[^"\']+)["\']'
+    r'|data-(?:embed|src|video)=["\'](https?://[^"\']+)["\']',
+    re.IGNORECASE,
+)
+
 
 def _extract_m3u8_from_html(html: str) -> str | None:
     """Pull an HLS manifest URL out of page HTML, unpacking packer-obfuscated players."""
     text = html
-    packed = re.search(r"return p\}\('(.*)',(\d+),(\d+),'(.*?)'\.split\('\|'\)", html)
+    packed = _PACKER_RE.search(html)
     if packed:
         payload, base, _count, words = (
             packed.group(1),
@@ -1256,8 +1304,8 @@ def _extract_m3u8_from_html(html: str) -> str | None:
             # Mirror the packer: empty word slots leave the token untouched.
             return table[index] if index < len(table) and table[index] else match.group(0)
 
-        text = re.sub(r"\b\w+\b", _word, payload)
-    found = re.search(r"https?://[^\s'\"<>]+\.m3u8[^\s'\"<>]*", text)
+        text = _WORD_RE.sub(_word, payload)
+    found = _M3U8_RE.search(text)
     return found.group(0) if found else None
 
 
@@ -1313,10 +1361,7 @@ def _remint_hls_urls(page_url: str, known_embeds: list[str] | None = None) -> li
         return results
 
     _add_manifest(_extract_m3u8_from_html(page_html), page_url)
-    embeds = re.findall(r'<iframe[^>]+src=[\"\'](https?://[^\"\']+)[\"\']', page_html, re.IGNORECASE)
-    embeds.extend(re.findall(r'data-embed=[\"\'](https?://[^\"\']+)[\"\']', page_html, re.IGNORECASE))
-    embeds.extend(re.findall(r'data-src=[\"\'](https?://[^\"\']+)[\"\']', page_html, re.IGNORECASE))
-    embeds.extend(re.findall(r'data-video=[\"\'](https?://[^\"\']+)[\"\']', page_html, re.IGNORECASE))
+    embeds = [m.group(1) or m.group(2) for m in _EMBED_RE.finditer(page_html)]
     fresh_embeds: list[str] = []
     seen_embeds: set[str] = set(known)
     for iframe_url in embeds[:8]:
@@ -1960,17 +2005,25 @@ class DownloadManager(JobManager):
         resume them explicitly (yt-dlp continues ``.part`` files).
         """
         rows = await self._db.list_jobs()
-        self._torrent_manager.restore(rows)
-        ytdlp_rows = [row for row in rows if row.get("engine") != "torrent"]
-        for row in reversed(ytdlp_rows):  # oldest first, preserves submission order
-            if row["status"] in {"queued", "downloading", "postprocessing"}:
-                row["status"] = "paused"
-            job = DownloadJob.from_row(row)
-            with self._lock:
-                self._jobs[job.id] = job
-            self._persist(job)  # write back the corrected status
+
+        def _load_ytdlp_jobs() -> None:
+            ytdlp_rows = [row for row in rows if row.get("engine") != "torrent"]
+            for row in reversed(ytdlp_rows):  # oldest first, preserves submission order
+                if row["status"] in {"queued", "downloading", "postprocessing"}:
+                    row["status"] = "paused"
+                job = DownloadJob.from_row(row)
+                with self._lock:
+                    self._jobs[job.id] = job
+                self._persist(job)  # write back the corrected status
+
+        # Row parsing and torrent restore are sync disk/JSON work; keep them
+        # off the event loop.
+        await asyncio.gather(
+            self._loop.run_in_executor(None, self._torrent_manager.restore, rows),
+            self._loop.run_in_executor(None, _load_ytdlp_jobs),
+        )
         if rows:
-            log.info("Restored %d job(s) from database", len(rows))
+            log.info("Restored jobs from database", count=len(rows))
 
     # ------------------------------------------------------------------ events
     def add_listener(self, callback: Any) -> None:
@@ -2065,18 +2118,38 @@ class DownloadManager(JobManager):
             # instead of being treated as cancelled.
             job.pause_requested = True
             job.cancel_event.set()
-        await self._loop.run_in_executor(
-            None,
-            lambda: self._executor.shutdown(wait=True, cancel_futures=True),
+
+        def _shutdown_executor(wait: bool) -> None:
+            self._executor.shutdown(wait=wait, cancel_futures=True)
+
+        def _shutdown_probe_executor() -> None:
+            self._probe_executor.shutdown(wait=True, cancel_futures=True)
+
+        # Executor teardowns and the torrent session shutdown are independent;
+        # run them concurrently and bound each so a stuck worker cannot hang
+        # app shutdown forever.
+        results = await asyncio.gather(
+            asyncio.wait_for(
+                self._loop.run_in_executor(None, _shutdown_executor, True),
+                timeout=30.0,
+            ),
+            asyncio.wait_for(
+                self._loop.run_in_executor(None, _shutdown_probe_executor),
+                timeout=30.0,
+            ),
+            self._torrent_manager.shutdown(),
+            return_exceptions=True,
         )
-        self._probe_executor.shutdown(wait=False, cancel_futures=True)
-        await self._torrent_manager.shutdown()
+        for result in results:
+            if isinstance(result, asyncio.TimeoutError):
+                log.warning("Executor shutdown timed out; continuing")
+            elif isinstance(result, BaseException):
+                log.warning("Subsystem shutdown failed", error=str(result))
         pending_listeners = list(self._listener_tasks)
-        if pending_listeners:
-            await asyncio.gather(*pending_listeners, return_exceptions=True)
         pending_db = list(self._db_tasks.values())
-        if pending_db:
-            await asyncio.gather(*pending_db, return_exceptions=True)
+        pending = [*pending_listeners, *pending_db]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         log.info("Manager shutdown complete")
 
     # ------------------------------------------------------------------- queue
@@ -2106,7 +2179,7 @@ class DownloadManager(JobManager):
             if cached and len(cached) >= 4:
                 cached_url, cached_info, cached_at, cached_result = cached
                 if (time.time() - cached_at) < PROBE_REUSE_MAX_AGE and cached_result.get("ok"):
-                    log.info("Manager probe hit memory cache", url=url, age=round(time.time() - cached_at, 2))
+                    log.info("Probe cache hit", url=url, age=round(time.time() - cached_at, 2))
                     return copy.deepcopy(cached_result)
 
         fallback_count = 0
@@ -2114,7 +2187,7 @@ class DownloadManager(JobManager):
             fallback_count = len(fallback_urls)
         elif isinstance(fallback_urls, str) and fallback_urls.strip():
             fallback_count = 1
-        log.info("Manager probe requested", url=url, fallback_count=fallback_count or None)
+        log.info("Probe requested", url=url, fallback_count=fallback_count or None)
         result, info = probe(
             url,
             fallback_urls,
@@ -2174,15 +2247,13 @@ class DownloadManager(JobManager):
             return target, stem, ext
 
         if media_type == "file":
-            clean_url = unsmuggle_url(url, {})[0]
-            name = Path(clean_url.split("?")[0].split("#")[0]).name or "download"
+            name = _url_filename(url)
             stem, ext = _stem_and_ext(name)
             target = f"{stem}.{ext}" if ext else stem
             return target, stem, ext
 
         # For media without a custom filename, guess from title or URL.
-        clean_url = unsmuggle_url(url, {})[0]
-        name = Path(clean_url.split("?")[0].split("#")[0]).name or "download"
+        name = _url_filename(url)
         stem = title or _stem_and_ext(name)[0]
         if not stem:
             return None
@@ -2341,9 +2412,7 @@ class DownloadManager(JobManager):
         if action == "rename":
             if not target_stem:
                 # No usable stem; derive one from the URL or existing filename.
-                clean_url = unsmuggle_url(url, {})[0]
-                name = Path(clean_url.split("?")[0].split("#")[0]).name or "download"
-                target_stem = _stem_and_ext(name)[0]
+                target_stem = _stem_and_ext(_url_filename(url))[0]
             if not target_ext:
                 target_ext = _ext_from_name("", filename or "")
             # Keep playlist children inside their playlist subfolder; scan that
@@ -2764,13 +2833,16 @@ class DownloadManager(JobManager):
                 return {"ok": False, "error": "File not found"}
         try:
             if platform.system() == "Darwin":
-                subprocess.run(["open", "-R", filepath], check=True)
+                subprocess.run(["open", "-R", filepath], check=True, timeout=10)
             elif platform.system() == "Windows":
                 # explorer.exe returns a nonzero exit code even on success.
-                subprocess.run(["explorer", f"/select,{filepath}"])
+                subprocess.run(["explorer", f"/select,{filepath}"], timeout=10)
             else:
-                subprocess.run(["xdg-open", str(Path(filepath).parent)], check=True)
+                subprocess.run(["xdg-open", str(Path(filepath).parent)], check=True, timeout=10)
             return {"ok": True}
+        except subprocess.TimeoutExpired:
+            log.warning("Reveal command timed out", filepath=filepath)
+            return {"ok": False, "error": "Could not reveal file: timed out"}
         except Exception as exc:  # noqa: BLE001
             log.warning("Could not reveal file", filepath=filepath, error=str(exc))
             return {"ok": False, "error": f"Could not reveal file: {exc}"}
@@ -3212,15 +3284,20 @@ class DownloadManager(JobManager):
             if job.cancel_event.is_set():
                 raise DownloadCancelled("Cancelled by user")
             path = Path(filepath)
-            job.data["filename"] = path.name
-            job.data["finalFilepath"] = str(filepath)
+            final_size: int | None = None
             try:
                 if path.is_file():
                     final_size = path.stat().st_size
-                    job.data["downloaded"] = final_size
-                    job.data["total"] = final_size
             except OSError:
                 pass
+            # job.data is shared with the event loop and other workers; all
+            # writes go through the same RLock they read under.
+            with self._lock:
+                job.data["filename"] = path.name
+                job.data["finalFilepath"] = str(filepath)
+                if final_size is not None:
+                    job.data["downloaded"] = final_size
+                    job.data["total"] = final_size
 
         return hook
 
@@ -3230,8 +3307,7 @@ class DownloadManager(JobManager):
             filename = Path(job.custom_filename).name
             stem, ext = _stem_and_ext(filename)
         else:
-            clean_url = unsmuggle_url(request_url, {})[0]
-            name = Path(clean_url.split("?")[0].split("#")[0]).name or "download"
+            name = _url_filename(request_url)
             stem, ext = _stem_and_ext(name)
             filename = None
 

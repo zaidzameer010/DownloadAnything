@@ -398,6 +398,7 @@ function connectBackend() {
           clearInterval(backendHeartbeatTimer);
           backendHeartbeatTimer = null;
         }
+        DownloadAnythingLogger.info(reason);
         resolveConnectionWaiters(false);
       };
 

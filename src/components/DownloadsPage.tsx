@@ -195,7 +195,7 @@ function TitleCell({ job }: { job: Job }) {
 
 	return (
 		<div className="flex min-w-0 items-center gap-3">
-			<div className="flex h-11 w-20 shrink-0 items-center justify-center overflow-hidden rounded-md bg-surface-tertiary text-muted">
+			<div className="flex w-20 aspect-video shrink-0 items-center justify-center overflow-hidden rounded-md bg-surface-tertiary text-muted">
 				{showThumbnail ? (
 					<img
 						alt={job.title || "Download thumbnail"}
@@ -493,7 +493,7 @@ function JobRow({
 	const titleIndent = isChild ? "ps-8" : "ps-4";
 	const base = isSelected
 		? "bg-surface-tertiary ring-1 ring-inset ring-accent/35"
-		: "bg-surface-secondary hover:bg-surface-hover";
+		: "bg-surface-secondary hover:bg-surface-secondary-hover active:bg-surface-secondary-active";
 	return (
 		<div
 			data-job-row
@@ -559,12 +559,9 @@ function ParentGroup({
 	const isSelected = selectedIds.has(root.id);
 	const rootClass = isSelected
 		? "bg-surface-tertiary ring-1 ring-inset ring-accent/35"
-		: "bg-surface-secondary hover:bg-surface-hover";
+		: "bg-surface-secondary hover:bg-surface-secondary-hover active:bg-surface-secondary-active";
 	return (
-		<Accordion
-			className="w-full overflow-hidden rounded-2xl"
-			hideSeparator
-		>
+		<Accordion className="w-full overflow-hidden rounded-2xl" hideSeparator>
 			<Accordion.Item
 				className="w-full overflow-hidden rounded-2xl"
 				id={root.id}
@@ -606,8 +603,10 @@ function ParentGroup({
 						>
 							<div className="flex min-w-0 items-center gap-2 py-4 pe-4 ps-3">
 								<Accordion.Trigger
-									aria-label={isExpanded ? "Collapse playlist" : "Expand playlist"}
-									className="flex size-7 shrink-0 flex-initial items-center justify-center rounded-lg p-0 text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
+									aria-label={
+										isExpanded ? "Collapse playlist" : "Expand playlist"
+									}
+									className="flex size-7 shrink-0 flex-initial items-center justify-center rounded-lg p-0 text-muted transition-colors hover:bg-surface-hover hover:text-foreground active:bg-surface-active active:scale-95"
 									onClick={(event) => event.stopPropagation()}
 								>
 									<Accordion.Indicator className="m-0 size-4 shrink-0 text-muted" />
@@ -756,12 +755,9 @@ function TorrentGroup({
 	const isSelected = selectedIds.has(job.id);
 	const rootClass = isSelected
 		? "bg-surface-tertiary ring-1 ring-inset ring-accent/35"
-		: "bg-surface-secondary hover:bg-surface-hover";
+		: "bg-surface-secondary hover:bg-surface-secondary-hover active:bg-surface-secondary-active";
 	return (
-		<Accordion
-			className="w-full overflow-hidden rounded-2xl"
-			hideSeparator
-		>
+		<Accordion className="w-full overflow-hidden rounded-2xl" hideSeparator>
 			<Accordion.Item
 				className="w-full overflow-hidden rounded-2xl"
 				id={job.id}
@@ -803,8 +799,10 @@ function TorrentGroup({
 						>
 							<div className="flex min-w-0 items-center gap-2 py-4 pe-4 ps-3">
 								<Accordion.Trigger
-									aria-label={isExpanded ? "Collapse torrent" : "Expand torrent"}
-									className="flex size-7 shrink-0 flex-initial items-center justify-center rounded-lg p-0 text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
+									aria-label={
+										isExpanded ? "Collapse torrent" : "Expand torrent"
+									}
+									className="flex size-7 shrink-0 flex-initial items-center justify-center rounded-lg p-0 text-muted transition-colors hover:bg-surface-hover hover:text-foreground active:bg-surface-active active:scale-95"
 									onClick={(event) => event.stopPropagation()}
 								>
 									<Accordion.Indicator className="m-0 size-4 shrink-0 text-muted" />
@@ -941,11 +939,11 @@ function PlaylistSummary({ probe }: { probe: ProbeResponse }) {
 
 	return (
 		<Card
-			className="gap-4 border border-separator bg-surface-tertiary p-4 shadow-sm"
+			className="gap-4 border border-border/70 bg-surface/75 p-4 shadow-sm"
 			variant="transparent"
 		>
 			<div className="flex items-center gap-4">
-				<div className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-surface-secondary text-muted">
+				<div className="flex w-28 sm:w-32 aspect-video shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border/50 bg-surface-secondary text-muted">
 					{result.thumbnail ? (
 						<img
 							alt={title || "Playlist thumbnail"}
@@ -957,7 +955,10 @@ function PlaylistSummary({ probe }: { probe: ProbeResponse }) {
 					)}
 				</div>
 				<div className="min-w-0">
-					<Typography className="line-clamp-2 font-semibold" type="h6">
+					<Typography
+						className="line-clamp-2 font-semibold text-foreground"
+						type="h6"
+					>
 						{title || result.webpageUrl}
 					</Typography>
 					<div className="mt-2 flex flex-wrap gap-2">
@@ -983,8 +984,7 @@ function PlaylistSummary({ probe }: { probe: ProbeResponse }) {
 				</div>
 			</div>
 			<Typography
-				className="truncate font-mono text-[11px]"
-				color="muted"
+				className="truncate font-mono text-[11px] text-muted"
 				type="body-xs"
 			>
 				{result.webpageUrl}
@@ -1011,7 +1011,7 @@ function PlaylistPanel({
 				const isCurrent = currentEntryId && entry.id === currentEntryId;
 				return (
 					<div
-						className={`flex items-start gap-3 rounded-xl border p-3 transition-colors ${selected ? "border-accent/40 bg-surface-tertiary" : "border-separator bg-surface-secondary hover:border-white/10 hover:bg-surface-tertiary"}`}
+						className={`flex items-start gap-3 rounded-xl border p-3 transition-colors ${selected ? "border-accent/60 bg-accent-soft/20" : "border-border/70 bg-surface/75 hover:border-border-visible hover:bg-surface-secondary/70 active:bg-surface-secondary"}`}
 						key={entry.url}
 					>
 						<Checkbox
@@ -1025,7 +1025,7 @@ function PlaylistPanel({
 								</Checkbox.Control>
 							</Checkbox.Content>
 						</Checkbox>
-						<div className="flex h-12 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-surface-tertiary text-muted">
+						<div className="flex w-20 aspect-video shrink-0 items-center justify-center overflow-hidden rounded-lg border border-border/50 bg-surface-secondary text-muted">
 							{entry.thumbnail ? (
 								<img
 									alt={entry.title || "Thumbnail"}
@@ -1089,11 +1089,11 @@ function MediaSummary({
 
 	return (
 		<Card
-			className="gap-4 border border-separator bg-surface-tertiary p-4 shadow-sm"
+			className="gap-4 border border-border/70 bg-surface/75 p-4 shadow-sm"
 			variant="transparent"
 		>
 			<div className="flex items-center gap-4">
-				<div className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-surface-secondary text-muted">
+				<div className="flex w-28 sm:w-32 aspect-video shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border/50 bg-surface-secondary text-muted">
 					{result.thumbnail ? (
 						<img
 							alt={result.title || "Media thumbnail"}
@@ -1107,7 +1107,10 @@ function MediaSummary({
 					)}
 				</div>
 				<div className="min-w-0">
-					<Typography className="line-clamp-2 font-semibold" type="h6">
+					<Typography
+						className="line-clamp-2 font-semibold text-foreground"
+						type="h6"
+					>
 						{result.title || result.webpageUrl}
 					</Typography>
 					<div className="mt-2 flex flex-wrap gap-2">
@@ -1133,8 +1136,7 @@ function MediaSummary({
 				</div>
 			</div>
 			<Typography
-				className="truncate font-mono text-[11px]"
-				color="muted"
+				className="truncate font-mono text-[11px] text-muted"
 				type="body-xs"
 			>
 				{displayFilename}
@@ -1161,7 +1163,8 @@ function FormatPanel({
 					{title}
 				</Typography>
 				<Typography color="muted" type="body-xs">
-					{formats.length} {formats.length === 1 ? "format" : "formats"} available
+					{formats.length} {formats.length === 1 ? "format" : "formats"}{" "}
+					available
 				</Typography>
 			</div>
 			<div className="space-y-2">
@@ -1169,7 +1172,10 @@ function FormatPanel({
 					const isSelected = format.id === selectedId;
 					const isAudio = format.kind === "audio";
 					const sublabel = isAudio
-						? [format.ext ? format.ext.toUpperCase() : null, format.acodec || null]
+						? [
+								format.ext ? format.ext.toUpperCase() : null,
+								format.acodec || null,
+							]
 								.filter(Boolean)
 								.join(" · ") || "Audio"
 						: format.resolution || format.kind;
@@ -1177,15 +1183,15 @@ function FormatPanel({
 					return (
 						<Button
 							aria-pressed={isSelected}
-							className={`h-auto min-h-14 justify-between rounded-xl px-4 py-3 text-start transition-colors ${isSelected ? "border border-accent/40 bg-surface-tertiary" : "border border-separator bg-surface-secondary hover:border-white/10"}`}
+							className={`h-auto min-h-14 justify-between rounded-xl px-4 py-3 text-start transition-colors ${isSelected ? "border border-accent/60 bg-accent-soft/25 ring-1 ring-accent/25 shadow-sm" : "border border-border/70 bg-surface/75 hover:border-border-visible hover:bg-surface-secondary/70 active:bg-surface-secondary"}`}
 							fullWidth
 							onPress={() => onSelect(format.id)}
-							variant={isSelected ? "secondary" : "tertiary"}
+							variant="outline"
 							key={format.id}
 						>
 							<span className="flex min-w-0 items-center gap-3">
 								<span
-									className={`flex size-5 items-center justify-center rounded-full border transition-colors ${isSelected ? "border-accent/50 bg-accent text-accent-foreground" : "border-white/10"}`}
+									className={`flex size-5 items-center justify-center rounded-full border transition-colors ${isSelected ? "border-accent bg-accent text-accent-foreground shadow-xs" : "border-border-visible bg-surface-secondary/80 text-transparent"}`}
 								>
 									{isSelected ? <Check aria-hidden className="size-3" /> : null}
 								</span>
@@ -1203,7 +1209,7 @@ function FormatPanel({
 							</span>
 							<span className="flex shrink-0 items-center gap-3">
 								<Chip
-									color={format.kind === "video" ? "accent" : "default"}
+									color={isSelected ? "accent" : "default"}
 									size="sm"
 									variant="soft"
 								>
@@ -1356,81 +1362,71 @@ function ProbeModal({
 									: "Select a format"}
 						</Modal.Heading>
 					</Modal.Header>
-					<Modal.Body className="gap-6">
+					<Modal.Body className="gap-5">
+						{selectedKey === "playlist" ? (
+							<PlaylistSummary probe={probe} />
+						) : (
+							<MediaSummary probe={probe} selectedFormat={selectedFormat} />
+						)}
+
 						<Tabs
 							selectedKey={selectedKey}
 							onSelectionChange={(key) =>
 								setSelectedKey(String(key) as "video" | "audio" | "playlist")
 							}
 						>
-							<Tabs.ListContainer className="rounded-full border border-separator/60 bg-surface-secondary p-1">
-								<Tabs.List
-									aria-label="Download options"
-									className="gap-1 p-0"
-								>
+							<Tabs.ListContainer className="rounded-full border border-border/60 bg-surface/80 p-1">
+								<Tabs.List aria-label="Download options" className="gap-1 p-0">
 									{hasVideo ? (
 										<Tabs.Tab
-											className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors data-[selected=true]:text-foreground"
+											className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors text-muted data-[selected=true]:text-foreground"
 											id="video"
 										>
 											Video
-											<Tabs.Indicator className="rounded-full bg-surface-tertiary shadow-sm" />
+											<Tabs.Indicator className="rounded-full bg-segment border border-border-visible/60 shadow-sm" />
 										</Tabs.Tab>
 									) : null}
 									{hasAudio ? (
 										<Tabs.Tab
-											className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors data-[selected=true]:text-foreground"
+											className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors text-muted data-[selected=true]:text-foreground"
 											id="audio"
 										>
 											Audio
-											<Tabs.Indicator className="rounded-full bg-surface-tertiary shadow-sm" />
+											<Tabs.Indicator className="rounded-full bg-segment border border-border-visible/60 shadow-sm" />
 										</Tabs.Tab>
 									) : null}
 									{hasPlaylist ? (
 										<Tabs.Tab
-											className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors data-[selected=true]:text-foreground"
+											className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors text-muted data-[selected=true]:text-foreground"
 											id="playlist"
 										>
 											Playlist
-											<Tabs.Indicator className="rounded-full bg-surface-tertiary shadow-sm" />
+											<Tabs.Indicator className="rounded-full bg-segment border border-border-visible/60 shadow-sm" />
 										</Tabs.Tab>
 									) : null}
 								</Tabs.List>
 							</Tabs.ListContainer>
 							{hasVideo ? (
-								<Tabs.Panel id="video">
-									<div className="space-y-6 pt-2">
-										<MediaSummary
-											probe={probe}
-											selectedFormat={selectedVideoFormat}
-										/>
-										<VideoPanel
-											formats={videoFormats}
-											selectedId={selectedVideoFormatId}
-											onSelect={setSelectedVideoFormatId}
-										/>
-									</div>
+								<Tabs.Panel id="video" className="p-0 pt-2">
+									<VideoPanel
+										formats={videoFormats}
+										selectedId={selectedVideoFormatId}
+										onSelect={setSelectedVideoFormatId}
+									/>
 								</Tabs.Panel>
 							) : null}
 							{hasAudio ? (
-								<Tabs.Panel id="audio">
-									<div className="space-y-6 pt-2">
-										<MediaSummary
-											probe={probe}
-											selectedFormat={selectedAudioFormat}
-										/>
-										<AudioPanel
-											formats={audioFormats}
-											selectedId={selectedAudioFormatId}
-											onSelect={setSelectedAudioFormatId}
-										/>
-									</div>
+								<Tabs.Panel id="audio" className="p-0 pt-2">
+									<AudioPanel
+										formats={audioFormats}
+										selectedId={selectedAudioFormatId}
+										onSelect={setSelectedAudioFormatId}
+									/>
 								</Tabs.Panel>
 							) : null}
 							{hasPlaylist ? (
-								<Tabs.Panel id="playlist">
-									<div className="space-y-4 pt-2">
-										<PlaylistSummary probe={probe} />
+								<Tabs.Panel id="playlist" className="p-0 pt-2">
+									<div className="space-y-4">
 										<div className="flex items-center justify-between">
 											<Typography className="font-semibold" type="h6">
 												Videos to download
@@ -1542,7 +1538,7 @@ function TorrentDrawer({
 					</Drawer.Header>
 					<Drawer.Body className="gap-6">
 						<Card
-							className="gap-4 border border-separator bg-surface-secondary p-4 shadow-none"
+							className="gap-4 border border-border/70 bg-surface/75 p-4 shadow-sm"
 							variant="transparent"
 						>
 							<div className="flex items-center gap-4">
@@ -1550,7 +1546,10 @@ function TorrentDrawer({
 									<Archive aria-hidden className="size-7" />
 								</div>
 								<div className="min-w-0">
-									<Typography className="line-clamp-2 font-semibold" type="h6">
+									<Typography
+										className="line-clamp-2 font-semibold text-foreground"
+										type="h6"
+									>
 										{torrent.name}
 									</Typography>
 									<div className="mt-2 flex flex-wrap gap-2">
@@ -1576,7 +1575,7 @@ function TorrentDrawer({
 									{selectedFiles.size} selected
 								</Typography>
 							</div>
-							<div className="divide-y divide-separator rounded-xl border border-separator">
+							<div className="divide-y divide-border/60 rounded-xl border border-border/70 bg-surface/60">
 								{torrent.files.map((file) => (
 									<Checkbox
 										className="w-full px-4 py-3"
@@ -1686,9 +1685,9 @@ function JobPropertiesModal({
 								src={job.thumbnail}
 							/>
 						) : null}
-						<dl className="grid gap-px overflow-hidden rounded-2xl border border-separator bg-separator sm:grid-cols-2">
+						<dl className="grid gap-px overflow-hidden rounded-2xl border border-border/70 bg-border/60 sm:grid-cols-2">
 							{fields.map(([label, value]) => (
-								<div className="bg-surface-secondary p-3" key={label}>
+								<div className="bg-surface/85 p-3" key={label}>
 									<dt className="text-[11px] font-semibold tracking-wide text-muted uppercase">
 										{label}
 									</dt>
@@ -1745,22 +1744,25 @@ function DuplicatePrompt({
 									: "A file with this name already exists in the destination."}
 						</Typography>
 						{existing ? (
-							<Typography
-								className="wrap-break-word font-mono"
-								color="muted"
-								type="body-xs"
-							>
-								Existing: {existing}
-							</Typography>
+							<div className="rounded-xl border border-border/60 bg-surface/75 p-3">
+								<Typography
+									className="wrap-break-word font-mono text-foreground/90"
+									type="body-xs"
+								>
+									<span className="text-muted">Existing:</span> {existing}
+								</Typography>
+							</div>
 						) : null}
 						{state.info.suggestedName ? (
-							<Typography
-								className="wrap-break-word font-mono"
-								color="muted"
-								type="body-xs"
-							>
-								Suggested: {state.info.suggestedName}
-							</Typography>
+							<div className="rounded-xl border border-border/60 bg-surface/75 p-3">
+								<Typography
+									className="wrap-break-word font-mono text-foreground/90"
+									type="body-xs"
+								>
+									<span className="text-muted">Suggested:</span>{" "}
+									{state.info.suggestedName}
+								</Typography>
+							</div>
 						) : null}
 					</Modal.Body>
 					<Modal.Footer>
@@ -1863,7 +1865,9 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 				if (anchorIdx !== -1 && currentIdx !== -1) {
 					const start = Math.min(anchorIdx, currentIdx);
 					const end = Math.max(anchorIdx, currentIdx);
-					const rangeIds = selectableJobs.slice(start, end + 1).map((j) => j.id);
+					const rangeIds = selectableJobs
+						.slice(start, end + 1)
+						.map((j) => j.id);
 
 					setSelectedIds((prev) => {
 						if (isMeta) {
@@ -2050,7 +2054,11 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 			title: result.title,
 			thumbnail: result.thumbnail,
 			engine: probe.engine,
-			mediaType: isAudio ? "audio" : format.kind === "file" ? "file" : undefined,
+			mediaType: isAudio
+				? "audio"
+				: format.kind === "file"
+					? "file"
+					: undefined,
 			referer: probeSourceUrl || undefined,
 			duplicateAction,
 		});
@@ -2263,10 +2271,7 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 					onSelectionChange={(key) => setFilter(String(key) as Filter)}
 				>
 					<Tabs.ListContainer className="rounded-full border border-separator/60 bg-surface-secondary p-1">
-						<Tabs.List
-							aria-label="Filter downloads"
-							className="gap-1 p-0"
-						>
+						<Tabs.List aria-label="Filter downloads" className="gap-1 p-0">
 							{FILTERS.map(({ key, label }) => (
 								<Tabs.Tab
 									className="gap-2 rounded-full px-3.5 py-1.5 text-xs sm:text-sm font-medium transition-colors data-[selected=true]:text-foreground"

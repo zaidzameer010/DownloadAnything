@@ -40,7 +40,7 @@ function Navigation({
 				>
 					{navigation.map(({ key, label, icon: Icon }) => (
 						<Tabs.Tab
-							className="justify-start gap-3 rounded-xl px-3 py-2.5 text-sm font-medium"
+							className="justify-start gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors hover:text-foreground hover:bg-surface-secondary-hover active:bg-surface-secondary-active active:scale-[0.98] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-focus"
 							id={key}
 							key={key}
 						>
@@ -59,11 +59,13 @@ function App() {
 	const backend = useBackend();
 	const [page, setPage] = useState<Page>("downloads");
 
-	const activeJobs = backend.jobs.filter(
-		(job) =>
-			!job.parentId &&
-			["queued", "downloading", "postprocessing"].includes(job.status),
-	).length;
+	const activeJobs = useMemo(
+		() =>
+			backend.jobs.filter(
+				(job) => job.status === "downloading" || job.status === "queued",
+			).length,
+		[backend.jobs],
+	);
 
 	return (
 		<div className="dark h-dvh w-full overflow-hidden bg-background text-foreground">
@@ -106,7 +108,7 @@ function App() {
 					</div>
 
 					<Card
-						className="mt-auto gap-4 border border-separator bg-surface p-4 shadow-none"
+						className="mt-auto gap-4 border border-separator bg-surface-tertiary p-4 shadow-sm"
 						variant="transparent"
 					>
 						<div className="flex items-center justify-between gap-3">

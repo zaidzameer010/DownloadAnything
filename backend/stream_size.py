@@ -8,6 +8,7 @@ cookies, impersonation, and proxy settings are respected.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 import re
 import threading
 import xml.etree.ElementTree as ET
@@ -20,9 +21,15 @@ from yt_dlp.networking.common import Request
 from yt_dlp.networking.exceptions import RequestError
 from yt_dlp.utils import int_or_none, parse_duration
 
-log = structlog.get_logger()
+log = structlog.get_logger("da.stream_size")
 
 _SIZE_REQUEST_TIMEOUT = 5.0
+# Manifests (m3u8/MPD) are text; refuse to buffer more than this before parsing.
+_MANIFEST_MAX_BYTES = 4_000_000
+
+# Guards the per-ydl HLS/MPD caches, which are written from the
+# resolve_selector_size worker pool.
+_CACHE_LOCK = threading.Lock()
 
 
 def _safe_get_header(response: Any, name: str) -> str | None:
@@ -30,10 +37,6 @@ def _safe_get_header(response: Any, name: str) -> str | None:
         return response.get_header(name)
     except Exception:  # noqa: BLE001
         return None
-
-
-def _local_name(tag: str) -> str:
-    return tag.split("}")[-1]
 
 
 def _bytes_from_tbr(tbr: float, duration: float) -> int:
@@ -115,6 +118,7 @@ def _http_content_length(
     return None
 
 
+@lru_cache(maxsize=512)
 def _parse_m3u8_byterange(value: str | None) -> int | None:
     if not value:
         return None
@@ -126,12 +130,14 @@ def _parse_m3u8_byterange(value: str | None) -> int | None:
 
 
 def _hls_fetch_playlist(ydl: Any, url: str, headers: dict[str, str] | None) -> m3u8.M3U8 | None:
-    cache: dict[str, m3u8.M3U8] | None = getattr(ydl, "_stream_size_hls_cache", None)
-    if cache is None:
-        cache = {}
-        ydl._stream_size_hls_cache = cache
-    if url in cache:
-        return cache[url]
+    with _CACHE_LOCK:
+        cache: dict[str, m3u8.M3U8] | None = getattr(ydl, "_stream_size_hls_cache", None)
+        if cache is None:
+            cache = {}
+            ydl._stream_size_hls_cache = cache
+        cached = cache.get(url)
+    if cached is not None:
+        return cached
 
     try:
         req = Request(
@@ -140,9 +146,13 @@ def _hls_fetch_playlist(ydl: Any, url: str, headers: dict[str, str] | None) -> m
             extensions={"timeout": _SIZE_REQUEST_TIMEOUT},
         )
         with ydl.urlopen(req) as response:
-            text = response.read().decode("utf-8", errors="replace")
+            text = response.read(_MANIFEST_MAX_BYTES + 1).decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         log.debug("Could not fetch HLS playlist", url=url, error=str(exc))
+        return None
+
+    if len(text) > _MANIFEST_MAX_BYTES:
+        log.debug("HLS playlist too large to parse", url=url)
         return None
 
     try:
@@ -151,7 +161,8 @@ def _hls_fetch_playlist(ydl: Any, url: str, headers: dict[str, str] | None) -> m
         log.debug("Could not parse HLS playlist", url=url, error=str(exc))
         return None
 
-    cache[url] = playlist
+    with _CACHE_LOCK:
+        cache[url] = playlist
     return playlist
 
 
@@ -190,38 +201,71 @@ def _hls_init_size(playlist: m3u8.M3U8) -> int:
     return total
 
 
+def _hls_segment_size_sample(ydl: Any, url: str, headers: dict[str, str] | None) -> int | None:
+    """Return one segment's size via a ranged request (or full Content-Length)."""
+    try:
+        req = Request(
+            url,
+            headers={**(headers or {}), "Range": "bytes=0-0"},
+            extensions={"timeout": _SIZE_REQUEST_TIMEOUT},
+        )
+        with ydl.urlopen(req) as response:
+            content_range = _safe_get_header(response, "Content-Range") or ""
+            length = (_safe_get_header(response, "Content-Length") or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Could not sample HLS segment size", url=url, error=str(exc))
+        return None
+    m = re.search(r"/(\d+)\s*$", content_range)
+    if m:
+        return int(m.group(1))
+    if length.isdigit():
+        # Server ignored the Range and served the whole segment; still a sample.
+        return int(length)
+    return None
+
+
 def _hls_size(
     ydl: Any,
     url: str,
     headers: dict[str, str] | None,
     fmt: Any,
     info: Any,
+    _depth: int = 0,
 ) -> tuple[int, bool] | None:
     playlist = _hls_fetch_playlist(ydl, url, headers)
     if playlist is None:
         return None
 
     if playlist.is_variant:
+        if _depth >= 2:
+            return None
         best = _hls_pick_best_variant(playlist)
         if best is None or not best.absolute_uri:
             return None
-        return _hls_size(ydl, best.absolute_uri, headers, fmt, info)
+        return _hls_size(ydl, best.absolute_uri, headers, fmt, info, _depth + 1)
 
-    if not playlist.is_endlist and playlist.playlist_type != "VOD":
+    # m3u8 normalizes the playlist type to lowercase ('vod').
+    if not playlist.is_endlist and (playlist.playlist_type or "").upper() != "VOD":
         return None
 
     if not playlist.segments:
         return None
 
     init_size = _hls_init_size(playlist)
+    segments = playlist.segments
     try:
-        duration = sum(float(seg.duration or 0) for seg in playlist.segments)
+        duration = 0.0
+        all_have_ranges = True
+        for seg in segments:
+            duration += float(seg.duration or 0)
+            if not seg.byterange:
+                all_have_ranges = False
     except Exception:  # noqa: BLE001
         duration = None
+        all_have_ranges = all(seg.byterange for seg in segments)
 
-    all_have_ranges = all(seg.byterange for seg in playlist.segments)
     if all_have_ranges:
-        media_size = sum(_parse_m3u8_byterange(seg.byterange) or 0 for seg in playlist.segments)
+        media_size = sum(_parse_m3u8_byterange(seg.byterange) or 0 for seg in segments)
         return init_size + media_size, False
 
     # Fall back to bitrate/duration estimate.
@@ -240,6 +284,13 @@ def _hls_size(
                 if best and best_bw:
                     # HLS BANDWIDTH is bits per second; _bytes_from_tbr wants kbps.
                     return _bytes_from_tbr(float(best_bw) / 1000.0, duration) + init_size, True
+
+    # No byteranges and no bitrate anywhere (tokenized-gateway VOD playlists
+    # carry neither): sample one segment and extrapolate across the playlist.
+    if playlist.segments:
+        sample = _hls_segment_size_sample(ydl, playlist.segments[0].absolute_uri, headers)
+        if sample:
+            return init_size + sample * len(playlist.segments), True
 
     return None
 
@@ -284,7 +335,7 @@ def _dash_representation_info(
         if target_id and rep.get("id") == target_id:
             return rep, mpd_duration, mpd_type
     for rep, _ in rep_parents:
-        if target_bandwidth and int(rep.get("bandwidth") or 0) == target_bandwidth:
+        if target_bandwidth is not None and int_or_none(rep.get("bandwidth")) == target_bandwidth:
             return rep, mpd_duration, mpd_type
 
     # Fallback: choose a representation whose AdaptationSet content type matches
@@ -338,6 +389,7 @@ def _dash_nearest_base_url(
     return default
 
 
+@lru_cache(maxsize=512)
 def _dash_range_size(range_str: str) -> int:
     """Parse an HTTP byte range like '863-7113' (inclusive) into a byte count."""
     parts = range_str.split("-")
@@ -357,13 +409,15 @@ def _dash_size(
     fmt: Any,
     info: Any,
 ) -> tuple[int, bool] | None:
-    cache: dict[str, Any] | None = getattr(ydl, "_stream_size_mpd_cache", None)
-    if cache is None:
-        cache = {}
-        ydl._stream_size_mpd_cache = cache
+    with _CACHE_LOCK:
+        cache: dict[str, Any] | None = getattr(ydl, "_stream_size_mpd_cache", None)
+        if cache is None:
+            cache = {}
+            ydl._stream_size_mpd_cache = cache
+        cached = cache.get(url)
 
-    if url in cache:
-        root = cache[url]
+    if cached is not None:
+        root, parents = cached
         if root is False:
             return None
     else:
@@ -374,18 +428,24 @@ def _dash_size(
                 extensions={"timeout": _SIZE_REQUEST_TIMEOUT},
             )
             with ydl.urlopen(req) as response:
-                text = response.read().decode("utf-8", errors="replace")
+                text = response.read(_MANIFEST_MAX_BYTES + 1).decode("utf-8", errors="replace")
         except Exception as exc:  # noqa: BLE001
             log.debug("Could not fetch DASH MPD", url=url, error=str(exc))
+            return None
+        if len(text) > _MANIFEST_MAX_BYTES:
+            log.debug("DASH MPD too large to parse", url=url)
             return None
         try:
             root = ET.fromstring(text)
         except ET.ParseError as exc:
             log.debug("Could not parse DASH MPD", url=url, error=str(exc))
             # Cache the failure so repeated lookups skip the fetch and parse.
-            cache[url] = False
+            with _CACHE_LOCK:
+                cache[url] = (False, None)
             return None
-        cache[url] = root
+        parents = _dash_parent_map(root)
+        with _CACHE_LOCK:
+            cache[url] = (root, parents)
 
     rep, duration, mpd_type = _dash_representation_info(root, fmt)
     if rep is None:
@@ -394,7 +454,6 @@ def _dash_size(
     if mpd_type == "dynamic" and duration is None:
         return None
 
-    parents = _dash_parent_map(root)
     base_url = _dash_nearest_base_url(parents, rep, url)
     bandwidth = int_or_none(rep.get("bandwidth"))
 
@@ -446,8 +505,9 @@ def _fragments_size(fragments: list[Any]) -> tuple[int, bool] | None:
     missing = False
 
     for frag in fragments:
-        if frag.get("filesize"):
-            total += int(frag["filesize"])
+        frag_size = int_or_none(frag.get("filesize"))
+        if frag_size:
+            total += frag_size
             continue
 
         byte_range = frag.get("byte_range")
@@ -599,10 +659,7 @@ def resolve_selector_size(
         log.debug("Could not resolve format selector", selector=selector, error=str(exc))
         return None
 
-    total = 0
-    is_estimate = False
-    any_known = False
-
+    results: list[tuple[int, bool]] = []
     if len(chosen) > 1:
         with ThreadPoolExecutor(max_workers=min(4, len(chosen)), thread_name_prefix="selector-size") as executor:
             futures = [
@@ -623,10 +680,7 @@ def resolve_selector_size(
                 result = future.result()
                 if result is None:
                     return None
-                any_known = True
-                size, estimate = result
-                total += size
-                is_estimate = is_estimate or estimate
+                results.append(result)
     else:
         for fmt in chosen:
             if cancel_event and cancel_event.is_set():
@@ -634,12 +688,11 @@ def resolve_selector_size(
             result = resolve_format_size(ydl, fmt, info, allow_network=allow_network, cancel_event=cancel_event)
             if result is None:
                 return None
-            any_known = True
-            size, estimate = result
-            total += size
-            is_estimate = is_estimate or estimate
+            results.append(result)
 
-    if not any_known:
+    if not results:
         return None
 
+    total = sum(size for size, _ in results)
+    is_estimate = any(estimate for _, estimate in results)
     return total, is_estimate, len(chosen)

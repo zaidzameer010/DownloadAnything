@@ -28,7 +28,7 @@ try:
 except ImportError:
     from db import Database
 
-log = structlog.get_logger()
+log = structlog.get_logger("da.settings")
 
 MAX_CONCURRENT_DOWNLOADS = 8
 MAX_ARIA2_CONNECTIONS = 64
@@ -239,8 +239,15 @@ class SettingsStore:
         return clean
 
     def get(self) -> dict[str, Any]:
+        # ponytail: shallow snapshot — nested values are only presetPaths, which
+        # is replaced wholesale on update and never mutated in place by readers.
+        # Switch to deepcopy if a reader ever mutates nested settings.
         with self._lock:
-            return copy.deepcopy(self._settings)
+            snapshot = dict(self._settings)
+        preset_paths = snapshot.get("presetPaths")
+        if isinstance(preset_paths, list):
+            snapshot["presetPaths"] = list(preset_paths)
+        return snapshot
 
     def update(self, partial: dict[str, Any]) -> dict[str, Any]:
         """Merge a validated partial update, persist, and notify subscribers."""
@@ -250,7 +257,10 @@ class SettingsStore:
             return self.get()
         with self._lock:
             self._settings.update(clean)
-            snapshot = copy.deepcopy(self._settings)
+            snapshot = dict(self._settings)
+            preset_paths = snapshot.get("presetPaths")
+            if isinstance(preset_paths, list):
+                snapshot["presetPaths"] = list(preset_paths)
         log.info("Settings updated", changed_keys=list(clean.keys()))
         self._persist(snapshot)
         for callback in self._subscribers:

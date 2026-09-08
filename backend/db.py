@@ -21,7 +21,7 @@ import aiosqlite
 import orjson
 import structlog
 
-log = structlog.get_logger()
+log = structlog.get_logger("da.db")
 
 
 def app_support_dir() -> Path:
@@ -98,24 +98,27 @@ class Database:
         """Add columns introduced after the initial schema."""
         async with self.conn.execute("PRAGMA table_info(jobs)") as cursor:
             columns = {row[1] for row in await cursor.fetchall()}
+        added: list[str] = []
         if "media_type" not in columns:
             await self.conn.execute("ALTER TABLE jobs ADD COLUMN media_type TEXT")
-            log.info("Migrated jobs table: added media_type column")
+            added.append("media_type")
         if "selected_files" not in columns:
             await self.conn.execute("ALTER TABLE jobs ADD COLUMN selected_files TEXT")
-            log.info("Migrated jobs table: added selected_files column")
+            added.append("selected_files")
         if "parent_id" not in columns:
             await self.conn.execute("ALTER TABLE jobs ADD COLUMN parent_id TEXT")
-            log.info("Migrated jobs table: added parent_id column")
+            added.append("parent_id")
         if "child_ids" not in columns:
             await self.conn.execute("ALTER TABLE jobs ADD COLUMN child_ids TEXT")
-            log.info("Migrated jobs table: added child_ids column")
+            added.append("child_ids")
         if "is_playlist" not in columns:
             await self.conn.execute("ALTER TABLE jobs ADD COLUMN is_playlist INTEGER NOT NULL DEFAULT 0")
-            log.info("Migrated jobs table: added is_playlist column")
+            added.append("is_playlist")
         if "referer" not in columns:
             await self.conn.execute("ALTER TABLE jobs ADD COLUMN referer TEXT")
-            log.info("Migrated jobs table: added referer column")
+            added.append("referer")
+        if added:
+            log.info("Migrated jobs table", added_columns=added)
 
     async def close(self) -> None:
         if self._conn is not None:

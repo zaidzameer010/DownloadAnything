@@ -136,7 +136,7 @@ class _Aria2RPCClient:
         return self
 
     async def __aexit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
-        await self.close()
+        return
 
     def _params(self, params: list[Any] | None) -> list[Any]:
         call_params: list[Any] = []
@@ -204,9 +204,6 @@ class _Aria2RPCClient:
                 results.append(item)
         return results
 
-    async def close(self) -> None:
-        return
-
 
 def _int(value: Any) -> int:
     try:
@@ -252,23 +249,27 @@ def _absorb_entry(
     agg: dict[str, int],
     entry: dict[str, Any],
 ) -> None:
-    """Fold a parsed entry into ``progress_by_gid``, updating running totals."""
+    """Fold a parsed entry into ``progress_by_gid``, updating running totals.
+
+    Entries always come from :func:`_parse_entry`, so numeric fields are
+    already ints and need no re-coercion.
+    """
     gid = entry.get("gid")
     if not gid:
         return
     prev = progress_by_gid.get(gid)
     if prev is not None:
-        agg["downloaded"] -= _int(prev.get("completedLength"))
-        agg["total"] -= _int(prev.get("totalLength"))
-        agg["speed"] -= _int(prev.get("downloadSpeed"))
+        agg["downloaded"] -= prev["completedLength"]
+        agg["total"] -= prev["totalLength"]
+        agg["speed"] -= prev["downloadSpeed"]
         if _entry_finished(prev):
             agg["completed"] -= 1
         if _entry_settled(prev):
             agg["settled"] -= 1
     progress_by_gid[gid] = entry
-    agg["downloaded"] += _int(entry.get("completedLength"))
-    agg["total"] += _int(entry.get("totalLength"))
-    agg["speed"] += _int(entry.get("downloadSpeed"))
+    agg["downloaded"] += entry["completedLength"]
+    agg["total"] += entry["totalLength"]
+    agg["speed"] += entry["downloadSpeed"]
     if _entry_finished(entry):
         agg["completed"] += 1
     if _entry_settled(entry):
@@ -285,7 +286,9 @@ async def _read_stdout(
     while True:
         try:
             line = await proc.stdout.readline()
-        except Exception:  # noqa: BLE001
+        except asyncio.CancelledError:
+            raise
+        except (OSError, ValueError, asyncio.IncompleteReadError):
             break
         if not line:
             break
@@ -350,6 +353,65 @@ def _purge_resume_state(tmpfilename: str) -> bool:
     return clean
 
 
+def _fragment_precheck(
+    fragments: list[Any],
+    fragment_dir: Path,
+    fragment_output: str,
+) -> tuple[list[tuple[str, list[Any]]], int, int]:
+    """Disk-bound fragment pre-check; runs off the event loop.
+
+    Returns (rpc_calls, skipped_fragment_count, skipped_bytes).
+    """
+    built_calls: list[tuple[str, list[Any]]] = []
+    skipped = 0
+    skipped_size = 0
+    for fragment_index, fragment in enumerate(fragments):
+        if not isinstance(fragment, dict) or not isinstance(fragment.get("url"), str):
+            raise Aria2RPCError(f"Fragment {fragment_index} has no downloadable URL")
+
+        # yt-dlp's external-fragment path resets its fragment index and
+        # re-delegates the whole manifest on every run, and allow-overwrite
+        # makes aria2 re-download fragments a previous session already
+        # finished — pausing and resuming would restart the job from
+        # scratch. A fragment is already complete when its file exists
+        # with content and its .aria2 control file is gone (aria2 removes
+        # the control file on completion; interrupted downloads keep
+        # theirs and resume). Skip those; yt-dlp assembles the final
+        # output from the fragment files on disk either way.
+        fragment_path = fragment_dir / f"{fragment_output}-Frag{fragment_index}"
+        try:
+            st_size = fragment_path.stat().st_size
+            already_done = (
+                st_size > 0
+                and not fragment_path.with_name(fragment_path.name + ".aria2").exists()
+            )
+        except OSError:
+            already_done = False
+        if already_done:
+            skipped += 1
+            skipped_size += st_size
+            continue
+
+        fragment_options: dict[str, Any] = {
+            "out": f"{fragment_output}-Frag{fragment_index}",
+            "allow-overwrite": "true",
+            "auto-file-renaming": "false",
+            "force-save": "false",
+        }
+        byte_range = fragment.get("byte_range")
+        if isinstance(byte_range, dict):
+            start = _int(byte_range.get("start"))
+            end = _int(byte_range.get("end"))
+        else:
+            start = end = 0
+        # Byterange fragments keep the manifest-mandated range.
+        if end > start:
+            fragment_options["header"] = [f"Range: bytes={start}-{end - 1}"]
+
+        built_calls.append(("aria2.addUri", [[fragment["url"]], fragment_options]))
+    return built_calls, skipped, skipped_size
+
+
 class Aria2NextFD(_external.Aria2cFD):
     """yt-dlp external downloader that uses the bundled aria2-next binary.
 
@@ -390,6 +452,10 @@ class Aria2NextFD(_external.Aria2cFD):
         "--remove-control-file",
     }
 
+    # Legacy flags that take no value; a bare occurrence must not swallow
+    # the argument that follows.
+    _LEGACY_VALUELESS = {"--always-resume", "--remove-control-file"}
+
     def _make_cmd(self, tmpfilename: str, info_dict: Any) -> list[str]:
         cmd = cast(list[str], cast(Any, super())._make_cmd(tmpfilename, info_dict))
         filtered: list[str] = []
@@ -399,17 +465,20 @@ class Aria2NextFD(_external.Aria2cFD):
                 skip_next = False
                 continue
             name = arg.split("=", 1)[0]
-            is_short_conn = arg in {"-x", "-s"} or (
-                len(arg) > 2 and arg[:2] in {"-x", "-s"} and arg[2:].isdigit()
-            )
+            is_combined = len(arg) > 2 and arg[:2] in {"-x", "-s"} and arg[2:].isdigit()
+            is_short_conn = arg in {"-x", "-s"} or is_combined
             if name in self._LEGACY_OPTIONS or is_short_conn:
                 # Legacy aria2 inputs the native engine owns or retired:
                 # never pass them on (they only produce legacy-input
                 # warnings, or exit 28 for removed options). The engine
-                # passes the native equivalents explicitly.
-                skip_next = "=" not in arg and not (
-                    len(arg) > 2 and arg[2:].isdigit()
-                ) and name in self._LEGACY_OPTIONS
+                # passes the native equivalents explicitly. A standalone
+                # "-x"/"-s" also consumes its following value.
+                skip_next = (
+                    "=" not in arg
+                    and not is_combined
+                    and name not in self._LEGACY_VALUELESS
+                    and (name in self._LEGACY_OPTIONS or arg in {"-x", "-s"})
+                )
                 continue
             filtered.append(arg)
         return filtered
@@ -560,8 +629,11 @@ class Aria2NextFD(_external.Aria2cFD):
             # probe and bind; if aria2-next exits before its RPC socket is
             # reachable, retry with fresh ports before surfacing the failure.
             for attempt in range(_RPC_STARTUP_ATTEMPTS):
-                port = _find_free_port()
-                peer_port = _find_free_peer_port(port)
+                def _pick_ports() -> tuple[int, int]:
+                    port = _find_free_port()
+                    return port, _find_free_peer_port(port)
+
+                port, peer_port = await asyncio.to_thread(_pick_ports)
                 rpc_cmd = [
                     aria2_cmd[0],
                     "--enable-rpc",
@@ -629,53 +701,9 @@ class Aria2NextFD(_external.Aria2cFD):
                 skipped_bytes = 0
                 calls: list[tuple[str, list[Any]]] = []
                 if fragments:
-                    for fragment_index, fragment in enumerate(fragments):
-                        if not isinstance(fragment, dict) or not isinstance(fragment.get("url"), str):
-                            raise Aria2RPCError(f"Fragment {fragment_index} has no downloadable URL")
-
-                        # yt-dlp's external-fragment path resets its fragment index and
-                        # re-delegates the whole manifest on every run, and allow-overwrite
-                        # makes aria2 re-download fragments a previous session already
-                        # finished — pausing and resuming would restart the job from
-                        # scratch. A fragment is already complete when its file exists
-                        # with content and its .aria2 control file is gone (aria2 removes
-                        # the control file on completion; interrupted downloads keep
-                        # theirs and resume). Skip those; yt-dlp assembles the final
-                        # output from the fragment files on disk either way.
-                        fragment_path = fragment_dir / f"{fragment_output}-Frag{fragment_index}"
-                        try:
-                            already_done = (
-                                fragment_path.is_file()
-                                and not fragment_path.with_name(fragment_path.name + ".aria2").exists()
-                                and fragment_path.stat().st_size > 0
-                            )
-                        except OSError:
-                            already_done = False
-                        if already_done:
-                            skipped_frags += 1
-                            try:
-                                skipped_bytes += fragment_path.stat().st_size
-                            except OSError:
-                                pass
-                            continue
-
-                        fragment_options: dict[str, Any] = {
-                            "out": f"{fragment_output}-Frag{fragment_index}",
-                            "allow-overwrite": "true",
-                            "auto-file-renaming": "false",
-                            "force-save": "false",
-                        }
-                        byte_range = fragment.get("byte_range")
-                        if isinstance(byte_range, dict):
-                            start = _int(byte_range.get("start"))
-                            end = _int(byte_range.get("end"))
-                        else:
-                            start = end = 0
-                        # Byterange fragments keep the manifest-mandated range.
-                        if end > start:
-                            fragment_options["header"] = [f"Range: bytes={start}-{end - 1}"]
-
-                        calls.append(("aria2.addUri", [[fragment["url"]], fragment_options]))
+                    calls, skipped_frags, skipped_bytes = await asyncio.to_thread(
+                        _fragment_precheck, fragments, fragment_dir, fragment_output
+                    )
 
                 # Only re-enqueued fragments return GIDs; the completion wait must
                 # not count skipped ones (an all-skipped resume finishes immediately).
@@ -723,13 +751,19 @@ class Aria2NextFD(_external.Aria2cFD):
                         num_waiting = _int(stat_dict.get("numWaiting"))
                         num_stopped_total = _int(stat_dict.get("numStoppedTotal"))
                         new_stopped = max(0, num_stopped_total - stopped_seen)
-                        active = await _list_downloads(client, "aria2.tellActive", num_active, RPC_KEYS)
-                        waiting = await _list_downloads(client, "aria2.tellWaiting", num_waiting, RPC_KEYS)
-                        stopped: list[dict[str, Any]] = []
+                        # The three tell* queries are independent; run them concurrently.
+                        poll_coros: list[Any] = [
+                            _list_downloads(client, "aria2.tellActive", num_active, RPC_KEYS),
+                            _list_downloads(client, "aria2.tellWaiting", num_waiting, RPC_KEYS),
+                        ]
                         if new_stopped > 0:
-                            batch = await client.call("aria2.tellStopped", [-1, new_stopped, RPC_KEYS])
-                            if isinstance(batch, list):
-                                stopped = cast(list[dict[str, Any]], batch)
+                            poll_coros.append(client.call("aria2.tellStopped", [-1, new_stopped, RPC_KEYS]))
+                        poll_results = await asyncio.gather(*poll_coros)
+                        active = cast(list[dict[str, Any]], poll_results[0])
+                        waiting = cast(list[dict[str, Any]], poll_results[1])
+                        stopped: list[dict[str, Any]] = []
+                        if new_stopped > 0 and isinstance(poll_results[2], list):
+                            stopped = cast(list[dict[str, Any]], poll_results[2])
                     except Aria2RPCError:
                         rpc_failures += 1
                         if proc.returncode is not None:
@@ -738,6 +772,9 @@ class Aria2NextFD(_external.Aria2cFD):
                             raise Aria2RPCError(
                                 f"aria2 JSON-RPC became unreachable after {rpc_failures} failures"
                             ) from None
+                        # Back off before retrying so a struggling aria2 is not
+                        # hammered at the full poll rate.
+                        await asyncio.sleep(min(1.0, POLL_INTERVAL * rpc_failures))
                         continue
 
                     rpc_failures = 0
@@ -820,8 +857,8 @@ class Aria2NextFD(_external.Aria2cFD):
 
                 try:
                     await client.call("aria2.shutdown")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Aria2RPCError:
+                    log.debug("aria2.shutdown call failed; process stop will clean up")
 
             error_summary = "\n".join(
                 f"error_code={entry.get('errorCode')} message={entry.get('errorMessage')}"
@@ -831,8 +868,6 @@ class Aria2NextFD(_external.Aria2cFD):
             return "", stderr, returncode
 
         finally:
-            if client is not None:
-                await client.close()
             if session is not None:
                 await session.close()
             if reader is not None and not reader.done():

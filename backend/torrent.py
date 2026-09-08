@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from send2trash import send2trash
 import orjson
 from pathlib import Path
@@ -241,10 +242,6 @@ def _playback_deadline_plan(
     return planned
 
 
-def _format_hash(value: Any) -> str:
-    return str(value)
-
-
 def _tracker_url(tracker: Any) -> str:
     if isinstance(tracker, dict):
         tracker_dict = cast(dict[str, Any], tracker)
@@ -265,7 +262,7 @@ def _torrent_summary(ti: Any, magnet: str) -> dict[str, Any]:
     trackers = [tracker for tracker in trackers if tracker]
     return {
         "name": str(ti.name() or "Torrent"),
-        "infoHash": _format_hash(ti.info_hash()),
+        "infoHash": str(ti.info_hash()),
         "totalSize": int(ti.total_size()),
         "fileCount": len(file_rows),
         "files": file_rows,
@@ -355,6 +352,12 @@ class TorrentJob:
         snapshot = dict(self.data)
         snapshot["revision"] = self.event_revision
         return snapshot
+
+
+@lru_cache(maxsize=64)
+def _load_torrent_info(path: str, mtime: float) -> Any:
+    """Parse a .torrent file, memoized per (path, mtime)."""
+    return _require_libtorrent().torrent_info(path)
 
 
 class TorrentManager(JobManager):
@@ -447,7 +450,8 @@ class TorrentManager(JobManager):
         module = _require_libtorrent()
         clean_path = _clean_torrent_path(magnet)
         if not is_magnet_url(clean_path) and Path(clean_path).is_file():
-            info = module.torrent_info(str(clean_path))
+            file_path = Path(clean_path)
+            info = _load_torrent_info(str(file_path), file_path.stat().st_mtime)
             params = module.add_torrent_params()
             params.ti = info
             params.save_path = str(save_path)
@@ -462,15 +466,20 @@ class TorrentManager(JobManager):
         return params
 
     def _on_settings_changed(self, settings: dict[str, Any]) -> None:
-        try:
-            session_lock = getattr(self, "_session_lock", None)
-            if session_lock is None:
-                self._session.apply_settings(self._session_settings(settings))
-            else:
-                with session_lock:
+        # SettingsStore invokes subscribers on the event loop; apply_settings is
+        # a libtorrent call that can block and contend with worker threads, so
+        # it must run off the loop.
+        def apply() -> None:
+            try:
+                with self._session_lock:
                     self._session.apply_settings(self._session_settings(settings))
-        except Exception:  # noqa: BLE001
-            log.exception("Could not apply libtorrent settings")
+            except Exception:  # noqa: BLE001
+                log.exception("Could not apply libtorrent settings")
+
+        try:
+            self._loop.run_in_executor(None, apply)
+        except RuntimeError:
+            log.debug("Could not apply libtorrent settings: event loop is closed")
 
     def _emit(self, job: TorrentJob, *, force: bool = False) -> None:
         with self._lock:
@@ -499,7 +508,7 @@ class TorrentManager(JobManager):
             if not file_path.exists():
                 return {"ok": False, "engine": "torrent", "error": f"Torrent file not found: {clean_path}"}
             try:
-                info = module.torrent_info(str(file_path))
+                info = _load_torrent_info(str(file_path), file_path.stat().st_mtime)
                 summary = _torrent_summary(info, target)
                 return {"ok": True, "engine": "torrent", "url": target, "torrent": summary}
             except Exception as exc:  # noqa: BLE001
@@ -515,6 +524,8 @@ class TorrentManager(JobManager):
         handle = None
         try:
             params = self._torrent_params(target, probe_path)
+            # Metadata-only probe: never upload payload while waiting for metadata.
+            params.flags |= module.torrent_flags.upload_mode
             with self._session_lock:
                 handle = self._session.add_torrent(params)
             timeout = max(5, int(self._settings_store.get().get("torrentMetadataTimeout") or 90))
@@ -615,6 +626,7 @@ class TorrentManager(JobManager):
         with self._lock:
             self._jobs[job.id] = job
         self._emit(job, force=True)
+        log.info("Torrent download started", job_id=job.id, url=job.url, directory=directory)
         self._submit(job)
         return job
 
@@ -633,8 +645,9 @@ class TorrentManager(JobManager):
     def _run_with_slot(self, job: TorrentJob) -> None:
         handle = None
         try:
-            Path(job.directory).expanduser().mkdir(parents=True, exist_ok=True)
-            params = self._torrent_params(job.url, Path(job.directory).expanduser())
+            save_path = Path(job.directory).expanduser()
+            save_path.mkdir(parents=True, exist_ok=True)
+            params = self._torrent_params(job.url, save_path)
             with self._session_lock:
                 handle = self._session.add_torrent(params)
             job.handle = handle
@@ -645,6 +658,7 @@ class TorrentManager(JobManager):
             last_deadline_plan: list[tuple[int, int]] = []
             ordered_cache: tuple[Any, list[int]] | None = None
             last_active_files: list[int] | None = None
+            files: Any = None  # file_storage is immutable once metadata arrives
 
             while True:
                 if job.cancel_event.is_set():
@@ -658,14 +672,11 @@ class TorrentManager(JobManager):
                 all_selected_complete = False
                 if handle.has_metadata():
                     info = handle.get_torrent_info()
-                    sequential_enabled = bool(
-                        self._settings_store.get().get("torrentSequentialDownload", True)
-                    )
-                    schedule_key = (
-                        id(info),
-                        tuple(sorted(job.selected_files)) if job.selected_files is not None else None,
-                        sequential_enabled,
-                    )
+                    if files is None:
+                        files = info.files()
+                    settings = self._settings_store.get()
+                    sequential_enabled = bool(settings.get("torrentSequentialDownload", True))
+                    schedule_key = sequential_enabled
                     if ordered_cache is None or ordered_cache[0] != schedule_key:
                         ordered_cache = (
                             schedule_key,
@@ -678,19 +689,24 @@ class TorrentManager(JobManager):
                     ordered_files = ordered_cache[1]
                     if job.selected_files is not None and not ordered_files:
                         raise ValueError("None of the selected torrent files exist")
+                    file_prog = handle.file_progress()
                     active_files, last_piece_priorities = self._apply_file_schedule(
                         handle,
                         info,
+                        files,
+                        file_prog,
                         ordered_files,
                         last_piece_priorities,
                         last_active_files,
                         sequential=sequential_enabled,
+                        max_concurrent=max(1, int(settings.get("maxConcurrentDownloads") or 1)),
                     )
                     last_active_files = active_files
                     if sequential_enabled:
                         last_deadline_plan = self._apply_playback_deadlines(
                             handle,
                             info,
+                            files,
                             active_files,
                             getattr(status, "pieces", None),
                             last_deadline_plan,
@@ -706,8 +722,6 @@ class TorrentManager(JobManager):
                             if not job.custom_filename and not job.data.get("title"):
                                 job.data["title"] = job.data["torrentName"]
                                 job.data["filename"] = job.data["torrentName"]
-                    files = info.files()
-                    file_prog = handle.file_progress()
                     active_file_set = set(active_files)
                     total = 0
                     downloaded = 0
@@ -761,6 +775,7 @@ class TorrentManager(JobManager):
                     with self._lock:
                         job.data.update(status="completed", percent=100.0, speed=None, eta=None)
                     self._emit(job, force=True)
+                    log.info("Torrent download completed", job_id=job.id, name=job.data.get("torrentName"))
                     return
                 time.sleep(0.25)
         except Exception as exc:  # noqa: BLE001
@@ -770,7 +785,9 @@ class TorrentManager(JobManager):
                 if job.cancel_event.is_set():
                     job.data.update(status="paused" if job.pause_requested else "cancelled", speed=None, eta=None)
                 else:
-                    job.data.update(status="failed", error=str(exc) or "Torrent download failed", speed=None, eta=None)
+                    msg = str(exc) or "Torrent download failed"
+                    log.exception("Torrent download failed", job_id=job.id, error=msg)
+                    job.data.update(status="failed", error=msg, speed=None, eta=None)
             self._emit(job, force=True)
         finally:
             job.handle = None
@@ -802,11 +819,14 @@ class TorrentManager(JobManager):
         self,
         handle: Any,
         info: Any,
+        files: Any,
+        progress: Sequence[int],
         ordered_files: list[int],
         previous: list[int] | None,
         previous_active: list[int] | None = None,
         *,
         sequential: bool = True,
+        max_concurrent: int = 1,
     ) -> tuple[list[int] | None, list[int] | None]:
         """Prioritize pieces for the sequential playback window.
 
@@ -814,12 +834,9 @@ class TorrentManager(JobManager):
         libtorrent default so every selected file downloads in parallel instead
         of being gated by the active-file window.
         """
-        files = info.files()
-        progress = handle.file_progress()
         # Deliberately reuses the global maxConcurrentDownloads setting as the
         # per-torrent active-file window size; the cross-engine queue slot
         # itself is shared via the work-slot limiter.
-        max_concurrent = max(1, int(self._settings_store.get().get("maxConcurrentDownloads") or 1))
         pending_files = [
             index
             for index in ordered_files
@@ -861,12 +878,12 @@ class TorrentManager(JobManager):
         self,
         handle: Any,
         info: Any,
+        files: Any,
         active_files: list[int],
         have_pieces: Sequence[bool] | None,
         previous: list[tuple[int, int]],
     ) -> list[tuple[int, int]]:
         """Keep a time-critical header, footer, and moving playback window."""
-        files = info.files()
         piece_length = int(info.piece_length() or 0) or 1
         header_pieces = min(
             _PLAYBACK_MAX_WINDOW_PIECES,
@@ -942,6 +959,7 @@ class TorrentManager(JobManager):
         job = self.get(job_id)
         if not job or job.data["status"] not in {"queued", "paused", "downloading", "postprocessing"}:
             return False
+        log.info("Cancelling torrent", job_id=job_id)
         job.cancel_event.set()
         self._cancel_queued_worker(job_id)
         with self._lock:
@@ -954,6 +972,7 @@ class TorrentManager(JobManager):
         if not job or job.data["status"] not in {"queued", "downloading"}:
             return False
         status = job.data["status"]
+        log.info("Pausing torrent", job_id=job_id, status=status)
         job.pause_requested = True
         job.cancel_event.set()
         if status == "queued":
@@ -967,24 +986,29 @@ class TorrentManager(JobManager):
         job = self.get(job_id)
         if not job or job.data["status"] not in {"paused", "failed", "cancelled"}:
             return False
+        log.info("Resuming torrent", job_id=job_id)
+        with self._lock:
+            existing = self._worker_futures.get(job.id)
+        if existing is not None and not existing.done():
+            # The old worker is still winding down after a pause and may emit
+            # "paused" over the resumed state; wait for it, then restart. Only
+            # clear the cancel flags once it has actually exited, or it would
+            # keep running alongside the new worker.
+            try:
+                existing.result(timeout=10)
+            except TimeoutError:
+                log.warning("Old torrent worker did not stop in time; not restarting", job_id=job_id)
+                return True
+            except Exception:  # noqa: BLE001
+                log.debug("Old torrent worker failed during wind-down", job_id=job_id, exc_info=True)
+        if job.data.get("removed"):
+            return True
         job.cancel_event.clear()
         job.pause_requested = False
         with self._lock:
             job.data.update(status="queued", error=None, speed=None, eta=None)
         self._emit(job, force=True)
-        with self._lock:
-            existing = self._worker_futures.get(job.id)
-        if existing is None or existing.done():
-            self._submit(job)
-        else:
-            # The old worker is still winding down after a pause and may emit
-            # "paused" over the resumed state; wait for it, then restart.
-            try:
-                existing.result(timeout=10)
-            except Exception:  # noqa: BLE001
-                pass
-            if not job.data.get("removed"):
-                self._submit(job)
+        self._submit(job)
         return True
 
     def _storage_path(self, job: TorrentJob, handle: Any | None = None) -> Path | None:
@@ -1020,6 +1044,7 @@ class TorrentManager(JobManager):
         job = self.get(job_id)
         if not job:
             return False
+        log.info("Removing torrent", job_id=job_id)
         # Mark removed and drop from the in-memory index before cancelling so the
         # worker's final "cancelled" emit is suppressed and the UI does not flicker.
         with self._lock:
@@ -1029,8 +1054,9 @@ class TorrentManager(JobManager):
             getattr(self, "_last_emit", {}).pop(job_id, None)
             # Keep _db_tasks: _delete_persisted must chain after any in-flight
             # persist, otherwise a late upsert can resurrect the deleted row.
-        status = job.data["status"]
-        handle = job.handle
+            # Capture state under the lock: the worker may be mutating it.
+            status = job.data["status"]
+            handle = job.handle
         # Without metadata the real storage name is unknown; trashing a path
         # derived from the user-supplied filename could hit an unrelated file.
         # torrentName is only set once metadata has been seen.
@@ -1054,19 +1080,26 @@ class TorrentManager(JobManager):
         return ids
 
     async def shutdown(self) -> None:
-        with self._lock:
-            jobs = list(self._jobs.values())
-        for job in jobs:
-            if job.data["status"] in {"queued", "downloading", "postprocessing"}:
-                # Treat shutdown as a pause so jobs can resume after restart.
-                job.pause_requested = True
-                job.cancel_event.set()
-        await self._loop.run_in_executor(None, lambda: self._executor.shutdown(wait=True, cancel_futures=True))
-        with self._session_lock:
-            self._session.pause()
-        pending_listeners = list(self._listener_tasks)
-        if pending_listeners:
-            await asyncio.gather(*pending_listeners, return_exceptions=True)
-        pending = list(self._db_tasks.values())
+        def _shutdown_sync() -> None:
+            with self._lock:
+                jobs = list(self._jobs.values())
+            for job in jobs:
+                if job.data["status"] in {"queued", "downloading", "postprocessing"}:
+                    # Treat shutdown as a pause so jobs can resume after restart.
+                    job.pause_requested = True
+                    job.cancel_event.set()
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            with self._session_lock:
+                self._session.pause()
+
+        # Lock acquisition and session.pause() can block; keep them off the loop.
+        try:
+            await asyncio.wait_for(
+                self._loop.run_in_executor(None, _shutdown_sync),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            log.warning("Torrent executor shutdown timed out; continuing")
+        pending = [*self._listener_tasks, *self._db_tasks.values()]
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)

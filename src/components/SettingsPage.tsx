@@ -35,7 +35,6 @@ import AboutSection from "./AboutSection";
 
 type Backend = ReturnType<typeof useBackend>;
 
-
 type Section =
 	| "general"
 	| "network"
@@ -390,10 +389,10 @@ function SettingsNavigation({
 				const active = section === item.id;
 				return (
 					<button
-						className={`flex w-full items-center gap-3 rounded-xl px-3.5 py-2.5 text-left text-sm transition-colors ${
+						className={`flex w-full items-center gap-3 rounded-xl px-3.5 py-2.5 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-focus ${
 							active
-								? "bg-surface-tertiary font-medium text-foreground"
-								: "text-muted hover:bg-surface-secondary-hover hover:text-foreground"
+								? "bg-surface-tertiary font-medium text-foreground ring-1 ring-inset ring-accent/25"
+								: "text-muted hover:bg-surface-secondary-hover hover:text-foreground active:bg-surface-secondary-active active:scale-[0.99]"
 						}`}
 						key={item.id}
 						onClick={() => onChange(item.id)}
