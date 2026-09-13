@@ -416,24 +416,27 @@ class _InjectThumbnailPP(PostProcessor):
 
     yt-dlp downloads thumbnails with only the entry's own ``http_headers``
     (never the stream's), so referer-protected CDNs 403 every entry and
-    EmbedThumbnail ends up with nothing. Stamp the job's referer onto every
-    entry, and inject the custom thumbnail URL (page meta tags) when the
-    extractor returned none.
+    EmbedThumbnail ends up with nothing. Stamp the stream's effective headers
+    (referer, smuggled User-Agent/Accept-Language, Origin) onto every entry —
+    token-signed CDNs validate the UA the URL was minted with, so Referer
+    alone still 403s — and inject the custom thumbnail URL (page meta tags)
+    when the extractor returned none.
     """
 
-    def __init__(self, ydl: Any, thumbnail_url: str, referer: str = "") -> None:
+    def __init__(self, ydl: Any, thumbnail_url: str, referer: str = "", stream_headers: dict[str, str] | None = None) -> None:
         super().__init__(ydl)
         self._thumbnail_url = thumbnail_url
         self._referer = referer
+        self._headers = dict(stream_headers or ({"Referer": referer} if referer else {}))
 
     def run(self, info: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
         if not isinstance(info, dict):
             return [], info
-        headers = {"Referer": self._referer} if self._referer else {}
+        headers = self._headers
         existing = info.get("thumbnails") or []
         for entry in existing:
             if isinstance(entry, dict) and entry.get("url") and not entry.get("http_headers"):
-                entry["http_headers"] = headers
+                entry["http_headers"] = dict(headers)
         if existing:
             # Do not override thumbnails produced by a real extractor; the
             # custom URL is a fallback for sites yt-dlp cannot probe.
@@ -442,7 +445,7 @@ class _InjectThumbnailPP(PostProcessor):
             return [], info
         ext = _guess_media_ext(self._thumbnail_url) or _patched_determine_ext(self._thumbnail_url, default_ext="jpg")
         info["thumbnail"] = self._thumbnail_url
-        info["thumbnails"] = [{"id": "0", "url": self._thumbnail_url, "ext": ext, "http_headers": headers}]
+        info["thumbnails"] = [{"id": "0", "url": self._thumbnail_url, "ext": ext, "http_headers": dict(headers)}]
         return [], info
 
 
@@ -556,19 +559,24 @@ _THUMBNAIL_CACHE: dict[tuple[str, str], str | None] = {}
 _THUMBNAIL_CACHE_MAX = 128
 
 
-def _fetch_thumbnail_data_uri(url: str, referer: str) -> str | None:
+def _fetch_thumbnail_data_uri(url: str, referer: str, ua: str = "") -> str | None:
     """Fetch a thumbnail with the job's referer and inline it as a data URI.
 
     The dashboard's <img> cannot send a custom Referer, so referer-gated CDNs
     403 the direct fetch. Fetch once here; data: URIs are also the only image
-    source the Tauri CSP allows for arbitrary hosts.
+    source the Tauri CSP allows for arbitrary hosts. Token-signed CDNs also
+    validate the User-Agent the URL was minted with, so the smuggled UA (when
+    present) must ride along or the fetch 403s like the dashboard's would.
     """
-    cache_key = (url, referer)
+    cache_key = (url, referer, ua)
     if cache_key in _THUMBNAIL_CACHE:
         return _THUMBNAIL_CACHE[cache_key]
     result: str | None = None
+    headers: dict[str, str] = {"Referer": referer} if referer else {}
+    if ua:
+        headers["User-Agent"] = ua
     try:
-        with YoutubeDL({"quiet": True, "skip_download": True, "http_headers": {"Referer": referer}}) as ydl:
+        with YoutubeDL({"quiet": True, "skip_download": True, "http_headers": headers}) as ydl:
             # Cap the read at the size limit + 1 so a huge body cannot be
             # buffered into memory before the check.
             data = ydl.urlopen(url).read(_THUMBNAIL_DATA_URI_MAX_BYTES + 1)
@@ -651,9 +659,9 @@ def _base_opts(
         # resulting TS can carry unset timestamps that fail when remuxed to
         # MKV, even when the HLS download itself completed successfully.
         "hls_use_mpegts": False,
-        # HLS/DASH manifests stay in yt-dlp so encrypted streams can use the
-        # native downloader; unencrypted fragments are delegated to aria2-next
-        # when the bundled binary is available below.
+        # HLS/DASH run on yt-dlp's native downloader: manifest parsing,
+        # decryption, and fragment retries all stay in-process. aria2-next is
+        # only delegated plain HTTP(S) files below.
         "external_downloader": {"m3u8": "native", "dash": "native"},
         # Do not test every format URL before selection; that is slow and our
         # size resolver already HEADs the selected format when needed.
@@ -664,6 +672,10 @@ def _base_opts(
         "buffersize": 1024 * 1024,
         "http_chunk_size": 32 * 1024 * 1024,
         "socket_timeout": timeout_sec,
+        # Preserve the remote Last-Modified timestamp on finished files
+        # (yt-dlp's CLI default; without it aria2-next gets --remote-time=false
+        # and direct downloads lose the server's mtime metadata).
+        "updatetime": True,
         # Use yt-dlp's native FormatSorter for codec and container preference.
         # yt-dlp's format list is worst-to-best, so keep its default codec order
         # and let the picker select the best format while iterating in reverse.
@@ -2586,7 +2598,11 @@ class DownloadManager(JobManager):
         The dashboard's <img> cannot send the job's Referer, so protected CDNs
         403 the direct fetch. Fetch once in the background and inline the bytes.
         """
-        uri = _fetch_thumbnail_data_uri(job.data.get("thumbnail") or "", job.referer)
+        uri = _fetch_thumbnail_data_uri(
+            job.data.get("thumbnail") or "",
+            job.referer,
+            unsmuggle_url(job.request_url or job.url, {})[1].get("ua") or "",
+        )
         if not uri:
             return
         with self._lock:
@@ -3632,7 +3648,10 @@ class DownloadManager(JobManager):
                 _add_hls_fixup_postprocessors(ydl)
                 _add_title_override(ydl, job)
                 if _should_embed_thumbnail(job, settings):
-                    ydl.add_post_processor(_InjectThumbnailPP(ydl, job.thumbnail, job.referer), when="pre_process")
+                    ydl.add_post_processor(
+                        _InjectThumbnailPP(ydl, job.thumbnail, job.referer, opts.get("http_headers")),
+                        when="pre_process",
+                    )
                 ydl.add_post_processor(_ManifestReextractPP(ydl, job.cancel_event), when="pre_process")
                 if cached_info is not None:
                     try:

@@ -91,7 +91,11 @@ def _find_aria2_next_binary() -> Path | None:
 
     for root in roots:
         try:
-            candidates = [p for p in root.iterdir() if p.is_file() and p.name.startswith("aria2-next")]
+            candidates = [
+                p
+                for p in root.iterdir()
+                if p.is_file() and re.fullmatch(r"aria2-next(?:-\d.*)?(?:\.exe)?", p.name)
+            ]
         except OSError:
             continue
         candidates.sort(
@@ -353,44 +357,24 @@ def _purge_resume_state(tmpfilename: str) -> bool:
     return clean
 
 
-def _fragment_precheck(
+def _build_fragment_calls(
     fragments: list[Any],
-    fragment_dir: Path,
     fragment_output: str,
-) -> tuple[list[tuple[str, list[Any]]], int, int]:
-    """Disk-bound fragment pre-check; runs off the event loop.
+) -> list[tuple[str, list[Any]]]:
+    """Build one addUri RPC call per fragment.
 
-    Returns (rpc_calls, skipped_fragment_count, skipped_bytes).
+    Every fragment is (re-)enqueued on every run. aria2-next retired the
+    .aria2 control file (v2.6.0) for SQLite-backed stream state, so a
+    partial fragment from an interrupted session is indistinguishable from
+    a complete one by stat() alone — completeness cannot be detected on
+    disk. Re-enqueueing is safe and resume-correct: aria2-next resumes
+    fragments with valid persisted state and re-downloads untracked ones
+    under allow-overwrite.
     """
     built_calls: list[tuple[str, list[Any]]] = []
-    skipped = 0
-    skipped_size = 0
     for fragment_index, fragment in enumerate(fragments):
         if not isinstance(fragment, dict) or not isinstance(fragment.get("url"), str):
             raise Aria2RPCError(f"Fragment {fragment_index} has no downloadable URL")
-
-        # yt-dlp's external-fragment path resets its fragment index and
-        # re-delegates the whole manifest on every run, and allow-overwrite
-        # makes aria2 re-download fragments a previous session already
-        # finished — pausing and resuming would restart the job from
-        # scratch. A fragment is already complete when its file exists
-        # with content and its .aria2 control file is gone (aria2 removes
-        # the control file on completion; interrupted downloads keep
-        # theirs and resume). Skip those; yt-dlp assembles the final
-        # output from the fragment files on disk either way.
-        fragment_path = fragment_dir / f"{fragment_output}-Frag{fragment_index}"
-        try:
-            st_size = fragment_path.stat().st_size
-            already_done = (
-                st_size > 0
-                and not fragment_path.with_name(fragment_path.name + ".aria2").exists()
-            )
-        except OSError:
-            already_done = False
-        if already_done:
-            skipped += 1
-            skipped_size += st_size
-            continue
 
         fragment_options: dict[str, Any] = {
             "out": f"{fragment_output}-Frag{fragment_index}",
@@ -398,18 +382,8 @@ def _fragment_precheck(
             "auto-file-renaming": "false",
             "force-save": "false",
         }
-        byte_range = fragment.get("byte_range")
-        if isinstance(byte_range, dict):
-            start = _int(byte_range.get("start"))
-            end = _int(byte_range.get("end"))
-        else:
-            start = end = 0
-        # Byterange fragments keep the manifest-mandated range.
-        if end > start:
-            fragment_options["header"] = [f"Range: bytes={start}-{end - 1}"]
-
         built_calls.append(("aria2.addUri", [[fragment["url"]], fragment_options]))
-    return built_calls, skipped, skipped_size
+    return built_calls
 
 
 class Aria2NextFD(_external.Aria2cFD):
@@ -485,6 +459,16 @@ class Aria2NextFD(_external.Aria2cFD):
 
     @classmethod
     def supports(cls, info_dict: Any) -> bool:
+        # The base class refuses formats carrying extra_param_to_segment_url,
+        # which token-signed HLS masters always have (the manifest query must
+        # ride on every segment). yt-dlp bakes that query into every fragment
+        # URL before delegation (hls.py/dash.py update_url_query), so
+        # aria2-next can honor it — refusing it just forces slow native HLS
+        # for every token-signed stream. AES key URLs stay refused: aria2-next
+        # cannot fetch/decrypt keys (and supports_manifest already rejects
+        # encrypted manifests).
+        if "extra_param_to_segment_url" in info_dict:
+            info_dict = {k: v for k, v in info_dict.items() if k != "extra_param_to_segment_url"}
         return (
             not info_dict.get("has_drm")
             and not info_dict.get("request_data")
@@ -495,6 +479,13 @@ class Aria2NextFD(_external.Aria2cFD):
     def supports_manifest(manifest: str) -> bool:
         for raw_line in manifest.splitlines():
             line = raw_line.strip().upper()
+            # Byterange fragments need the manifest-mandated Range honored
+            # exactly. aria2-next's native range planner treats a ranged
+            # response as partial progress toward the full resource and
+            # re-fetches the remainder, corrupting the fragment. Let yt-dlp's
+            # native HlsFD (which ranges in-process) take these manifests.
+            if line.startswith("#EXT-X-BYTERANGE"):
+                return False
             if not line.startswith(("#EXT-X-KEY:", "#EXT-X-SESSION-KEY:")):
                 continue
             if parse_m3u8_attributes(line.partition(":")[2]).get("METHOD") != "NONE":
@@ -505,11 +496,14 @@ class Aria2NextFD(_external.Aria2cFD):
         # Needed by the resume-mismatch recovery in _call_process: the stale
         # partial and its aria2 control file live at this exact path.
         self._current_tmpfilename = self.temp_name(filename)
-        if info_dict.get("fragments"):
-            progress_hooks = getattr(self, "_progress_hooks", ())
-            for hook in getattr(self.ydl, "_progress_hooks", ()):
-                if hook not in progress_hooks:
-                    self.add_progress_hook(hook)
+        # Wire the app's progress hooks for every download, not just fragment
+        # jobs: the RPC loop is the only live progress source here (yt-dlp's
+        # ExternalFD base reports nothing between start and finish), so a
+        # plain HTTP download would otherwise sit at 0% until completion.
+        progress_hooks = getattr(self, "_progress_hooks", ())
+        for hook in getattr(self.ydl, "_progress_hooks", ()):
+            if hook not in progress_hooks:
+                self.add_progress_hook(hook)
         return bool(super().real_download(filename, info_dict))
 
     def report_error(self, text: str, *args: Any, **kwargs: Any) -> None:
@@ -600,11 +594,6 @@ class Aria2NextFD(_external.Aria2cFD):
                 raise Aria2RPCError("Fragment command is missing -- or --out") from exc
             del aria2_cmd[output_index:output_index + 2]
             # fragment_output is a basename; aria2 resolves it against --dir.
-            try:
-                dir_index = aria2_cmd.index("--dir")
-                fragment_dir = Path(aria2_cmd[dir_index + 1])
-            except (ValueError, IndexError):
-                fragment_dir = Path.cwd()
 
         secret = secrets.token_hex(16)
         output: deque[bytes] = deque()
@@ -697,17 +686,11 @@ class Aria2NextFD(_external.Aria2cFD):
                 # does not flag _hook_progress as an unknown attribute.
                 _self: Any = cast(Any, self)
 
-                skipped_frags = 0
-                skipped_bytes = 0
                 calls: list[tuple[str, list[Any]]] = []
                 if fragments:
-                    calls, skipped_frags, skipped_bytes = await asyncio.to_thread(
-                        _fragment_precheck, fragments, fragment_dir, fragment_output
-                    )
+                    calls = _build_fragment_calls(fragments, fragment_output)
 
-                # Only re-enqueued fragments return GIDs; the completion wait must
-                # not count skipped ones (an all-skipped resume finishes immediately).
-                expected_gids = (len(fragments) - skipped_frags) if fragments else 1
+                expected_gids = len(fragments) if fragments else 1
 
                 if calls:
                     # Dispatch in batches of 100 via system.multicall for blazing fast enqueue
@@ -719,16 +702,6 @@ class Aria2NextFD(_external.Aria2cFD):
                             actual_index = i + fragment_offset
                             if not isinstance(gid, str) or not gid:
                                 raise Aria2RPCError(f"aria2 did not return a GID for fragment {actual_index}")
-
-                _self._hook_progress({
-                    "status": "downloading",
-                    # Skipped fragments are already on disk from a previous
-                    # session; seed the progress so a resume does not start at 0.
-                    "downloaded_bytes": skipped_bytes,
-                    "total_bytes": None,
-                    "speed": None,
-                    "eta": None,
-                }, info_dict)
 
                 progress_by_gid: dict[str, dict[str, Any]] = {}
                 agg = {"downloaded": 0, "total": 0, "speed": 0, "completed": 0, "settled": 0}
@@ -810,17 +783,14 @@ class Aria2NextFD(_external.Aria2cFD):
 
                     status: dict[str, Any] = {
                         "status": "downloading",
-                        # agg only covers fragments aria2 is downloading this
-                        # session; add the skipped fragments' bytes so the
-                        # progress reflects the whole job.
-                        "downloaded_bytes": skipped_bytes + downloaded,
-                        "total_bytes": (skipped_bytes + total) if total is not None else None,
+                        "downloaded_bytes": downloaded,
+                        "total_bytes": total,
                         "speed": speed or None,
                         "eta": eta,
                     }
                     if "fragments" in info_dict:
                         status["segment_count"] = len(fragments)
-                        status["segments_done"] = completed + skipped_frags
+                        status["segments_done"] = completed
 
                     _self._hook_progress(status, info_dict)
 

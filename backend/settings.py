@@ -43,7 +43,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     ],
     # Network / performance.
     "rateLimit": 0,  # bytes/sec, 0 = unlimited
-    "concurrentFragments": 16,
+    "concurrentFragments": 32,
     "retries": 20,
     "proxy": "",
     "cookiesFromBrowser": "",  # e.g. "chrome", "firefox"; empty = off

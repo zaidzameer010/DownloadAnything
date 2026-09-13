@@ -4,7 +4,6 @@ import {
 	Button,
 	Card,
 	Checkbox,
-	Chip,
 	Drawer,
 	Dropdown,
 	Label,
@@ -18,6 +17,7 @@ import {
 	Tabs,
 	Typography,
 } from "@heroui/react";
+import { Squircle } from "@squircle-js/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -57,6 +57,7 @@ import {
 	formatEta,
 	formatSpeed,
 } from "../lib/format";
+import SquircleChip from "./SquircleChip";
 
 type Backend = ReturnType<typeof useBackend>;
 type Filter = "all" | "active" | "completed" | "failed";
@@ -134,9 +135,9 @@ function statusColor(
 
 function StatusChip({ status }: { status: JobStatus }) {
 	return (
-		<Chip color={statusColor(status)} size="sm" variant="soft">
+		<SquircleChip color={statusColor(status)} size="sm" variant="soft">
 			{status}
-		</Chip>
+		</SquircleChip>
 	);
 }
 
@@ -195,7 +196,10 @@ function TitleCell({ job }: { job: Job }) {
 
 	return (
 		<div className="flex min-w-0 items-center gap-3">
-			<div className="flex w-20 aspect-video shrink-0 items-center justify-center overflow-hidden rounded-md bg-surface-tertiary text-muted">
+			<Squircle
+				className="flex w-20 aspect-video shrink-0 items-center justify-center overflow-hidden bg-surface-tertiary text-muted"
+				cornerRadius={6}
+			>
 				{showThumbnail ? (
 					<img
 						alt={job.title || "Download thumbnail"}
@@ -206,7 +210,7 @@ function TitleCell({ job }: { job: Job }) {
 				) : (
 					<Icon aria-hidden className="size-5" />
 				)}
-			</div>
+			</Squircle>
 			<div className="min-w-0">
 				<Typography
 					className="truncate font-medium"
@@ -242,9 +246,11 @@ function ProgressCell({ job }: { job: Job }) {
 				value={Math.min(100, job.percent)}
 				size="sm"
 			>
-				<ProgressBar.Track>
-					<ProgressBar.Fill />
-				</ProgressBar.Track>
+				<Squircle asChild cornerRadius={4}>
+					<ProgressBar.Track>
+						<ProgressBar.Fill />
+					</ProgressBar.Track>
+				</Squircle>
 			</ProgressBar>
 			<div className="flex items-center justify-between gap-3 text-xs">
 				<span className="tabular-nums font-medium text-foreground">
@@ -382,66 +388,84 @@ function JobContextMenu({
 
 	return (
 		<Dropdown isOpen onOpenChange={(open) => !open && onClose()}>
-			<Dropdown.Popover
-				aria-label={`Actions for ${label}`}
-				className="fixed z-50 min-w-56"
-				style={{ left: Math.max(8, left), top: Math.max(8, top) }}
-			>
-				<Dropdown.Menu onAction={(key) => handleAction(String(key))}>
-					{pauseTargets.length > 0 ? (
-						<Dropdown.Item id="pause" textValue="Pause">
-							<Pause aria-hidden className="size-4 text-muted" />
-							<Label>{plural("Pause", pauseTargets.length)}</Label>
-						</Dropdown.Item>
-					) : null}
-					{resumeTargets.length > 0 ? (
-						<Dropdown.Item id="resume" textValue="Resume">
-							<Play aria-hidden className="size-4 text-muted" />
-							<Label>{plural("Resume", resumeTargets.length)}</Label>
-						</Dropdown.Item>
-					) : null}
-					{cancelTargets.length > 0 ? (
-						<Dropdown.Item id="cancel" textValue="Cancel">
-							<X aria-hidden className="size-4 text-muted" />
-							<Label>{plural("Cancel", cancelTargets.length)}</Label>
-						</Dropdown.Item>
-					) : null}
-					{canShowReveal ? (
-						<Dropdown.Item id="reveal" textValue="Reveal in Finder or Explorer">
-							<FolderOpen aria-hidden className="size-4 text-muted" />
-							<Label>
-								Reveal in{" "}
-								{navigator.platform.includes("Mac") ? "Finder" : "Explorer"}
-							</Label>
-						</Dropdown.Item>
-					) : null}
-					{canShowProperties ? (
-						<Dropdown.Item id="properties" textValue="Properties">
-							<Clipboard aria-hidden className="size-4 text-muted" />
-							<Label>Properties</Label>
-						</Dropdown.Item>
-					) : null}
-					<Dropdown.Item id="remove" textValue="Remove" variant="danger">
-						<Trash2 aria-hidden className="size-4 text-danger" />
-						<Label>{plural("Remove", removeTargets.length)}</Label>
-					</Dropdown.Item>
-				</Dropdown.Menu>
-			</Dropdown.Popover>
+			<Squircle asChild cornerRadius={24}>
+				<Dropdown.Popover
+					aria-label={`Actions for ${label}`}
+					className="fixed z-50 min-w-56"
+					style={{ left: Math.max(8, left), top: Math.max(8, top) }}
+				>
+					<Dropdown.Menu onAction={(key) => handleAction(String(key))}>
+						{pauseTargets.length > 0 ? (
+							<Squircle asChild className="ring-inset" cornerRadius={12}>
+								<Dropdown.Item id="pause" textValue="Pause">
+									<Pause aria-hidden className="size-4 text-muted" />
+									<Label>{plural("Pause", pauseTargets.length)}</Label>
+								</Dropdown.Item>
+							</Squircle>
+						) : null}
+						{resumeTargets.length > 0 ? (
+							<Squircle asChild className="ring-inset" cornerRadius={12}>
+								<Dropdown.Item id="resume" textValue="Resume">
+									<Play aria-hidden className="size-4 text-muted" />
+									<Label>{plural("Resume", resumeTargets.length)}</Label>
+								</Dropdown.Item>
+							</Squircle>
+						) : null}
+						{cancelTargets.length > 0 ? (
+							<Squircle asChild className="ring-inset" cornerRadius={12}>
+								<Dropdown.Item id="cancel" textValue="Cancel">
+									<X aria-hidden className="size-4 text-muted" />
+									<Label>{plural("Cancel", cancelTargets.length)}</Label>
+								</Dropdown.Item>
+							</Squircle>
+						) : null}
+						{canShowReveal ? (
+							<Squircle asChild className="ring-inset" cornerRadius={12}>
+								<Dropdown.Item
+									id="reveal"
+									textValue="Reveal in Finder or Explorer"
+								>
+									<FolderOpen aria-hidden className="size-4 text-muted" />
+									<Label>
+										Reveal in{" "}
+										{navigator.platform.includes("Mac") ? "Finder" : "Explorer"}
+									</Label>
+								</Dropdown.Item>
+							</Squircle>
+						) : null}
+						{canShowProperties ? (
+							<Squircle asChild className="ring-inset" cornerRadius={12}>
+								<Dropdown.Item id="properties" textValue="Properties">
+									<Clipboard aria-hidden className="size-4 text-muted" />
+									<Label>Properties</Label>
+								</Dropdown.Item>
+							</Squircle>
+						) : null}
+						<Squircle asChild className="ring-inset" cornerRadius={12}>
+							<Dropdown.Item id="remove" textValue="Remove" variant="danger">
+								<Trash2 aria-hidden className="size-4 text-danger" />
+								<Label>{plural("Remove", removeTargets.length)}</Label>
+							</Dropdown.Item>
+						</Squircle>
+					</Dropdown.Menu>
+				</Dropdown.Popover>
+			</Squircle>
 		</Dropdown>
 	);
 }
 
 function JobTableHeader() {
 	return (
-		<div
+		<Squircle
 			aria-hidden="true"
-			className="mb-2 grid min-w-230 w-full grid-cols-[minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] rounded-xl border border-separator bg-surface-tertiary text-xs font-semibold text-muted shadow-sm"
+			className="mb-2 grid min-w-230 w-full grid-cols-[minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] border border-separator bg-surface-tertiary text-xs font-semibold text-muted shadow-sm"
+			cornerRadius={12}
 		>
 			<span className="px-4 py-3 text-start">Title</span>
 			<span className="px-4 py-3 text-center">Status</span>
 			<span className="px-4 py-3 text-start">Progress</span>
 			<span className="px-4 py-3 text-center">Size</span>
-		</div>
+		</Squircle>
 	);
 }
 
@@ -495,7 +519,8 @@ function JobRow({
 		? "bg-surface-tertiary ring-1 ring-inset ring-accent/35"
 		: "bg-surface-secondary hover:bg-surface-secondary-hover active:bg-surface-secondary-active";
 	return (
-		<div
+		<Squircle
+			cornerRadius={isChild ? 0 : 16}
 			data-job-row
 			className={[
 				"group grid cursor-pointer select-none grid-cols-[minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
@@ -540,7 +565,7 @@ function JobRow({
 			<div className="px-4 py-4 text-center">
 				<SizeCell job={job} />
 			</div>
-		</div>
+		</Squircle>
 	);
 }
 
@@ -561,92 +586,92 @@ function ParentGroup({
 		? "bg-surface-tertiary ring-1 ring-inset ring-accent/35"
 		: "bg-surface-secondary hover:bg-surface-secondary-hover active:bg-surface-secondary-active";
 	return (
-		<Accordion className="w-full overflow-hidden rounded-2xl" hideSeparator>
-			<Accordion.Item
-				className="w-full overflow-hidden rounded-2xl"
-				id={root.id}
-			>
-				{({ isExpanded }) => (
-					<>
-						<div
-							data-job-row
-							className={[
-								"group grid w-full cursor-pointer select-none grid-cols-[minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
-								isExpanded ? "rounded-t-2xl" : "rounded-2xl",
-								rootClass,
-							].join(" ")}
-							onClick={(event) => onSelect(root.id, event)}
-							onContextMenu={(event) => {
-								event.preventDefault();
-								onContextMenu(root, event.clientX, event.clientY);
-							}}
-							tabIndex={0}
-							onKeyDown={(event) => {
-								if (event.key === "Enter" || event.key === " ") {
+		<Accordion className="w-full overflow-hidden" hideSeparator>
+			<Squircle asChild cornerRadius={16}>
+				<Accordion.Item className="w-full overflow-hidden" id={root.id}>
+					{({ isExpanded }) => (
+						<>
+							<div
+								data-job-row
+								className={[
+									"group grid w-full cursor-pointer select-none grid-cols-[minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
+									rootClass,
+								].join(" ")}
+								onClick={(event) => onSelect(root.id, event)}
+								onContextMenu={(event) => {
 									event.preventDefault();
-									onSelect(root.id, event as unknown as React.MouseEvent);
-									return;
-								}
-								if (
-									event.key !== "ContextMenu" &&
-									!(event.shiftKey && event.key === "F10")
-								)
-									return;
-								event.preventDefault();
-								const rect = event.currentTarget.getBoundingClientRect();
-								onContextMenu(
-									root,
-									rect.left + rect.width / 2,
-									rect.top + rect.height / 2,
-								);
-							}}
-						>
-							<div className="flex min-w-0 items-center gap-2 py-4 pe-4 ps-3">
-								<Accordion.Trigger
-									aria-label={
-										isExpanded ? "Collapse playlist" : "Expand playlist"
+									onContextMenu(root, event.clientX, event.clientY);
+								}}
+								tabIndex={0}
+								onKeyDown={(event) => {
+									if (event.key === "Enter" || event.key === " ") {
+										event.preventDefault();
+										onSelect(root.id, event as unknown as React.MouseEvent);
+										return;
 									}
-									className="flex size-7 shrink-0 flex-initial items-center justify-center rounded-lg p-0 text-muted transition-colors hover:bg-surface-hover hover:text-foreground active:bg-surface-active active:scale-95"
-									onClick={(event) => event.stopPropagation()}
-								>
-									<Accordion.Indicator className="m-0 size-4 shrink-0 text-muted" />
-								</Accordion.Trigger>
-								<span className="min-w-0 flex-1">
-									<TitleCell job={root} />
-								</span>
+									if (
+										event.key !== "ContextMenu" &&
+										!(event.shiftKey && event.key === "F10")
+									)
+										return;
+									event.preventDefault();
+									const rect = event.currentTarget.getBoundingClientRect();
+									onContextMenu(
+										root,
+										rect.left + rect.width / 2,
+										rect.top + rect.height / 2,
+									);
+								}}
+							>
+								<div className="flex min-w-0 items-center gap-2 py-4 pe-4 ps-3">
+									<Squircle asChild className="ring-inset" cornerRadius={8}>
+										<Accordion.Trigger
+											aria-label={
+												isExpanded ? "Collapse playlist" : "Expand playlist"
+											}
+											className="flex size-7 shrink-0 flex-initial items-center justify-center p-0 text-muted transition-colors hover:bg-surface-hover hover:text-foreground active:bg-surface-active active:scale-95"
+											onClick={(event) => event.stopPropagation()}
+										>
+											<Accordion.Indicator className="m-0 size-4 shrink-0 text-muted" />
+										</Accordion.Trigger>
+									</Squircle>
+									<span className="min-w-0 flex-1">
+										<TitleCell job={root} />
+									</span>
+								</div>
+								<div className="px-4 py-4 text-center">
+									<StatusChip status={root.status} />
+								</div>
+								<div className="px-4 py-4">
+									<ProgressCell job={root} />
+								</div>
+								<div className="px-4 py-4 text-center">
+									<SizeCell job={root} />
+								</div>
 							</div>
-							<div className="px-4 py-4 text-center">
-								<StatusChip status={root.status} />
-							</div>
-							<div className="px-4 py-4">
-								<ProgressCell job={root} />
-							</div>
-							<div className="px-4 py-4 text-center">
-								<SizeCell job={root} />
-							</div>
-						</div>
-						<Accordion.Panel>
-							<div className="overflow-hidden bg-surface-secondary border-t border-separator">
-								{children.map((child, index) => (
-									<JobRow
-										className={
-											index !== children.length - 1
-												? "border-b border-separator"
-												: ""
-										}
-										isChild
-										isSelected={selectedIds.has(child.id)}
-										job={child}
-										key={child.id}
-										onContextMenu={onContextMenu}
-										onSelect={onSelect}
-									/>
-								))}
-							</div>
-						</Accordion.Panel>
-					</>
-				)}
-			</Accordion.Item>
+							<Accordion.Panel>
+								<div className="overflow-hidden bg-surface-secondary border-t border-separator">
+									{children.map((child, index) => (
+										<JobRow
+											className={
+												index !== children.length - 1
+													? "border-b border-separator"
+													: ""
+											}
+											isChild
+											isSelected={selectedIds.has(child.id)}
+											job={child}
+											key={child.id}
+											onContextMenu={onContextMenu}
+											onSelect={onSelect}
+										/>
+									))}
+								</div>
+							</Accordion.Panel>
+						</>
+					)}
+				</Accordion.Item>
+			</Squircle>
 		</Accordion>
 	);
 }
@@ -757,85 +782,85 @@ function TorrentGroup({
 		? "bg-surface-tertiary ring-1 ring-inset ring-accent/35"
 		: "bg-surface-secondary hover:bg-surface-secondary-hover active:bg-surface-secondary-active";
 	return (
-		<Accordion className="w-full overflow-hidden rounded-2xl" hideSeparator>
-			<Accordion.Item
-				className="w-full overflow-hidden rounded-2xl"
-				id={job.id}
-			>
-				{({ isExpanded }) => (
-					<>
-						<div
-							data-job-row
-							className={[
-								"group grid w-full cursor-pointer select-none grid-cols-[minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
-								isExpanded ? "rounded-t-2xl" : "rounded-2xl",
-								rootClass,
-							].join(" ")}
-							onClick={(event) => onSelect(job.id, event)}
-							onContextMenu={(event) => {
-								event.preventDefault();
-								onContextMenu(job, event.clientX, event.clientY);
-							}}
-							tabIndex={0}
-							onKeyDown={(event) => {
-								if (event.key === "Enter" || event.key === " ") {
+		<Accordion className="w-full overflow-hidden" hideSeparator>
+			<Squircle asChild cornerRadius={16}>
+				<Accordion.Item className="w-full overflow-hidden" id={job.id}>
+					{({ isExpanded }) => (
+						<>
+							<div
+								data-job-row
+								className={[
+									"group grid w-full cursor-pointer select-none grid-cols-[minmax(0,2fr)_minmax(0,0.7fr)_minmax(0,1.4fr)_minmax(0,0.9fr)] items-center",
+									rootClass,
+								].join(" ")}
+								onClick={(event) => onSelect(job.id, event)}
+								onContextMenu={(event) => {
 									event.preventDefault();
-									onSelect(job.id, event as unknown as React.MouseEvent);
-									return;
-								}
-								if (
-									event.key !== "ContextMenu" &&
-									!(event.shiftKey && event.key === "F10")
-								)
-									return;
-								event.preventDefault();
-								const rect = event.currentTarget.getBoundingClientRect();
-								onContextMenu(
-									job,
-									rect.left + rect.width / 2,
-									rect.top + rect.height / 2,
-								);
-							}}
-						>
-							<div className="flex min-w-0 items-center gap-2 py-4 pe-4 ps-3">
-								<Accordion.Trigger
-									aria-label={
-										isExpanded ? "Collapse torrent" : "Expand torrent"
+									onContextMenu(job, event.clientX, event.clientY);
+								}}
+								tabIndex={0}
+								onKeyDown={(event) => {
+									if (event.key === "Enter" || event.key === " ") {
+										event.preventDefault();
+										onSelect(job.id, event as unknown as React.MouseEvent);
+										return;
 									}
-									className="flex size-7 shrink-0 flex-initial items-center justify-center rounded-lg p-0 text-muted transition-colors hover:bg-surface-hover hover:text-foreground active:bg-surface-active active:scale-95"
-									onClick={(event) => event.stopPropagation()}
-								>
-									<Accordion.Indicator className="m-0 size-4 shrink-0 text-muted" />
-								</Accordion.Trigger>
-								<span className="min-w-0 flex-1">
-									<TitleCell job={job} />
-								</span>
+									if (
+										event.key !== "ContextMenu" &&
+										!(event.shiftKey && event.key === "F10")
+									)
+										return;
+									event.preventDefault();
+									const rect = event.currentTarget.getBoundingClientRect();
+									onContextMenu(
+										job,
+										rect.left + rect.width / 2,
+										rect.top + rect.height / 2,
+									);
+								}}
+							>
+								<div className="flex min-w-0 items-center gap-2 py-4 pe-4 ps-3">
+									<Squircle asChild className="ring-inset" cornerRadius={8}>
+										<Accordion.Trigger
+											aria-label={
+												isExpanded ? "Collapse torrent" : "Expand torrent"
+											}
+											className="flex size-7 shrink-0 flex-initial items-center justify-center p-0 text-muted transition-colors hover:bg-surface-hover hover:text-foreground active:bg-surface-active active:scale-95"
+											onClick={(event) => event.stopPropagation()}
+										>
+											<Accordion.Indicator className="m-0 size-4 shrink-0 text-muted" />
+										</Accordion.Trigger>
+									</Squircle>
+									<span className="min-w-0 flex-1">
+										<TitleCell job={job} />
+									</span>
+								</div>
+								<div className="px-4 py-4 text-center">
+									<StatusChip status={job.status} />
+								</div>
+								<div className="px-4 py-4">
+									<ProgressCell job={job} />
+								</div>
+								<div className="px-4 py-4 text-center">
+									<SizeCell job={job} />
+								</div>
 							</div>
-							<div className="px-4 py-4 text-center">
-								<StatusChip status={job.status} />
-							</div>
-							<div className="px-4 py-4">
-								<ProgressCell job={job} />
-							</div>
-							<div className="px-4 py-4 text-center">
-								<SizeCell job={job} />
-							</div>
-						</div>
-						<Accordion.Panel>
-							<div className="overflow-hidden bg-surface-secondary border-t border-separator">
-								{files.map((file, index) => (
-									<TorrentFileRow
-										file={file}
-										isLast={index === files.length - 1}
-										jobStatus={job.status}
-										key={file.path || index}
-									/>
-								))}
-							</div>
-						</Accordion.Panel>
-					</>
-				)}
-			</Accordion.Item>
+							<Accordion.Panel>
+								<div className="overflow-hidden bg-surface-secondary border-t border-separator">
+									{files.map((file, index) => (
+										<TorrentFileRow
+											file={file}
+											isLast={index === files.length - 1}
+											jobStatus={job.status}
+											key={file.path || index}
+										/>
+									))}
+								</div>
+							</Accordion.Panel>
+						</>
+					)}
+				</Accordion.Item>
+			</Squircle>
 		</Accordion>
 	);
 }
@@ -878,7 +903,6 @@ function JobGroupList({
 							/>
 						) : (
 							<JobRow
-								className="rounded-2xl"
 								isSelected={selectedIds.has(group.root.id)}
 								job={group.root}
 								key={group.root.id}
@@ -909,24 +933,31 @@ function LocationSelect({
 			onChange={(next) => onChange(String(next))}
 		>
 			<Label>Download location</Label>
-			<Select.Trigger>
-				<Select.Value />
-				<Select.Indicator />
-			</Select.Trigger>
-			<Select.Popover>
-				<ListBox>
-					{locations.map((location) => (
-						<ListBox.Item
-							id={location.path}
-							key={location.path}
-							textValue={location.name}
-						>
-							{location.name}
-							<ListBox.ItemIndicator />
-						</ListBox.Item>
-					))}
-				</ListBox>
-			</Select.Popover>
+			<Squircle asChild className="ring-inset" cornerRadius={12}>
+				<Select.Trigger>
+					<Select.Value />
+					<Select.Indicator />
+				</Select.Trigger>
+			</Squircle>
+			<Squircle asChild cornerRadius={24}>
+				<Select.Popover>
+					<ListBox>
+						{locations.map((location) => (
+							<Squircle
+								asChild
+								className="ring-inset"
+								cornerRadius={16}
+								key={location.path}
+							>
+								<ListBox.Item id={location.path} textValue={location.name}>
+									{location.name}
+									<ListBox.ItemIndicator />
+								</ListBox.Item>
+							</Squircle>
+						))}
+					</ListBox>
+				</Select.Popover>
+			</Squircle>
 		</Select>
 	);
 }
@@ -938,58 +969,63 @@ function PlaylistSummary({ probe }: { probe: ProbeResponse }) {
 	const count = result.playlistCount ?? (result.entries?.length || 0);
 
 	return (
-		<Card
-			className="gap-4 border border-border/70 bg-surface/75 p-4 shadow-sm"
-			variant="transparent"
-		>
-			<div className="flex items-center gap-4">
-				<div className="flex w-28 sm:w-32 aspect-video shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border/50 bg-surface-secondary text-muted">
-					{result.thumbnail ? (
-						<img
-							alt={title || "Playlist thumbnail"}
-							className="size-full object-cover"
-							src={result.thumbnail}
-						/>
-					) : (
-						<FileVideo aria-hidden className="size-6" />
-					)}
-				</div>
-				<div className="min-w-0">
-					<Typography
-						className="line-clamp-2 font-semibold text-foreground"
-						type="h6"
+		<Squircle asChild cornerRadius={24}>
+			<Card
+				className="gap-4 border border-border/70 bg-surface/75 p-4 shadow-sm"
+				variant="transparent"
+			>
+				<div className="flex items-center gap-4">
+					<Squircle
+						className="flex w-28 sm:w-32 aspect-video shrink-0 items-center justify-center overflow-hidden border border-border/50 bg-surface-secondary text-muted"
+						cornerRadius={12}
 					>
-						{title || result.webpageUrl}
-					</Typography>
-					<div className="mt-2 flex flex-wrap gap-2">
-						<Chip color="accent" size="sm" variant="soft">
-							{probe.engine}
-						</Chip>
-						{result.extractor ? (
-							<Chip size="sm" variant="soft">
-								{result.extractor}
-							</Chip>
-						) : null}
-						{result.uploader ? (
-							<Chip size="sm" variant="soft">
-								{result.uploader}
-							</Chip>
-						) : null}
-						{count ? (
-							<Chip size="sm" variant="soft">
-								{count} videos
-							</Chip>
-						) : null}
+						{result.thumbnail ? (
+							<img
+								alt={title || "Playlist thumbnail"}
+								className="size-full object-cover"
+								src={result.thumbnail}
+							/>
+						) : (
+							<FileVideo aria-hidden className="size-6" />
+						)}
+					</Squircle>
+					<div className="min-w-0">
+						<Typography
+							className="line-clamp-2 font-semibold text-foreground"
+							type="h6"
+						>
+							{title || result.webpageUrl}
+						</Typography>
+						<div className="mt-2 flex flex-wrap gap-2">
+							<SquircleChip color="accent" size="sm" variant="soft">
+								{probe.engine}
+							</SquircleChip>
+							{result.extractor ? (
+								<SquircleChip size="sm" variant="soft">
+									{result.extractor}
+								</SquircleChip>
+							) : null}
+							{result.uploader ? (
+								<SquircleChip size="sm" variant="soft">
+									{result.uploader}
+								</SquircleChip>
+							) : null}
+							{count ? (
+								<SquircleChip size="sm" variant="soft">
+									{count} videos
+								</SquircleChip>
+							) : null}
+						</div>
 					</div>
 				</div>
-			</div>
-			<Typography
-				className="truncate font-mono text-[11px] text-muted"
-				type="body-xs"
-			>
-				{result.webpageUrl}
-			</Typography>
-		</Card>
+				<Typography
+					className="truncate font-mono text-[11px] text-muted"
+					type="body-xs"
+				>
+					{result.webpageUrl}
+				</Typography>
+			</Card>
+		</Squircle>
 	);
 }
 
@@ -1010,8 +1046,9 @@ function PlaylistPanel({
 				const selected = selectedUrls.has(entry.url);
 				const isCurrent = currentEntryId && entry.id === currentEntryId;
 				return (
-					<div
-						className={`flex items-start gap-3 rounded-xl border p-3 transition-colors ${selected ? "border-accent/60 bg-accent-soft/20" : "border-border/70 bg-surface/75 hover:border-border-visible hover:bg-surface-secondary/70 active:bg-surface-secondary"}`}
+					<Squircle
+						className={`flex items-start gap-3 border p-3 transition-colors ${selected ? "border-accent/60 bg-accent-soft/20" : "border-border/70 bg-surface/75 hover:border-border-visible hover:bg-surface-secondary/70 active:bg-surface-secondary"}`}
+						cornerRadius={12}
 						key={entry.url}
 					>
 						<Checkbox
@@ -1020,12 +1057,17 @@ function PlaylistPanel({
 							onChange={(checked) => onToggle(entry.url, checked)}
 						>
 							<Checkbox.Content>
-								<Checkbox.Control>
-									<Checkbox.Indicator />
-								</Checkbox.Control>
+								<Squircle asChild className="ring-inset" cornerRadius={6}>
+									<Checkbox.Control>
+										<Checkbox.Indicator />
+									</Checkbox.Control>
+								</Squircle>
 							</Checkbox.Content>
 						</Checkbox>
-						<div className="flex w-20 aspect-video shrink-0 items-center justify-center overflow-hidden rounded-lg border border-border/50 bg-surface-secondary text-muted">
+						<Squircle
+							className="flex w-20 aspect-video shrink-0 items-center justify-center overflow-hidden border border-border/50 bg-surface-secondary text-muted"
+							cornerRadius={8}
+						>
 							{entry.thumbnail ? (
 								<img
 									alt={entry.title || "Thumbnail"}
@@ -1035,7 +1077,7 @@ function PlaylistPanel({
 							) : (
 								<FileVideo aria-hidden className="size-5" />
 							)}
-						</div>
+						</Squircle>
 						<div className="min-w-0 flex-1">
 							<div className="flex flex-wrap items-center gap-2">
 								<Typography
@@ -1045,9 +1087,9 @@ function PlaylistPanel({
 									{entry.title}
 								</Typography>
 								{isCurrent ? (
-									<Chip color="accent" size="sm" variant="soft">
+									<SquircleChip color="accent" size="sm" variant="soft">
 										Current
-									</Chip>
+									</SquircleChip>
 								) : null}
 							</div>
 							<div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
@@ -1060,7 +1102,7 @@ function PlaylistPanel({
 								) : null}
 							</div>
 						</div>
-					</div>
+					</Squircle>
 				);
 			})}
 		</div>
@@ -1088,60 +1130,65 @@ function MediaSummary({
 		isAudio && filename ? `${stemFromName(filename)}.mp3` : filename;
 
 	return (
-		<Card
-			className="gap-4 border border-border/70 bg-surface/75 p-4 shadow-sm"
-			variant="transparent"
-		>
-			<div className="flex items-center gap-4">
-				<div className="flex w-28 sm:w-32 aspect-video shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border/50 bg-surface-secondary text-muted">
-					{result.thumbnail ? (
-						<img
-							alt={result.title || "Media thumbnail"}
-							className="size-full object-cover"
-							src={result.thumbnail}
-						/>
-					) : isAudio ? (
-						<FileAudio aria-hidden className="size-6" />
-					) : (
-						<FileVideo aria-hidden className="size-6" />
-					)}
-				</div>
-				<div className="min-w-0">
-					<Typography
-						className="line-clamp-2 font-semibold text-foreground"
-						type="h6"
+		<Squircle asChild cornerRadius={24}>
+			<Card
+				className="gap-4 border border-border/70 bg-surface/75 p-4 shadow-sm"
+				variant="transparent"
+			>
+				<div className="flex items-center gap-4">
+					<Squircle
+						className="flex w-28 sm:w-32 aspect-video shrink-0 items-center justify-center overflow-hidden border border-border/50 bg-surface-secondary text-muted"
+						cornerRadius={12}
 					>
-						{result.title || result.webpageUrl}
-					</Typography>
-					<div className="mt-2 flex flex-wrap gap-2">
-						<Chip color="accent" size="sm" variant="soft">
-							{probe.engine}
-						</Chip>
-						{result.extractor ? (
-							<Chip size="sm" variant="soft">
-								{result.extractor}
-							</Chip>
-						) : null}
-						{result.uploader ? (
-							<Chip size="sm" variant="soft">
-								{result.uploader}
-							</Chip>
-						) : null}
-						{result.isPlaylist && result.playlistCount ? (
-							<Chip size="sm" variant="soft">
-								{result.playlistCount} videos
-							</Chip>
-						) : null}
+						{result.thumbnail ? (
+							<img
+								alt={result.title || "Media thumbnail"}
+								className="size-full object-cover"
+								src={result.thumbnail}
+							/>
+						) : isAudio ? (
+							<FileAudio aria-hidden className="size-6" />
+						) : (
+							<FileVideo aria-hidden className="size-6" />
+						)}
+					</Squircle>
+					<div className="min-w-0">
+						<Typography
+							className="line-clamp-2 font-semibold text-foreground"
+							type="h6"
+						>
+							{result.title || result.webpageUrl}
+						</Typography>
+						<div className="mt-2 flex flex-wrap gap-2">
+							<SquircleChip color="accent" size="sm" variant="soft">
+								{probe.engine}
+							</SquircleChip>
+							{result.extractor ? (
+								<SquircleChip size="sm" variant="soft">
+									{result.extractor}
+								</SquircleChip>
+							) : null}
+							{result.uploader ? (
+								<SquircleChip size="sm" variant="soft">
+									{result.uploader}
+								</SquircleChip>
+							) : null}
+							{result.isPlaylist && result.playlistCount ? (
+								<SquircleChip size="sm" variant="soft">
+									{result.playlistCount} videos
+								</SquircleChip>
+							) : null}
+						</div>
 					</div>
 				</div>
-			</div>
-			<Typography
-				className="truncate font-mono text-[11px] text-muted"
-				type="body-xs"
-			>
-				{displayFilename}
-			</Typography>
-		</Card>
+				<Typography
+					className="truncate font-mono text-[11px] text-muted"
+					type="body-xs"
+				>
+					{displayFilename}
+				</Typography>
+			</Card>
+		</Squircle>
 	);
 }
 
@@ -1181,51 +1228,59 @@ function FormatPanel({
 						: format.resolution || format.kind;
 
 					return (
-						<Button
-							aria-pressed={isSelected}
-							className={`h-auto min-h-14 justify-between rounded-xl px-4 py-3 text-start transition-colors ${isSelected ? "border border-accent/60 bg-accent-soft/25 ring-1 ring-accent/25 shadow-sm" : "border border-border/70 bg-surface/75 hover:border-border-visible hover:bg-surface-secondary/70 active:bg-surface-secondary"}`}
-							fullWidth
-							onPress={() => onSelect(format.id)}
-							variant="outline"
+						<Squircle
+							asChild
+							className="ring-inset"
+							cornerRadius={12}
 							key={format.id}
 						>
-							<span className="flex min-w-0 items-center gap-3">
-								<span
-									className={`flex size-5 items-center justify-center rounded-full border transition-colors ${isSelected ? "border-accent bg-accent text-accent-foreground shadow-xs" : "border-border-visible bg-surface-secondary/80 text-transparent"}`}
-								>
-									{isSelected ? <Check aria-hidden className="size-3" /> : null}
-								</span>
-								<span className="min-w-0">
-									<Typography
-										className={`truncate ${isSelected ? "font-semibold text-foreground" : "font-medium text-foreground"}`}
-										type="body-sm"
+							<Button
+								aria-pressed={isSelected}
+								className={`h-auto min-h-14 justify-between px-4 py-3 text-start transition-colors ${isSelected ? "border border-accent/60 bg-accent-soft/25 ring-1 ring-inset ring-accent/25 shadow-sm" : "border border-border/70 bg-surface/75 hover:border-border-visible hover:bg-surface-secondary/70 active:bg-surface-secondary"}`}
+								fullWidth
+								onPress={() => onSelect(format.id)}
+								variant="outline"
+							>
+								<span className="flex min-w-0 items-center gap-3">
+									<span
+										className={`flex size-5 items-center justify-center rounded-full border transition-colors ${isSelected ? "border-accent bg-accent text-accent-foreground shadow-xs" : "border-border-visible bg-surface-secondary/80 text-transparent"}`}
 									>
-										{format.label}
-									</Typography>
-									<Typography color="muted" type="body-xs">
-										{sublabel}
+										{isSelected ? (
+											<Check aria-hidden className="size-3" />
+										) : null}
+									</span>
+									<span className="min-w-0">
+										<Typography
+											className={`truncate ${isSelected ? "font-semibold text-foreground" : "font-medium text-foreground"}`}
+											type="body-sm"
+										>
+											{format.label}
+										</Typography>
+										<Typography color="muted" type="body-xs">
+											{sublabel}
+										</Typography>
+									</span>
+								</span>
+								<span className="flex shrink-0 items-center gap-3">
+									<SquircleChip
+										color={isSelected ? "accent" : "default"}
+										size="sm"
+										variant="soft"
+									>
+										{format.ext ? format.ext.toUpperCase() : format.kind}
+									</SquircleChip>
+									<Typography
+										className="tabular-nums"
+										color="muted"
+										type="body-xs"
+									>
+										{format.size == null
+											? "Size unknown"
+											: `${format.sizeIsEstimate ? "~ " : ""}${formatBytes(format.size)}`}
 									</Typography>
 								</span>
-							</span>
-							<span className="flex shrink-0 items-center gap-3">
-								<Chip
-									color={isSelected ? "accent" : "default"}
-									size="sm"
-									variant="soft"
-								>
-									{format.ext ? format.ext.toUpperCase() : format.kind}
-								</Chip>
-								<Typography
-									className="tabular-nums"
-									color="muted"
-									type="body-xs"
-								>
-									{format.size == null
-										? "Size unknown"
-										: `${format.sizeIsEstimate ? "~ " : ""}${formatBytes(format.size)}`}
-								</Typography>
-							</span>
-						</Button>
+							</Button>
+						</Squircle>
 					);
 				})}
 			</div>
@@ -1351,148 +1406,170 @@ function ProbeModal({
 	return (
 		<Modal.Backdrop isOpen onOpenChange={(open) => !open && onClose()}>
 			<Modal.Container scroll="inside" size="lg">
-				<Modal.Dialog className="modal-no-press-scale w-full sm:max-w-2xl">
-					<Modal.CloseTrigger />
-					<Modal.Header>
-						<Modal.Heading>
-							{(hasVideo || hasAudio) && hasPlaylist
-								? "Download options"
-								: hasAudio && !hasVideo
-									? "Select audio format"
-									: "Select a format"}
-						</Modal.Heading>
-					</Modal.Header>
-					<Modal.Body className="gap-5">
-						{selectedKey === "playlist" ? (
-							<PlaylistSummary probe={probe} />
-						) : (
-							<MediaSummary probe={probe} selectedFormat={selectedFormat} />
-						)}
+				<Squircle asChild cornerRadius={24}>
+					<Modal.Dialog className="modal-no-press-scale w-full sm:max-w-2xl">
+						<Squircle asChild className="ring-inset" cornerRadius={12}>
+							<Modal.CloseTrigger />
+						</Squircle>
+						<Modal.Header>
+							<Modal.Heading>
+								{(hasVideo || hasAudio) && hasPlaylist
+									? "Download options"
+									: hasAudio && !hasVideo
+										? "Select audio format"
+										: "Select a format"}
+							</Modal.Heading>
+						</Modal.Header>
+						<Modal.Body className="gap-5">
+							{selectedKey === "playlist" ? (
+								<PlaylistSummary probe={probe} />
+							) : (
+								<MediaSummary probe={probe} selectedFormat={selectedFormat} />
+							)}
 
-						<Tabs
-							selectedKey={selectedKey}
-							onSelectionChange={(key) =>
-								setSelectedKey(String(key) as "video" | "audio" | "playlist")
-							}
-						>
-							<Tabs.ListContainer className="rounded-full border border-border/60 bg-surface/80 p-1">
-								<Tabs.List aria-label="Download options" className="gap-1 p-0">
-									{hasVideo ? (
-										<Tabs.Tab
-											className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors text-muted data-[selected=true]:text-foreground"
-											id="video"
-										>
-											Video
-											<Tabs.Indicator className="rounded-full bg-segment border border-border-visible/60 shadow-sm" />
-										</Tabs.Tab>
-									) : null}
-									{hasAudio ? (
-										<Tabs.Tab
-											className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors text-muted data-[selected=true]:text-foreground"
-											id="audio"
-										>
-											Audio
-											<Tabs.Indicator className="rounded-full bg-segment border border-border-visible/60 shadow-sm" />
-										</Tabs.Tab>
-									) : null}
-									{hasPlaylist ? (
-										<Tabs.Tab
-											className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors text-muted data-[selected=true]:text-foreground"
-											id="playlist"
-										>
-											Playlist
-											<Tabs.Indicator className="rounded-full bg-segment border border-border-visible/60 shadow-sm" />
-										</Tabs.Tab>
-									) : null}
-								</Tabs.List>
-							</Tabs.ListContainer>
-							{hasVideo ? (
-								<Tabs.Panel id="video" className="p-0 pt-2">
-									<VideoPanel
-										formats={videoFormats}
-										selectedId={selectedVideoFormatId}
-										onSelect={setSelectedVideoFormatId}
-									/>
-								</Tabs.Panel>
-							) : null}
-							{hasAudio ? (
-								<Tabs.Panel id="audio" className="p-0 pt-2">
-									<AudioPanel
-										formats={audioFormats}
-										selectedId={selectedAudioFormatId}
-										onSelect={setSelectedAudioFormatId}
-									/>
-								</Tabs.Panel>
-							) : null}
-							{hasPlaylist ? (
-								<Tabs.Panel id="playlist" className="p-0 pt-2">
-									<div className="space-y-4">
-										<div className="flex items-center justify-between">
-											<Typography className="font-semibold" type="h6">
-												Videos to download
-											</Typography>
-											<div className="flex items-center gap-2 text-xs text-muted">
-												<Checkbox
-													isSelected={allSelected}
-													onChange={(checked) =>
-														setSelectedUrls(
-															checked ? new Set(allEntryUrls) : new Set(),
-														)
-													}
-												>
-													<Checkbox.Content className="text-foreground">
-														<Checkbox.Control>
-															<Checkbox.Indicator />
-														</Checkbox.Control>
-														Select all
-													</Checkbox.Content>
-												</Checkbox>
-											</div>
-										</div>
-										{result.entries ? (
-											<PlaylistPanel
-												currentEntryId={result.currentEntryId}
-												entries={result.entries}
-												selectedUrls={selectedUrls}
-												onToggle={toggleUrl}
-											/>
-										) : null}
-									</div>
-								</Tabs.Panel>
-							) : null}
-						</Tabs>
-						<LocationSelect
-							locations={locations}
-							onChange={setDirectory}
-							value={directory}
-						/>
-					</Modal.Body>
-					<Modal.Footer>
-						<Button slot="close" variant="tertiary">
-							Cancel
-						</Button>
-						{selectedKey === "playlist" ? (
-							<Button
-								isDisabled={selectedCount === 0}
-								onPress={() => onDownloadPlaylist([...selectedUrls], directory)}
-							>
-								<Download aria-hidden className="size-4" />
-								Download {selectedCount} video
-								{selectedCount === 1 ? "" : "s"}
-							</Button>
-						) : (
-							<Button
-								isDisabled={!selectedFormat}
-								onPress={() =>
-									selectedFormat && onDownloadVideo(selectedFormat, directory)
+							<Tabs
+								selectedKey={selectedKey}
+								onSelectionChange={(key) =>
+									setSelectedKey(String(key) as "video" | "audio" | "playlist")
 								}
 							>
-								<Download aria-hidden className="size-4" />
-								Download
-							</Button>
-						)}
-					</Modal.Footer>
-				</Modal.Dialog>
+								<Tabs.ListContainer className="rounded-full border border-border/60 bg-surface/80 p-1">
+									<Tabs.List
+										aria-label="Download options"
+										className="gap-1 p-0"
+									>
+										{hasVideo ? (
+											<Tabs.Tab
+												className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors text-muted data-[selected=true]:text-foreground"
+												id="video"
+											>
+												Video
+												<Tabs.Indicator className="rounded-full bg-segment border border-border-visible/60 shadow-sm" />
+											</Tabs.Tab>
+										) : null}
+										{hasAudio ? (
+											<Tabs.Tab
+												className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors text-muted data-[selected=true]:text-foreground"
+												id="audio"
+											>
+												Audio
+												<Tabs.Indicator className="rounded-full bg-segment border border-border-visible/60 shadow-sm" />
+											</Tabs.Tab>
+										) : null}
+										{hasPlaylist ? (
+											<Tabs.Tab
+												className="gap-2 rounded-full px-4 py-1.5 text-xs sm:text-sm font-medium transition-colors text-muted data-[selected=true]:text-foreground"
+												id="playlist"
+											>
+												Playlist
+												<Tabs.Indicator className="rounded-full bg-segment border border-border-visible/60 shadow-sm" />
+											</Tabs.Tab>
+										) : null}
+									</Tabs.List>
+								</Tabs.ListContainer>
+								{hasVideo ? (
+									<Tabs.Panel id="video" className="p-0 pt-2">
+										<VideoPanel
+											formats={videoFormats}
+											selectedId={selectedVideoFormatId}
+											onSelect={setSelectedVideoFormatId}
+										/>
+									</Tabs.Panel>
+								) : null}
+								{hasAudio ? (
+									<Tabs.Panel id="audio" className="p-0 pt-2">
+										<AudioPanel
+											formats={audioFormats}
+											selectedId={selectedAudioFormatId}
+											onSelect={setSelectedAudioFormatId}
+										/>
+									</Tabs.Panel>
+								) : null}
+								{hasPlaylist ? (
+									<Tabs.Panel id="playlist" className="p-0 pt-2">
+										<div className="space-y-4">
+											<div className="flex items-center justify-between">
+												<Typography className="font-semibold" type="h6">
+													Videos to download
+												</Typography>
+												<div className="flex items-center gap-2 text-xs text-muted">
+													<Checkbox
+														isSelected={allSelected}
+														onChange={(checked) =>
+															setSelectedUrls(
+																checked ? new Set(allEntryUrls) : new Set(),
+															)
+														}
+													>
+														<Checkbox.Content className="text-foreground">
+															<Squircle
+																asChild
+																className="ring-inset"
+																cornerRadius={6}
+															>
+																<Checkbox.Control>
+																	<Checkbox.Indicator />
+																</Checkbox.Control>
+															</Squircle>
+															Select all
+														</Checkbox.Content>
+													</Checkbox>
+												</div>
+											</div>
+											{result.entries ? (
+												<PlaylistPanel
+													currentEntryId={result.currentEntryId}
+													entries={result.entries}
+													selectedUrls={selectedUrls}
+													onToggle={toggleUrl}
+												/>
+											) : null}
+										</div>
+									</Tabs.Panel>
+								) : null}
+							</Tabs>
+							<LocationSelect
+								locations={locations}
+								onChange={setDirectory}
+								value={directory}
+							/>
+						</Modal.Body>
+						<Modal.Footer>
+							<Squircle asChild className="ring-inset" cornerRadius={12}>
+								<Button slot="close" variant="tertiary">
+									Cancel
+								</Button>
+							</Squircle>
+							{selectedKey === "playlist" ? (
+								<Squircle asChild className="ring-inset" cornerRadius={12}>
+									<Button
+										isDisabled={selectedCount === 0}
+										onPress={() =>
+											onDownloadPlaylist([...selectedUrls], directory)
+										}
+									>
+										<Download aria-hidden className="size-4" />
+										Download {selectedCount} video
+										{selectedCount === 1 ? "" : "s"}
+									</Button>
+								</Squircle>
+							) : (
+								<Squircle asChild className="ring-inset" cornerRadius={12}>
+									<Button
+										isDisabled={!selectedFormat}
+										onPress={() =>
+											selectedFormat &&
+											onDownloadVideo(selectedFormat, directory)
+										}
+									>
+										<Download aria-hidden className="size-4" />
+										Download
+									</Button>
+								</Squircle>
+							)}
+						</Modal.Footer>
+					</Modal.Dialog>
+				</Squircle>
 			</Modal.Container>
 		</Modal.Backdrop>
 	);
@@ -1532,40 +1609,47 @@ function TorrentDrawer({
 		<Drawer.Backdrop isOpen onOpenChange={(open) => !open && onClose()}>
 			<Drawer.Content placement="right">
 				<Drawer.Dialog className="w-full sm:max-w-2xl">
-					<Drawer.CloseTrigger />
+					<Squircle asChild className="ring-inset" cornerRadius={12}>
+						<Drawer.CloseTrigger />
+					</Squircle>
 					<Drawer.Header>
 						<Drawer.Heading>Download torrent</Drawer.Heading>
 					</Drawer.Header>
 					<Drawer.Body className="gap-6">
-						<Card
-							className="gap-4 border border-border/70 bg-surface/75 p-4 shadow-sm"
-							variant="transparent"
-						>
-							<div className="flex items-center gap-4">
-								<div className="flex size-16 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
-									<Archive aria-hidden className="size-7" />
-								</div>
-								<div className="min-w-0">
-									<Typography
-										className="line-clamp-2 font-semibold text-foreground"
-										type="h6"
+						<Squircle asChild cornerRadius={24}>
+							<Card
+								className="gap-4 border border-border/70 bg-surface/75 p-4 shadow-sm"
+								variant="transparent"
+							>
+								<div className="flex items-center gap-4">
+									<Squircle
+										className="flex size-16 shrink-0 items-center justify-center bg-accent-soft text-accent"
+										cornerRadius={12}
 									>
-										{torrent.name}
-									</Typography>
-									<div className="mt-2 flex flex-wrap gap-2">
-										<Chip color="accent" size="sm" variant="soft">
-											libtorrent
-										</Chip>
-										<Chip size="sm" variant="soft">
-											{formatBytes(torrent.totalSize)}
-										</Chip>
-										<Chip size="sm" variant="soft">
-											{torrent.fileCount} files
-										</Chip>
+										<Archive aria-hidden className="size-7" />
+									</Squircle>
+									<div className="min-w-0">
+										<Typography
+											className="line-clamp-2 font-semibold text-foreground"
+											type="h6"
+										>
+											{torrent.name}
+										</Typography>
+										<div className="mt-2 flex flex-wrap gap-2">
+											<SquircleChip color="accent" size="sm" variant="soft">
+												libtorrent
+											</SquircleChip>
+											<SquircleChip size="sm" variant="soft">
+												{formatBytes(torrent.totalSize)}
+											</SquircleChip>
+											<SquircleChip size="sm" variant="soft">
+												{torrent.fileCount} files
+											</SquircleChip>
+										</div>
 									</div>
 								</div>
-							</div>
-						</Card>
+							</Card>
+						</Squircle>
 						<div className="space-y-3">
 							<div className="flex items-center justify-between">
 								<Typography className="font-semibold" type="h6">
@@ -1575,7 +1659,10 @@ function TorrentDrawer({
 									{selectedFiles.size} selected
 								</Typography>
 							</div>
-							<div className="divide-y divide-border/60 rounded-xl border border-border/70 bg-surface/60">
+							<Squircle
+								className="divide-y divide-border/60 border border-border/70 bg-surface/60"
+								cornerRadius={12}
+							>
 								{torrent.files.map((file) => (
 									<Checkbox
 										className="w-full px-4 py-3"
@@ -1591,9 +1678,11 @@ function TorrentDrawer({
 										}
 									>
 										<Checkbox.Content className="min-w-0 flex-1">
-											<Checkbox.Control>
-												<Checkbox.Indicator />
-											</Checkbox.Control>
+											<Squircle asChild className="ring-inset" cornerRadius={6}>
+												<Checkbox.Control>
+													<Checkbox.Indicator />
+												</Checkbox.Control>
+											</Squircle>
 											<span className="flex min-w-0 items-center justify-between gap-3">
 												<span className="truncate text-sm">{file.path}</span>
 												<span className="shrink-0 font-mono text-xs text-muted">
@@ -1603,7 +1692,7 @@ function TorrentDrawer({
 										</Checkbox.Content>
 									</Checkbox>
 								))}
-							</div>
+							</Squircle>
 						</div>
 						<LocationSelect
 							locations={locations}
@@ -1612,16 +1701,20 @@ function TorrentDrawer({
 						/>
 					</Drawer.Body>
 					<Drawer.Footer>
-						<Button slot="close" variant="tertiary">
-							Cancel
-						</Button>
-						<Button
-							isDisabled={selectedFiles.size === 0}
-							onPress={() => onDownload(directory, [...selectedFiles])}
-						>
-							<Download aria-hidden className="size-4" />
-							Download torrent
-						</Button>
+						<Squircle asChild className="ring-inset" cornerRadius={12}>
+							<Button slot="close" variant="tertiary">
+								Cancel
+							</Button>
+						</Squircle>
+						<Squircle asChild className="ring-inset" cornerRadius={12}>
+							<Button
+								isDisabled={selectedFiles.size === 0}
+								onPress={() => onDownload(directory, [...selectedFiles])}
+							>
+								<Download aria-hidden className="size-4" />
+								Download torrent
+							</Button>
+						</Squircle>
 					</Drawer.Footer>
 				</Drawer.Dialog>
 			</Drawer.Content>
@@ -1672,38 +1765,52 @@ function JobPropertiesModal({
 	return (
 		<Modal.Backdrop isOpen onOpenChange={(open) => !open && onClose()}>
 			<Modal.Container size="lg">
-				<Modal.Dialog>
-					<Modal.CloseTrigger />
-					<Modal.Header>
-						<Modal.Heading>Task properties</Modal.Heading>
-					</Modal.Header>
-					<Modal.Body className="gap-5">
-						{job.thumbnail ? (
-							<img
-								alt=""
-								className="aspect-video w-full rounded-2xl object-cover"
-								src={job.thumbnail}
-							/>
-						) : null}
-						<dl className="grid gap-px overflow-hidden rounded-2xl border border-border/70 bg-border/60 sm:grid-cols-2">
-							{fields.map(([label, value]) => (
-								<div className="bg-surface/85 p-3" key={label}>
-									<dt className="text-[11px] font-semibold tracking-wide text-muted uppercase">
-										{label}
-									</dt>
-									<dd className="mt-1 wrap-break-word font-mono text-xs text-foreground">
-										{value}
-									</dd>
-								</div>
-							))}
-						</dl>
-					</Modal.Body>
-					<Modal.Footer>
-						<Button slot="close" variant="tertiary">
-							Close
-						</Button>
-					</Modal.Footer>
-				</Modal.Dialog>
+				<Squircle asChild cornerRadius={24}>
+					<Modal.Dialog>
+						<Squircle asChild className="ring-inset" cornerRadius={12}>
+							<Modal.CloseTrigger />
+						</Squircle>
+						<Modal.Header>
+							<Modal.Heading>Task properties</Modal.Heading>
+						</Modal.Header>
+						<Modal.Body className="gap-5">
+							{job.thumbnail ? (
+								<Squircle asChild cornerRadius={16}>
+									<img
+										alt=""
+										className="aspect-video w-full object-cover"
+										src={job.thumbnail}
+									/>
+								</Squircle>
+							) : null}
+							<Squircle
+								asChild
+								className="grid gap-px overflow-hidden border border-border/70 bg-border/60 sm:grid-cols-2"
+								cornerRadius={16}
+							>
+								<dl>
+									{fields.map(([label, value]) => (
+										<div className="bg-surface/85 p-3" key={label}>
+											<dt className="text-[11px] font-semibold tracking-wide text-muted uppercase">
+												{label}
+											</dt>
+											<dd className="mt-1 wrap-break-word font-mono text-xs text-foreground">
+												{value}
+											</dd>
+										</div>
+									))}
+								</dl>
+							</Squircle>
+						</Modal.Body>
+						<Modal.Footer>
+							<Squircle asChild className="ring-inset" cornerRadius={12}>
+								<Button slot="close" variant="tertiary">
+									Close
+								</Button>
+							</Squircle>
+						</Modal.Footer>
+					</Modal.Dialog>
+				</Squircle>
 			</Modal.Container>
 		</Modal.Backdrop>
 	);
@@ -1730,55 +1837,76 @@ function DuplicatePrompt({
 	return (
 		<Modal.Backdrop isOpen onOpenChange={(open) => !open && onClose()}>
 			<Modal.Container size="md">
-				<Modal.Dialog>
-					<Modal.CloseTrigger />
-					<Modal.Header>
-						<Modal.Heading>Duplicate found</Modal.Heading>
-					</Modal.Header>
-					<Modal.Body className="gap-3">
-						<Typography type="body-sm">
-							{state.info.type === "job"
-								? "A matching download is already active."
-								: state.info.type === "torrent"
-									? "Torrent data already exists in the selected destination."
-									: "A file with this name already exists in the destination."}
-						</Typography>
-						{existing ? (
-							<div className="rounded-xl border border-border/60 bg-surface/75 p-3">
-								<Typography
-									className="wrap-break-word font-mono text-foreground/90"
-									type="body-xs"
+				<Squircle asChild cornerRadius={24}>
+					<Modal.Dialog>
+						<Squircle asChild className="ring-inset" cornerRadius={12}>
+							<Modal.CloseTrigger />
+						</Squircle>
+						<Modal.Header>
+							<Modal.Heading>Duplicate found</Modal.Heading>
+						</Modal.Header>
+						<Modal.Body className="gap-3">
+							<Typography type="body-sm">
+								{state.info.type === "job"
+									? "A matching download is already active."
+									: state.info.type === "torrent"
+										? "Torrent data already exists in the selected destination."
+										: "A file with this name already exists in the destination."}
+							</Typography>
+							{existing ? (
+								<Squircle
+									className="border border-border/60 bg-surface/75 p-3"
+									cornerRadius={12}
 								>
-									<span className="text-muted">Existing:</span> {existing}
-								</Typography>
-							</div>
-						) : null}
-						{state.info.suggestedName ? (
-							<div className="rounded-xl border border-border/60 bg-surface/75 p-3">
-								<Typography
-									className="wrap-break-word font-mono text-foreground/90"
-									type="body-xs"
+									<Typography
+										className="wrap-break-word font-mono text-foreground/90"
+										type="body-xs"
+									>
+										<span className="text-muted">Existing:</span> {existing}
+									</Typography>
+								</Squircle>
+							) : null}
+							{state.info.suggestedName ? (
+								<Squircle
+									className="border border-border/60 bg-surface/75 p-3"
+									cornerRadius={12}
 								>
-									<span className="text-muted">Suggested:</span>{" "}
-									{state.info.suggestedName}
-								</Typography>
-							</div>
-						) : null}
-					</Modal.Body>
-					<Modal.Footer>
-						<Button variant="tertiary" onPress={() => onChoose("skip")}>
-							Skip
-						</Button>
-						<Button variant="danger-soft" onPress={() => onChoose("override")}>
-							Override
-						</Button>
-						{state.info.type === "torrent" ? (
-							<Button onPress={() => onChoose("resume")}>Resume</Button>
-						) : (
-							<Button onPress={() => onChoose("rename")}>Rename</Button>
-						)}
-					</Modal.Footer>
-				</Modal.Dialog>
+									<Typography
+										className="wrap-break-word font-mono text-foreground/90"
+										type="body-xs"
+									>
+										<span className="text-muted">Suggested:</span>{" "}
+										{state.info.suggestedName}
+									</Typography>
+								</Squircle>
+							) : null}
+						</Modal.Body>
+						<Modal.Footer>
+							<Squircle asChild className="ring-inset" cornerRadius={12}>
+								<Button variant="tertiary" onPress={() => onChoose("skip")}>
+									Skip
+								</Button>
+							</Squircle>
+							<Squircle asChild className="ring-inset" cornerRadius={12}>
+								<Button
+									variant="danger-soft"
+									onPress={() => onChoose("override")}
+								>
+									Override
+								</Button>
+							</Squircle>
+							{state.info.type === "torrent" ? (
+								<Squircle asChild className="ring-inset" cornerRadius={12}>
+									<Button onPress={() => onChoose("resume")}>Resume</Button>
+								</Squircle>
+							) : (
+								<Squircle asChild className="ring-inset" cornerRadius={12}>
+									<Button onPress={() => onChoose("rename")}>Rename</Button>
+								</Squircle>
+							)}
+						</Modal.Footer>
+					</Modal.Dialog>
+				</Squircle>
 			</Modal.Container>
 		</Modal.Backdrop>
 	);
@@ -1786,22 +1914,27 @@ function DuplicatePrompt({
 
 function EmptyQueue() {
 	return (
-		<Card
-			className="items-center gap-4 border border-dashed border-separator bg-transparent px-6 py-16 text-center shadow-none"
-			variant="transparent"
-		>
-			<div className="flex size-12 items-center justify-center rounded-2xl bg-surface-tertiary text-muted">
-				<HardDriveDownload aria-hidden className="size-6" />
-			</div>
-			<div className="max-w-md space-y-2">
-				<Typography className="font-semibold" type="h6">
-					Your queue is clear
-				</Typography>
-				<Typography color="muted" type="body-sm">
-					Probe a video, page, or magnet link above to add the first transfer.
-				</Typography>
-			</div>
-		</Card>
+		<Squircle asChild cornerRadius={24}>
+			<Card
+				className="items-center gap-4 border border-dashed border-separator bg-transparent px-6 py-16 text-center shadow-none"
+				variant="transparent"
+			>
+				<Squircle
+					className="flex size-12 items-center justify-center bg-surface-tertiary text-muted"
+					cornerRadius={16}
+				>
+					<HardDriveDownload aria-hidden className="size-6" />
+				</Squircle>
+				<div className="max-w-md space-y-2">
+					<Typography className="font-semibold" type="h6">
+						Your queue is clear
+					</Typography>
+					<Typography color="muted" type="body-sm">
+						Probe a video, page, or magnet link above to add the first transfer.
+					</Typography>
+				</div>
+			</Card>
+		</Squircle>
 	);
 }
 
@@ -2176,134 +2309,150 @@ export default function DownloadsPage({ backend }: { backend: Backend }) {
 
 	return (
 		<div className="space-y-8">
-			<Card
-				className="gap-5 border border-separator bg-surface p-5 shadow-none sm:p-6"
-				variant="default"
-			>
-				<div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-					<SearchField
-						aria-label="Source URL"
-						className="min-w-0 flex-1"
-						fullWidth
-						onChange={setUrl}
-						onSubmit={() => void runProbe()}
-						value={url}
-					>
-						<SearchField.Group className="min-h-12 rounded-xl border border-field-border bg-field-background px-3">
-							<SearchField.SearchIcon />
-							<SearchField.Input
-								className="font-mono text-sm"
-								placeholder="https://example.com/video or magnet link"
-							/>
-							<SearchField.ClearButton />
-						</SearchField.Group>
-					</SearchField>
-					<Button
-						className="min-h-12 sm:min-w-28"
-						isDisabled={!connected || (!probing && !url.trim())}
-						variant={probing ? "danger-soft" : "primary"}
-						onPress={() => void (probing ? cancelProbe() : runProbe())}
-					>
-						{probing ? (
-							<>
-								<Spinner color="current" size="sm" />
-								Cancel probe
-							</>
-						) : (
-							<>
-								<Search aria-hidden className="size-4" />
-								Probe source
-							</>
-						)}
-					</Button>
-				</div>
-				{probeError ? (
-					<Alert status="danger">
-						<Alert.Indicator />
-						<Alert.Content>
-							<Alert.Title>Probe failed</Alert.Title>
-							<Alert.Description>{probeError}</Alert.Description>
-						</Alert.Content>
-					</Alert>
-				) : null}
-				{downloadError ? (
-					<Alert status="danger">
-						<Alert.Indicator />
-						<Alert.Content>
-							<Alert.Title>Could not start download</Alert.Title>
-							<Alert.Description>{downloadError}</Alert.Description>
-						</Alert.Content>
-					</Alert>
-				) : null}
-			</Card>
-
-			<Card
-				className="gap-5 border border-separator bg-surface p-5 shadow-none sm:p-6"
-				variant="default"
-			>
-				<div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-					<div>
-						<Typography className="font-semibold" type="h5">
-							Queue
-						</Typography>
-						<Typography className="mt-1" color="muted" type="body-sm">
-							Live transfer status from the connected backend.
-						</Typography>
-					</div>
-					<Button
-						size="sm"
-						variant="tertiary"
-						onPress={async () => {
-							const result = await backend.clearFinished();
-							if (!result.ok) {
-								setDownloadError(
-									"Could not clear finished downloads. Check the backend connection.",
-								);
-							}
-						}}
-					>
-						<Trash2 aria-hidden className="size-4" />
-						Clear finished
-					</Button>
-				</div>
-				<Tabs
-					selectedKey={filter}
-					onSelectionChange={(key) => setFilter(String(key) as Filter)}
+			<Squircle asChild cornerRadius={24}>
+				<Card
+					className="gap-5 border border-separator bg-surface p-5 shadow-none sm:p-6"
+					variant="default"
 				>
-					<Tabs.ListContainer className="rounded-full border border-separator/60 bg-surface-secondary p-1">
-						<Tabs.List aria-label="Filter downloads" className="gap-1 p-0">
-							{FILTERS.map(({ key, label }) => (
-								<Tabs.Tab
-									className="gap-2 rounded-full px-3.5 py-1.5 text-xs sm:text-sm font-medium transition-colors data-[selected=true]:text-foreground"
-									id={key}
-									key={key}
-								>
-									{label}
-									<Chip
-										className="min-w-5 justify-center rounded-full tabular-nums"
-										color="success"
-										size="sm"
-										variant={filter === key ? "primary" : "soft"}
+					<div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+						<SearchField
+							aria-label="Source URL"
+							className="min-w-0 flex-1"
+							fullWidth
+							onChange={setUrl}
+							onSubmit={() => void runProbe()}
+							value={url}
+						>
+							<Squircle asChild className="ring-inset" cornerRadius={12}>
+								<SearchField.Group className="min-h-12 border border-field-border bg-field-background px-3">
+									<SearchField.SearchIcon />
+									<SearchField.Input
+										className="font-mono text-sm"
+										placeholder="https://example.com/video or magnet link"
+									/>
+									<Squircle asChild className="ring-inset" cornerRadius={8}>
+										<SearchField.ClearButton />
+									</Squircle>
+								</SearchField.Group>
+							</Squircle>
+						</SearchField>
+						<Squircle asChild className="ring-inset" cornerRadius={12}>
+							<Button
+								className="min-h-12 sm:min-w-28"
+								isDisabled={!connected || (!probing && !url.trim())}
+								variant={probing ? "danger-soft" : "primary"}
+								onPress={() => void (probing ? cancelProbe() : runProbe())}
+							>
+								{probing ? (
+									<>
+										<Spinner color="current" size="sm" />
+										Cancel probe
+									</>
+								) : (
+									<>
+										<Search aria-hidden className="size-4" />
+										Probe source
+									</>
+								)}
+							</Button>
+						</Squircle>
+					</div>
+					{probeError ? (
+						<Squircle asChild cornerRadius={24}>
+							<Alert status="danger">
+								<Alert.Indicator />
+								<Alert.Content>
+									<Alert.Title>Probe failed</Alert.Title>
+									<Alert.Description>{probeError}</Alert.Description>
+								</Alert.Content>
+							</Alert>
+						</Squircle>
+					) : null}
+					{downloadError ? (
+						<Squircle asChild cornerRadius={24}>
+							<Alert status="danger">
+								<Alert.Indicator />
+								<Alert.Content>
+									<Alert.Title>Could not start download</Alert.Title>
+									<Alert.Description>{downloadError}</Alert.Description>
+								</Alert.Content>
+							</Alert>
+						</Squircle>
+					) : null}
+				</Card>
+			</Squircle>
+
+			<Squircle asChild cornerRadius={24}>
+				<Card
+					className="gap-5 border border-separator bg-surface p-5 shadow-none sm:p-6"
+					variant="default"
+				>
+					<div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+						<div>
+							<Typography className="font-semibold" type="h5">
+								Queue
+							</Typography>
+							<Typography className="mt-1" color="muted" type="body-sm">
+								Live transfer status from the connected backend.
+							</Typography>
+						</div>
+						<Squircle asChild className="ring-inset" cornerRadius={12}>
+							<Button
+								size="sm"
+								variant="tertiary"
+								onPress={async () => {
+									const result = await backend.clearFinished();
+									if (!result.ok) {
+										setDownloadError(
+											"Could not clear finished downloads. Check the backend connection.",
+										);
+									}
+								}}
+							>
+								<Trash2 aria-hidden className="size-4" />
+								Clear finished
+							</Button>
+						</Squircle>
+					</div>
+					<Tabs
+						selectedKey={filter}
+						onSelectionChange={(key) => setFilter(String(key) as Filter)}
+					>
+						<Tabs.ListContainer className="rounded-full border border-separator/60 bg-surface-secondary p-1">
+							<Tabs.List aria-label="Filter downloads" className="gap-1 p-0">
+								{FILTERS.map(({ key, label }) => (
+									<Tabs.Tab
+										className="gap-2 rounded-full px-3.5 py-1.5 text-xs sm:text-sm font-medium transition-colors data-[selected=true]:text-foreground"
+										id={key}
+										key={key}
 									>
-										{counts[key]}
-									</Chip>
-									<Tabs.Indicator className="rounded-full bg-surface-tertiary shadow-sm" />
-								</Tabs.Tab>
-							))}
-						</Tabs.List>
-					</Tabs.ListContainer>
-				</Tabs>
-				{filtered.length ? (
-					<JobGroupList
-						groups={filtered}
-						selectedIds={selectedIds}
-						onContextMenu={handleJobContextMenu}
-						onSelect={handleSelect}
-					/>
-				) : (
-					<EmptyQueue />
-				)}
-			</Card>
+										{label}
+										<SquircleChip
+											className="min-w-5 justify-center rounded-full tabular-nums"
+											color="success"
+											size="sm"
+											variant={filter === key ? "primary" : "soft"}
+										>
+											{counts[key]}
+										</SquircleChip>
+										<Tabs.Indicator className="rounded-full bg-surface-tertiary shadow-sm" />
+									</Tabs.Tab>
+								))}
+							</Tabs.List>
+						</Tabs.ListContainer>
+					</Tabs>
+					{filtered.length ? (
+						<JobGroupList
+							groups={filtered}
+							selectedIds={selectedIds}
+							onContextMenu={handleJobContextMenu}
+							onSelect={handleSelect}
+						/>
+					) : (
+						<EmptyQueue />
+					)}
+				</Card>
+			</Squircle>
 
 			{contextMenu ? (
 				<JobContextMenu

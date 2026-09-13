@@ -2,7 +2,6 @@ import {
 	Alert,
 	Button,
 	Card,
-	Chip,
 	Input,
 	Label,
 	ListBox,
@@ -13,6 +12,7 @@ import {
 	TextField,
 	Typography,
 } from "@heroui/react";
+import { Squircle } from "@squircle-js/react";
 import type { LucideIcon } from "lucide-react";
 import {
 	Folder,
@@ -32,6 +32,7 @@ import { useUpdater } from "../hooks/useUpdater";
 import { backend, type Settings } from "../lib/backend";
 import { formatBytes } from "../lib/format";
 import AboutSection from "./AboutSection";
+import SquircleChip from "./SquircleChip";
 
 type Backend = ReturnType<typeof useBackend>;
 
@@ -124,10 +125,12 @@ function TextSetting({
 			onChange={onCommit}
 		>
 			<Label>{label}</Label>
-			<Input
-				className={mono ? "font-mono text-sm" : "text-sm"}
-				placeholder={placeholder}
-			/>
+			<Squircle asChild className="ring-inset" cornerRadius={12}>
+				<Input
+					className={mono ? "font-mono text-sm" : "text-sm"}
+					placeholder={placeholder}
+				/>
+			</Squircle>
 		</TextField>
 	);
 }
@@ -181,8 +184,9 @@ function ExtensionSection() {
 			<div className="space-y-2">
 				{browsers.length ? (
 					browsers.map((browser) => (
-						<div
-							className="flex items-center justify-between gap-4 rounded-xl border border-separator bg-surface-secondary px-4 py-3"
+						<Squircle
+							className="flex items-center justify-between gap-4 border border-separator bg-surface-secondary px-4 py-3"
+							cornerRadius={12}
 							key={browser.id}
 						>
 							<div className="min-w-0">
@@ -197,14 +201,16 @@ function ExtensionSection() {
 									{browser.executable}
 								</Typography>
 							</div>
-							<Button
-								isDisabled={busyId !== null}
-								onPress={() => install(browser.id)}
-								size="sm"
-							>
-								{busyId === browser.id ? "Installing…" : "Install"}
-							</Button>
-						</div>
+							<Squircle asChild className="ring-inset" cornerRadius={12}>
+								<Button
+									isDisabled={busyId !== null}
+									onPress={() => install(browser.id)}
+									size="sm"
+								>
+									{busyId === browser.id ? "Installing…" : "Install"}
+								</Button>
+							</Squircle>
+						</Squircle>
 					))
 				) : (
 					<Typography color="muted" type="body-sm">
@@ -213,15 +219,17 @@ function ExtensionSection() {
 				)}
 			</div>
 			{status ? (
-				<Alert status={status.ok ? "success" : "danger"}>
-					<Alert.Indicator />
-					<Alert.Content>
-						<Alert.Title>
-							{status.ok ? "Install started" : "Install failed"}
-						</Alert.Title>
-						<Alert.Description>{status.message}</Alert.Description>
-					</Alert.Content>
-				</Alert>
+				<Squircle asChild cornerRadius={24}>
+					<Alert status={status.ok ? "success" : "danger"}>
+						<Alert.Indicator />
+						<Alert.Content>
+							<Alert.Title>
+								{status.ok ? "Install started" : "Install failed"}
+							</Alert.Title>
+							<Alert.Description>{status.message}</Alert.Description>
+						</Alert.Content>
+					</Alert>
+				</Squircle>
 			) : null}
 			{extensionPath ? (
 				<Typography className="font-mono" color="muted" type="body-xs">
@@ -255,24 +263,31 @@ function SelectSetting({
 			onChange={(next) => onChange(String(next))}
 		>
 			<Label>{label}</Label>
-			<Select.Trigger>
-				<Select.Value />
-				<Select.Indicator />
-			</Select.Trigger>
-			<Select.Popover>
-				<ListBox>
-					{options.map((option) => (
-						<ListBox.Item
-							id={option.value}
-							key={option.value}
-							textValue={option.label}
-						>
-							{option.label}
-							<ListBox.ItemIndicator />
-						</ListBox.Item>
-					))}
-				</ListBox>
-			</Select.Popover>
+			<Squircle asChild className="ring-inset" cornerRadius={12}>
+				<Select.Trigger>
+					<Select.Value />
+					<Select.Indicator />
+				</Select.Trigger>
+			</Squircle>
+			<Squircle asChild cornerRadius={24}>
+				<Select.Popover>
+					<ListBox>
+						{options.map((option) => (
+							<Squircle
+								asChild
+								className="ring-inset"
+								cornerRadius={16}
+								key={option.value}
+							>
+								<ListBox.Item id={option.value} textValue={option.label}>
+									{option.label}
+									<ListBox.ItemIndicator />
+								</ListBox.Item>
+							</Squircle>
+						))}
+					</ListBox>
+				</Select.Popover>
+			</Squircle>
 		</Select>
 	);
 }
@@ -311,7 +326,9 @@ function SliderSetting({
 			</div>
 			<Slider.Track>
 				<Slider.Fill />
-				<Slider.Thumb />
+				<Squircle asChild className="ring-inset" cornerRadius={10}>
+					<Slider.Thumb />
+				</Squircle>
 			</Slider.Track>
 		</Slider>
 	);
@@ -332,12 +349,14 @@ function ToggleSetting({
 			isSelected={checked}
 			onChange={onChange}
 		>
-			<Switch.Content className="flex w-full items-center justify-between gap-4 rounded-xl border border-separator bg-surface-secondary px-4 py-3 transition-colors hover:bg-surface-secondary-hover">
-				<Label className="cursor-pointer text-sm font-medium">{label}</Label>
-				<Switch.Control>
-					<Switch.Thumb />
-				</Switch.Control>
-			</Switch.Content>
+			<Squircle asChild cornerRadius={12}>
+				<Switch.Content className="flex w-full items-center justify-between gap-4 border border-separator bg-surface-secondary px-4 py-3 transition-colors hover:bg-surface-secondary-hover">
+					<Label className="cursor-pointer text-sm font-medium">{label}</Label>
+					<Switch.Control>
+						<Switch.Thumb />
+					</Switch.Control>
+				</Switch.Content>
+			</Squircle>
 		</Switch>
 	);
 }
@@ -354,12 +373,18 @@ function SectionCard({
 	children: ReactNode;
 }) {
 	return (
-		<div className="space-y-4 rounded-2xl border border-separator bg-surface-secondary/60 p-4 sm:p-5">
+		<Squircle
+			className="space-y-4 border border-separator bg-surface-secondary/60 p-4 sm:p-5"
+			cornerRadius={16}
+		>
 			{Icon && (
 				<div className="flex items-start gap-3">
-					<div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-surface-tertiary text-foreground">
+					<Squircle
+						className="flex size-9 shrink-0 items-center justify-center bg-surface-tertiary text-foreground"
+						cornerRadius={12}
+					>
 						<Icon className="size-5" />
-					</div>
+					</Squircle>
 					<div>
 						<Typography className="font-medium" type="body-sm">
 							{title}
@@ -371,7 +396,7 @@ function SectionCard({
 				</div>
 			)}
 			<div className="space-y-4">{children}</div>
-		</div>
+		</Squircle>
 	);
 }
 
@@ -388,22 +413,28 @@ function SettingsNavigation({
 				const Icon = item.icon;
 				const active = section === item.id;
 				return (
-					<button
-						className={`flex w-full items-center gap-3 rounded-xl px-3.5 py-2.5 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-focus ${
-							active
-								? "bg-surface-tertiary font-medium text-foreground ring-1 ring-inset ring-accent/25"
-								: "text-muted hover:bg-surface-secondary-hover hover:text-foreground active:bg-surface-secondary-active active:scale-[0.99]"
-						}`}
+					<Squircle
+						asChild
+						className="ring-inset"
+						cornerRadius={12}
 						key={item.id}
-						onClick={() => onChange(item.id)}
-						type="button"
 					>
-						<Icon
-							aria-hidden
-							className={`size-4 shrink-0 ${active ? "text-accent font-semibold" : ""}`}
-						/>
-						<span className="truncate">{item.label}</span>
-					</button>
+						<button
+							className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-focus ${
+								active
+									? "bg-surface-tertiary font-medium text-foreground ring-1 ring-inset ring-accent/25"
+									: "text-muted hover:bg-surface-secondary-hover hover:text-foreground active:bg-surface-secondary-active active:scale-[0.99]"
+							}`}
+							onClick={() => onChange(item.id)}
+							type="button"
+						>
+							<Icon
+								aria-hidden
+								className={`size-4 shrink-0 ${active ? "text-accent font-semibold" : ""}`}
+							/>
+							<span className="truncate">{item.label}</span>
+						</button>
+					</Squircle>
 				);
 			})}
 		</div>
@@ -421,7 +452,9 @@ export default function SettingsPage({ backend }: { backend: Backend }) {
 	if (!settings) {
 		return (
 			<div className="p-6">
-				<Skeleton className="h-64 rounded-2xl" />
+				<Squircle asChild cornerRadius={16}>
+					<Skeleton className="h-64" />
+				</Squircle>
 			</div>
 		);
 	}
@@ -470,9 +503,9 @@ export default function SettingsPage({ backend }: { backend: Backend }) {
 					<Typography className="font-bold tracking-tight" type="h3">
 						Settings
 					</Typography>
-					<Chip color="success" size="sm" variant="soft">
+					<SquircleChip color="success" size="sm" variant="soft">
 						Auto-sync enabled
-					</Chip>
+					</SquircleChip>
 				</div>
 				<Typography className="max-w-2xl" color="muted" type="body-sm">
 					Tune queue behavior, network speed, engine configurations, and
@@ -480,21 +513,25 @@ export default function SettingsPage({ backend }: { backend: Backend }) {
 				</Typography>
 			</header>
 			<div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)] lg:items-start">
-				<Card
-					className="border border-separator bg-surface-secondary p-2 shadow-none lg:sticky lg:top-6"
-					variant="transparent"
-				>
-					<SettingsNavigation onChange={setSection} section={section} />
-				</Card>
+				<Squircle asChild cornerRadius={24}>
+					<Card
+						className="border border-separator bg-surface-secondary p-2 shadow-none lg:sticky lg:top-6"
+						variant="transparent"
+					>
+						<SettingsNavigation onChange={setSection} section={section} />
+					</Card>
+				</Squircle>
 				<div className="min-w-0">
 					{settingsError ? (
-						<Alert className="mb-5" status="danger">
-							<Alert.Indicator />
-							<Alert.Content>
-								<Alert.Title>Settings could not be saved</Alert.Title>
-								<Alert.Description>{settingsError}</Alert.Description>
-							</Alert.Content>
-						</Alert>
+						<Squircle asChild cornerRadius={24}>
+							<Alert className="mb-5" status="danger">
+								<Alert.Indicator />
+								<Alert.Content>
+									<Alert.Title>Settings could not be saved</Alert.Title>
+									<Alert.Description>{settingsError}</Alert.Description>
+								</Alert.Content>
+							</Alert>
+						</Squircle>
 					) : null}
 
 					{section === "general" ? (
@@ -540,7 +577,7 @@ export default function SettingsPage({ backend }: { backend: Backend }) {
 								<SliderSetting
 									display={String(settings.concurrentFragments)}
 									label="Concurrent fragments"
-									maxValue={16}
+									maxValue={32}
 									minValue={1}
 									onChange={(value) => set({ concurrentFragments: value })}
 									value={settings.concurrentFragments}
@@ -674,19 +711,21 @@ export default function SettingsPage({ backend }: { backend: Backend }) {
 								value={settings.aria2NextFileAllocation}
 							/>
 							{settings.aria2NextFileAllocation !== "none" ? (
-								<Alert status="warning">
-									<Alert.Indicator />
-									<Alert.Content>
-										<Alert.Title>
-											Upfront disk allocation is enabled
-										</Alert.Title>
-										<Alert.Description>
-											Reserves full file size upfront. May fail if free disk
-											space is insufficient. Set to &quot;none&quot; to allocate
-											dynamically.
-										</Alert.Description>
-									</Alert.Content>
-								</Alert>
+								<Squircle asChild cornerRadius={24}>
+									<Alert status="warning">
+										<Alert.Indicator />
+										<Alert.Content>
+											<Alert.Title>
+												Upfront disk allocation is enabled
+											</Alert.Title>
+											<Alert.Description>
+												Reserves full file size upfront. May fail if free disk
+												space is insufficient. Set to &quot;none&quot; to
+												allocate dynamically.
+											</Alert.Description>
+										</Alert.Content>
+									</Alert>
+								</Squircle>
 							) : null}
 							<TextSetting
 								label="Per-download rate limit (bytes/sec, 0 = unlimited)"
@@ -856,8 +895,9 @@ export default function SettingsPage({ backend }: { backend: Backend }) {
 								<div className="space-y-2">
 									{settings.presetPaths.length ? (
 										settings.presetPaths.map((preset) => (
-											<div
-												className="flex items-center justify-between gap-4 rounded-xl border border-separator bg-surface-secondary px-4 py-3"
+											<Squircle
+												className="flex items-center justify-between gap-4 border border-separator bg-surface-secondary px-4 py-3"
+												cornerRadius={12}
 												key={preset.path}
 											>
 												<div className="min-w-0">
@@ -872,16 +912,25 @@ export default function SettingsPage({ backend }: { backend: Backend }) {
 														{preset.path}
 													</Typography>
 												</div>
-												<Button
-													aria-label={`Remove ${preset.name}`}
-													isIconOnly
-													size="sm"
-													variant="tertiary"
-													onPress={() => removePreset(preset.path)}
+												<Squircle
+													asChild
+													className="ring-inset"
+													cornerRadius={12}
 												>
-													<Trash2 aria-hidden className="size-4 text-danger" />
-												</Button>
-											</div>
+													<Button
+														aria-label={`Remove ${preset.name}`}
+														isIconOnly
+														size="sm"
+														variant="tertiary"
+														onPress={() => removePreset(preset.path)}
+													>
+														<Trash2
+															aria-hidden
+															className="size-4 text-danger"
+														/>
+													</Button>
+												</Squircle>
+											</Squircle>
 										))
 									) : (
 										<Typography color="muted" type="body-sm">
@@ -896,7 +945,9 @@ export default function SettingsPage({ backend }: { backend: Backend }) {
 										onChange={setNewPresetName}
 									>
 										<Label>Name</Label>
-										<Input placeholder="Movies" />
+										<Squircle asChild className="ring-inset" cornerRadius={12}>
+											<Input placeholder="Movies" />
+										</Squircle>
 									</TextField>
 									<TextField
 										fullWidth
@@ -904,19 +955,23 @@ export default function SettingsPage({ backend }: { backend: Backend }) {
 										onChange={setNewPresetPath}
 									>
 										<Label>Absolute path</Label>
-										<Input
-											className="font-mono text-sm"
-											placeholder="/Users/name/Downloads/Movies"
-										/>
+										<Squircle asChild className="ring-inset" cornerRadius={12}>
+											<Input
+												className="font-mono text-sm"
+												placeholder="/Users/name/Downloads/Movies"
+											/>
+										</Squircle>
 									</TextField>
-									<Button
-										className="min-h-10"
-										isDisabled={!newPresetPath.trim()}
-										onPress={addPreset}
-									>
-										<Plus aria-hidden className="size-4" />
-										Add preset
-									</Button>
+									<Squircle asChild className="ring-inset" cornerRadius={12}>
+										<Button
+											className="min-h-10"
+											isDisabled={!newPresetPath.trim()}
+											onPress={addPreset}
+										>
+											<Plus aria-hidden className="size-4" />
+											Add preset
+										</Button>
+									</Squircle>
 								</div>
 							</div>
 						</SectionCard>
