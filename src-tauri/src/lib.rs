@@ -349,6 +349,7 @@ pub fn run() {
         #[cfg(not(target_os = "macos"))]
         ensure_desktop_dependencies(app.handle(), user_path.as_deref());
 
+        #[allow(unused_mut)] // mutated only in the unix cfg block below
         let mut final_path = user_path.unwrap_or_default();
         #[cfg(unix)]
         {
@@ -400,12 +401,12 @@ pub fn run() {
 
       Ok(())
     })
-    .on_window_event(|window, event| {
+    .on_window_event(|_window, _event| {
       #[cfg(target_os = "macos")]
-      if let tauri::WindowEvent::Focused(true) = event {
+      if let tauri::WindowEvent::Focused(true) = _event {
         if has_full_disk_access() && !DEPENDENCIES_CHECKED.load(Ordering::SeqCst) {
           let user_path = resolve_user_path();
-          ensure_desktop_dependencies(window.app_handle(), user_path.as_deref());
+          ensure_desktop_dependencies(_window.app_handle(), user_path.as_deref());
         }
       }
     })

@@ -143,7 +143,8 @@ jobs:
                   sig = f.read().strip()
               lower = archive_file.lower()
               key = None
-              if lower.endswith(".app.tar.gz") and ("aarch64" in lower or "arm64" in lower):
+              if lower.endswith(".app.tar.gz"):
+                  # macOS builds run only on macos-latest (Apple Silicon)
                   key = "darwin-aarch64"
               elif (lower.endswith(".exe") or lower.endswith(".msi")) and ("x86_64" in lower or "x64" in lower):
                   key = "windows-x86_64"
