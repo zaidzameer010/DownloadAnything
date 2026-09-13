@@ -23,7 +23,7 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     env:
-      ARIA2_VERSION: 2.7.1
+      ARIA2_VERSION: 2.7.5
 
     steps:
       - name: Checkout repository
@@ -36,14 +36,14 @@ jobs:
         if: matrix.platform == 'macos-latest'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release download -R AnInsomniacy/aria2-next --tag "v${ARIA2_VERSION}" --pattern "aria2-next-${ARIA2_VERSION}-macos-arm64" --clobber
+        run: gh release download "v${ARIA2_VERSION}" -R AnInsomniacy/aria2-next --pattern "aria2-next-${ARIA2_VERSION}-macos-arm64" --clobber
 
       - name: Download aria2-next binary (Windows)
         if: matrix.platform == 'windows-latest'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release download -R AnInsomniacy/aria2-next --tag "v${ARIA2_VERSION}" --pattern "aria2-next-${ARIA2_VERSION}-windows-x86_64.exe" --clobber
+        run: gh release download "v${ARIA2_VERSION}" -R AnInsomniacy/aria2-next --pattern "aria2-next-${ARIA2_VERSION}-windows-x86_64.exe" --clobber
 
       - name: Set up Python
         uses: actions/setup-python@v5
