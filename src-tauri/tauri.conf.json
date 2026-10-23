@@ -1,78 +1,53 @@
 {
-  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "DownloadAnything",
-  "version": "0.6.0",
-  "identifier": "com.downloadanything.desktop",
+  "$schema": "../ui/node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "dax",
+  "version": "0.7.0",
+  "identifier": "dax",
   "build": {
-    "frontendDist": "../dist",
+    "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "bun dev",
-    "beforeBuildCommand": "bun run backend:build && bun run build"
+    "beforeDevCommand": "bun --cwd=ui run dev",
+    "beforeBuildCommand": "bun --cwd=ui run build"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
-        "label": "main",
-        "title": "DownloadAnything",
-        "width": 1920,
-        "height": 1080,
+        "title": "dax",
+        "width": 1080,
+        "height": 800,
+        "minWidth": 720,
+        "minHeight": 560,
         "resizable": true,
         "fullscreen": false
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ws://127.0.0.1:8765; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+      "csp": null
     }
   },
   "bundle": {
     "active": true,
+    "targets": "all",
     "createUpdaterArtifacts": true,
-    "targets": [
-      "app",
-      "dmg",
-      "nsis"
-    ],
-    "externalBin": [
-      "binaries/aria2-next"
-    ],
-    "resources": {
-      "resources/downloadanything-backend": "downloadanything-backend",
-      "resources/extention": "extention"
-    },
-    "fileAssociations": [
-      {
-        "ext": [
-          "torrent"
-        ],
-        "name": "BitTorrent Seed File",
-        "role": "Viewer",
-        "mimeType": "application/x-bittorrent"
-      }
-    ],
-    "category": "Utility",
-    "shortDescription": "Desktop download manager",
-    "longDescription": "DownloadAnything is a desktop download manager with browser extension and websocket backend integration.",
-    "macOS": {
-      "signingIdentity": "-",
-      "hardenedRuntime": true
-    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "signingIdentity": "-",
+      "hardenedRuntime": true
+    }
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI2MTBCNTFFOTdFMDhCNTIKUldSU2krQ1hIclVRSnJOaWt0YzNkQ3ZvRE1vdWZ2ditCSC90ZUdvbTE5emlsOWdYb3ViMnJGS0YK",
       "endpoints": [
         "https://github.com/zaidzameer010/DownloadAnything/releases/latest/download/latest.json"
       ],
-      "windows": {
-        "installMode": "passive"
-      }
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENEQTM4MUE3Q0RBODc2Q0QKUldUTmRxak5wNEdqemEwZWswYWxSenlTYnB6OWhtQzFrVXIzdWhjQXR4VG4xSStrZmVVT1RzOW4K"
     }
   }
 }

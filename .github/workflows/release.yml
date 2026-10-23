@@ -17,13 +17,14 @@ jobs:
       actions: write
     strategy:
       fail-fast: false
+      # Serial: both legs merge into the same latest.json — parallel uploads race.
       max-parallel: 1
       matrix:
         platform: [macos-latest, windows-latest]
     runs-on: ${{ matrix.platform }}
 
     env:
-      ARIA2_VERSION: 2.7.5
+      ARIA2_VERSION: 3.0.8
 
     steps:
       - name: Checkout repository
@@ -45,32 +46,38 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release download "v${ARIA2_VERSION}" -R AnInsomniacy/aria2-next --pattern "aria2-next-${ARIA2_VERSION}-windows-x86_64.exe" --clobber
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
 
-      - name: Install Python dependencies
-        run: uv pip install --system -r requirements.txt
+      - name: Install backend environment
+        working-directory: src-py
+        run: uv sync
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
 
-      - name: Install dependencies
-        run: bun install
+      - name: Install UI dependencies
+        run: bun --cwd ui install
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Rust cache
-        id: rust-cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: './src-tauri -> target'
           cache-all-crates: true
           prefix-key: "rust-cache-${{ matrix.platform }}"
+
+      # tauri.conf.json version is what the updater compares against — it must
+      # equal the release tag or every launch reports a newer release forever.
+      - name: Sync app version to tag
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.version || github.ref_name }}"
+          jq --arg v "${TAG#v}" '.version = $v' src-tauri/tauri.conf.json > tauri.conf.json.tmp
+          mv tauri.conf.json.tmp src-tauri/tauri.conf.json
 
       - name: tauri-build
         uses: tauri-apps/tauri-action@v0
@@ -84,8 +91,10 @@ jobs:
           releaseBody: 'DownloadAnything Release'
           releaseDraft: true
           prerelease: false
-          # Let the custom updater-json job generate and upload the combined latest.json.
-          includeUpdaterJson: false
+          # Root package.json has no CLI dep; the script routes to ui/node_modules/.bin/tauri
+          tauriScript: 'bun run tauri'
+          # NSIS -setup.exe is the conventional updater artifact over MSI
+          updaterJsonPreferNsis: true
           args: --config '{"plugins":{"updater":{"pubkey":"${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}"}}}'
 
       - name: Cleanup old caches for OS
@@ -103,71 +112,5 @@ jobs:
           else
             echo "No previous caches found for platform $PLATFORM."
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  updater-json:
-    needs: release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download all release assets
-        run: |
-          TAG=${{ github.event.inputs.version || github.ref_name }}
-          echo "RELEASE_TAG=$TAG" >> $GITHUB_ENV
-          gh release download "$TAG" --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate combined latest.json
-        run: |
-          python3 -c '
-          import os, json, glob, datetime
-          tag = os.getenv("RELEASE_TAG")
-          owner_repo = os.getenv("GITHUB_REPOSITORY")
-          latest = {
-              "version": tag.lstrip("v"),
-              "notes": f"Release {tag}",
-              "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-              "platforms": {}
-          }
-          for sig_file in glob.glob("*.sig"):
-              archive_file = sig_file[:-4]
-              if not os.path.exists(archive_file):
-                  continue
-              with open(sig_file, "r") as f:
-                  sig = f.read().strip()
-              lower = archive_file.lower()
-              key = None
-              if lower.endswith(".app.tar.gz"):
-                  # macOS builds run only on macos-latest (Apple Silicon)
-                  key = "darwin-aarch64"
-              elif (lower.endswith(".exe") or lower.endswith(".msi")) and ("x86_64" in lower or "x64" in lower):
-                  key = "windows-x86_64"
-              if key:
-                  latest["platforms"][key] = {
-                      "signature": sig,
-                      "url": f"https://github.com/{owner_repo}/releases/download/{tag}/{archive_file}"
-                  }
-          missing = {"darwin-aarch64", "windows-x86_64"} - latest["platforms"].keys()
-          if missing:
-              missing_text = ", ".join(sorted(missing))
-              raise RuntimeError(f"Missing updater artifacts for: {missing_text}")
-          with open("latest.json", "w") as f:
-              json.dump(latest, f, indent=2)
-          print("Generated latest.json:")
-          print(json.dumps(latest, indent=2))
-          '
-        env:
-          RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
-
-      - name: Upload latest.json back to release
-        run: |
-          TAG=${{ github.event.inputs.version || github.ref_name }}
-          gh release upload "$TAG" latest.json --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

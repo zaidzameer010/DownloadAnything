@@ -1,0 +1,1045 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+@theme {
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo,
+    Consolas, monospace;
+}
+
+/*
+ * Minimal monochrome dark theme — near-black canvas, flat hairline-separated
+ * surfaces, softened ink, desaturated status accents.
+ * Defined on :root, .dark, and [data-theme="dark"] outside @layer so every
+ * base and calculated token in @heroui/styles is deterministically overridden.
+ */
+:root,
+.dark,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Primitives */
+  --white: oklch(1 0 0);
+  --black: oklch(0 0 0);
+  --snow: oklch(0.985 0 0);
+  --eclipse: oklch(0.07 0 0);
+
+  --spacing: 0.25rem;
+  --radius: 0.625rem;
+  --field-radius: 0.625rem;
+  --border-width: 1px;
+  --field-border-width: 1px;
+  --disabled-opacity: 0.38;
+  --ring-offset-width: 0px;
+  --cursor-interactive: pointer;
+  --cursor-disabled: not-allowed;
+
+  /* Motion — exponential ease-out curves */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-smooth: cubic-bezier(0.23, 1, 0.32, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 240ms;
+
+  /* Canvas & Monochrome Elevation Ladder (small steps — flat, not stacked) */
+  --background: oklch(0.135 0 0);                /* ~#08080a Canvas */
+  --background-secondary: oklch(0.15 0 0);       /* Header / rail */
+  --background-tertiary: oklch(0.165 0 0);
+  --foreground: oklch(0.905 0 0);                /* Softened primary ink */
+  --foreground-secondary: oklch(0.70 0 0);       /* Secondary ink */
+  --background-inverse: var(--foreground);
+
+  --surface: oklch(0.16 0 0);                    /* L1 Row / card surface */
+  --surface-foreground: var(--foreground);
+  --surface-hover: oklch(0.195 0 0);             /* L1 hover */
+
+  --surface-secondary: oklch(0.20 0 0);          /* L2 Raised surface */
+  --surface-secondary-foreground: var(--foreground);
+
+  --surface-tertiary: oklch(0.24 0 0);           /* L3 Active surface */
+  --surface-tertiary-foreground: var(--foreground);
+
+  --overlay: oklch(0.155 0 0);                   /* Modal / drawer / popover */
+  --overlay-foreground: var(--foreground);
+
+  /* Text & Neutral Hierarchy */
+  --muted: oklch(0.58 0 0);                      /* Supporting copy & metadata */
+  --muted-subtle: oklch(0.44 0 0);               /* Quiet labels & placeholders */
+
+  /* Neutral Controls (--default, --segment) */
+  --default: oklch(0.19 0 0);                    /* Secondary button fill */
+  --default-foreground: oklch(0.90 0 0);
+  --default-hover: oklch(0.225 0 0);
+  --default-pressed: oklch(0.26 0 0);
+  --default-soft: oklch(1 0 0 / 0.045);
+  --default-soft-foreground: oklch(0.80 0 0);
+  --default-soft-hover: oklch(1 0 0 / 0.08);
+
+  --segment: oklch(0.225 0 0);                   /* Active tab / segment fill */
+  --segment-foreground: oklch(0.92 0 0);
+
+  /* Monochrome Accent (dimmed white primary action) */
+  --accent: oklch(0.90 0 0);
+  --accent-foreground: oklch(0.09 0 0);
+  --accent-hover: oklch(0.955 0 0);
+  --accent-pressed: oklch(0.82 0 0);
+  --accent-soft: oklch(1 0 0 / 0.06);
+  --accent-soft-foreground: oklch(0.90 0 0);
+  --accent-soft-hover: oklch(1 0 0 / 0.10);
+
+  /* Borders, Separators & Focus — hairlines, not frames */
+  --border: oklch(0.205 0 0);
+  --border-secondary: oklch(0.25 0 0);
+  --border-tertiary: oklch(0.30 0 0);
+  --separator: oklch(0.175 0 0);
+  --separator-secondary: oklch(0.21 0 0);
+  --separator-tertiary: oklch(0.25 0 0);
+  --focus: oklch(0.80 0 0);
+  --link: var(--foreground);
+
+  /* Form Fields — recessed but clearly distinct from the canvas */
+  --field-background: oklch(0.185 0 0);
+  --field-hover: oklch(0.22 0 0);
+  --field-focus: oklch(0.205 0 0);
+  --field-foreground: var(--foreground);
+  --field-placeholder: oklch(0.44 0 0);
+  --field-border: transparent;
+  --field-border-hover: transparent;
+  --field-border-focus: oklch(0.45 0 0);
+  --field-shadow: none;
+
+  /* Interactive Surface States — clearly legible against the canvas */
+  --state-hover-bg: oklch(0.195 0 0);
+  --state-active-bg: oklch(0.235 0 0);
+  --state-selected-bg: oklch(0.215 0 0);
+  --state-selected-border: oklch(0.32 0 0);
+
+  /* Semantic Status Colors — desaturated, readable on dark */
+  /* Downloading / Active — muted blue */
+  --info: oklch(0.70 0.10 240);
+  --info-foreground: oklch(0.12 0.02 240);
+  --info-hover: oklch(0.75 0.10 240);
+  --info-soft: color-mix(in oklab, var(--info) 9%, transparent);
+  --info-soft-foreground: oklch(0.79 0.07 240);
+  --info-soft-hover: color-mix(in oklab, var(--info) 14%, transparent);
+  --info-border: color-mix(in oklab, var(--info) 22%, transparent);
+
+  /* Completed / Success — muted green */
+  --success: oklch(0.71 0.115 155);
+  --success-foreground: oklch(0.12 0.02 155);
+  --success-hover: oklch(0.76 0.115 155);
+  --success-soft: color-mix(in oklab, var(--success) 9%, transparent);
+  --success-soft-foreground: oklch(0.79 0.085 155);
+  --success-soft-hover: color-mix(in oklab, var(--success) 14%, transparent);
+  --success-border: color-mix(in oklab, var(--success) 22%, transparent);
+
+  /* Paused / Selecting / Warning — muted amber */
+  --warning: oklch(0.76 0.105 80);
+  --warning-foreground: oklch(0.14 0.02 80);
+  --warning-hover: oklch(0.81 0.105 80);
+  --warning-soft: color-mix(in oklab, var(--warning) 9%, transparent);
+  --warning-soft-foreground: oklch(0.81 0.08 80);
+  --warning-soft-hover: color-mix(in oklab, var(--warning) 14%, transparent);
+  --warning-border: color-mix(in oklab, var(--warning) 22%, transparent);
+
+  /* Error / Danger — muted red */
+  --danger: oklch(0.63 0.15 25);
+  --danger-foreground: oklch(0.96 0 0);
+  --danger-hover: oklch(0.68 0.15 25);
+  --danger-soft: color-mix(in oklab, var(--danger) 9%, transparent);
+  --danger-soft-foreground: oklch(0.78 0.09 25);
+  --danger-soft-hover: color-mix(in oklab, var(--danger) 14%, transparent);
+  --danger-border: color-mix(in oklab, var(--danger) 24%, transparent);
+
+  /* Processing / Seeding — muted violet */
+  --process: oklch(0.69 0.10 290);
+  --process-soft: color-mix(in oklab, var(--process) 9%, transparent);
+  --process-soft-foreground: oklch(0.79 0.07 290);
+  --process-border: color-mix(in oklab, var(--process) 22%, transparent);
+
+  /* Queued / Waiting — neutral */
+  --queued: oklch(0.60 0 0);
+  --queued-soft: oklch(1 0 0 / 0.05);
+  --queued-soft-foreground: oklch(0.72 0 0);
+  --queued-border: oklch(1 0 0 / 0.10);
+
+  /* Task State Tokens (Mapped to Statuses) */
+  --state-downloading: var(--info);
+  --state-downloading-soft: var(--info-soft);
+  --state-downloading-fg: var(--info-soft-foreground);
+  --state-downloading-border: var(--info-border);
+
+  --state-complete: var(--success);
+  --state-complete-soft: var(--success-soft);
+  --state-complete-fg: var(--success-soft-foreground);
+  --state-complete-border: var(--success-border);
+
+  --state-paused: var(--warning);
+  --state-paused-soft: var(--warning-soft);
+  --state-paused-fg: var(--warning-soft-foreground);
+  --state-paused-border: var(--warning-border);
+
+  --state-postprocessing: var(--process);
+  --state-postprocessing-soft: var(--process-soft);
+  --state-postprocessing-fg: var(--process-soft-foreground);
+  --state-postprocessing-border: var(--process-border);
+
+  --state-error: var(--danger);
+  --state-error-soft: var(--danger-soft);
+  --state-error-fg: var(--danger-soft-foreground);
+  --state-error-border: var(--danger-border);
+
+  --state-queued: var(--queued);
+  --state-queued-soft: var(--queued-soft);
+  --state-queued-fg: var(--queued-soft-foreground);
+  --state-queued-border: var(--queued-border);
+
+  /* Overlays & Shadows — quiet elevation */
+  --backdrop: rgb(0 0 0 / 0.6);
+  --surface-shadow: 0 0 0 1px var(--border);
+  --overlay-shadow: 0 0 0 1px var(--border),
+    0 16px 48px -12px rgb(0 0 0 / 0.55);
+
+  /* Scrollbars & Tooltips */
+  --scrollbar-thumb: oklch(1 0 0 / 0.10);
+  --scrollbar-track: transparent;
+  --scrollbar-gutter: auto;
+  --scrollbar-width: thin;
+  --scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  --scrollbar: var(--scrollbar-thumb);
+  --tooltip-delay: 400ms;
+  --tooltip-close-delay: 0ms;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 1.5;
+  letter-spacing: -0.008em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior: contain;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+/* One radius language: 10px controls, 14px cards, 16px dialogs, 8px tabs. */
+.button {
+  border-radius: var(--radius);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  letter-spacing: -0.006em;
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out);
+}
+
+.button--primary {
+  --button-bg: var(--accent);
+  --button-bg-hover: var(--accent-hover);
+  --button-bg-pressed: var(--accent-pressed);
+  --button-fg: var(--accent-foreground);
+}
+
+.button--secondary,
+.button--tertiary {
+  --button-bg: var(--default);
+  --button-bg-hover: var(--default-hover);
+  --button-bg-pressed: var(--default-pressed);
+  --button-fg: var(--foreground);
+  border: 1px solid var(--border);
+}
+
+@media (hover: hover) {
+  .button--secondary:hover:not(:disabled),
+  .button--secondary[data-hovered="true"]:not(:disabled),
+  .button--tertiary:hover:not(:disabled),
+  .button--tertiary[data-hovered="true"]:not(:disabled) {
+    border-color: var(--border-secondary);
+  }
+}
+
+.button--ghost {
+  --button-bg: transparent;
+  --button-bg-hover: var(--state-hover-bg);
+  --button-bg-pressed: var(--state-active-bg);
+  --button-fg: var(--muted);
+}
+
+@media (hover: hover) {
+  .button--ghost:hover:not(:disabled),
+  .button--ghost[data-hovered="true"]:not(:disabled) {
+    color: var(--foreground);
+  }
+}
+
+.button--danger {
+  --button-bg: var(--danger);
+  --button-bg-hover: var(--danger-hover);
+  --button-bg-pressed: oklch(0.58 0.195 25);
+  --button-fg: var(--danger-foreground);
+}
+
+.button--danger-soft {
+  --button-bg: var(--danger-soft);
+  --button-bg-hover: var(--danger-soft-hover);
+  --button-bg-pressed: color-mix(in oklab, var(--danger) 28%, transparent);
+  --button-fg: var(--danger-soft-foreground);
+  border: 1px solid var(--danger-border);
+}
+
+.button:focus-visible,
+.button[data-focus-visible="true"] {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--focus);
+}
+
+/* 2. Close Button (Modals, Drawers, AlertDialogs, SearchField) */
+.close-button,
+.close-button--default {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 0.375rem;
+  background-color: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+@media (hover: hover) {
+  .close-button:hover,
+  .close-button[data-hovered="true"],
+  .close-button--default:hover,
+  .close-button--default[data-hovered="true"] {
+    background-color: var(--surface-secondary);
+    color: var(--foreground);
+    border-color: var(--border);
+  }
+}
+
+.close-button:active,
+.close-button[data-pressed="true"],
+.close-button--default:active,
+.close-button--default[data-pressed="true"] {
+  background-color: var(--surface-tertiary);
+  transform: scale(0.95);
+}
+
+.search-field__clear-button.close-button {
+  width: 1.375rem;
+  height: 1.375rem;
+  border-radius: 0.25rem;
+}
+
+/* 3. Form Fields: Input, TextArea, Select Trigger, SearchField Group */
+.label {
+  font-size: 0.78125rem;
+  font-weight: 500;
+  color: var(--foreground-secondary);
+  letter-spacing: -0.005em;
+  line-height: 1.35;
+}
+
+.description {
+  font-size: 0.75rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.textfield,
+.select,
+.search-field {
+  gap: 0.375rem;
+}
+
+.input,
+.input--secondary,
+.textarea,
+.textarea--secondary,
+.select__trigger,
+.select--secondary .select__trigger,
+.search-field__group,
+.search-field--secondary .search-field__group {
+  background-color: var(--field-background);
+  border: 1px solid transparent;
+  border-radius: var(--field-radius);
+  color: var(--field-foreground);
+  font-size: 0.8125rem;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+.input,
+.input--secondary,
+.select__trigger,
+.select--secondary .select__trigger,
+.search-field__group,
+.search-field--secondary .search-field__group {
+  min-height: 2.25rem;
+  height: 2.25rem;
+  padding-block: 0;
+}
+
+.search-field__input {
+  font-size: 0.8125rem;
+  color: var(--field-foreground);
+}
+
+.input::placeholder,
+.textarea::placeholder,
+.search-field__input::placeholder {
+  color: var(--field-placeholder);
+}
+
+@media (hover: hover) {
+  .input:hover:not(:focus):not([data-focused="true"]),
+  .input--secondary:hover:not(:focus):not([data-focused="true"]),
+  .textarea:hover:not(:focus):not([data-focused="true"]),
+  .textarea--secondary:hover:not(:focus):not([data-focused="true"]),
+  .select__trigger:hover:not(:focus-visible):not([data-focus-visible="true"]),
+  .select--secondary .select__trigger:hover:not(:focus-visible):not([data-focus-visible="true"]),
+  .search-field__group:hover:not(:focus-within):not([data-focus-within="true"]),
+  .search-field--secondary .search-field__group:hover:not(:focus-within):not([data-focus-within="true"]) {
+    background-color: var(--field-hover);
+  }
+}
+
+.input:focus,
+.input[data-focused="true"],
+.input--secondary:focus,
+.input--secondary[data-focused="true"],
+.textarea:focus,
+.textarea[data-focused="true"],
+.textarea--secondary:focus,
+.textarea--secondary[data-focused="true"],
+.select__trigger:focus-visible,
+.select__trigger[data-focus-visible="true"],
+.select__trigger[data-open="true"],
+.select--secondary .select__trigger:focus-visible,
+.select--secondary .select__trigger[data-focus-visible="true"],
+.select--secondary .select__trigger[data-open="true"],
+.search-field__group:focus-within,
+.search-field__group[data-focus-within="true"],
+.search-field--secondary .search-field__group:focus-within,
+.search-field--secondary .search-field__group[data-focus-within="true"] {
+  background-color: var(--field-focus);
+  box-shadow: 0 0 0 1.5px var(--field-border-focus);
+  outline: none;
+}
+
+.field[data-invalid] .input,
+.text-field[data-invalid] .input,
+.field[data-invalid] .textarea,
+.text-field[data-invalid] .textarea,
+.field[data-invalid] .select__trigger,
+.search-field[data-invalid] .search-field__group {
+  box-shadow: 0 0 0 1.5px var(--field-border-invalid);
+}
+
+.select__trigger {
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.select__value {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.select__indicator {
+  align-self: center;
+  flex-shrink: 0;
+  color: var(--muted-subtle);
+}
+
+/* 4. Popovers, Dropdowns & ListBox */
+.select__popover,
+.popover,
+.dropdown__popover {
+  background-color: var(--overlay);
+  border: 1px solid var(--separator);
+  border-radius: 0.75rem;
+  box-shadow: var(--overlay-shadow);
+}
+
+.list-box,
+.select__popover [data-slot="list-box"] {
+  padding: 0.25rem;
+}
+
+.list-box > * + * {
+  margin-top: 2px;
+}
+
+.list-box-item,
+.select__popover [data-slot="list-box-item"] {
+  min-height: 2rem;
+  border-radius: 0.375rem;
+  padding-inline: 0.625rem;
+  padding-block: 0.375rem;
+  font-size: 0.8125rem;
+  color: var(--foreground-secondary);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.list-box-item:has(.list-box-item__indicator) {
+  padding-inline-end: 1.875rem;
+}
+
+@media (hover: hover) {
+  .list-box-item:hover,
+  .list-box-item[data-hovered="true"],
+  .list-box-item[data-focused="true"] {
+    background-color: var(--state-hover-bg);
+    color: var(--foreground);
+  }
+}
+
+.list-box-item[data-selected="true"],
+.list-box-item[aria-selected="true"] {
+  background-color: var(--state-selected-bg);
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+.list-box-item:active,
+.list-box-item[data-pressed="true"] {
+  transform: none;
+  background-color: var(--state-active-bg);
+}
+
+.list-box-item__indicator {
+  color: var(--accent);
+}
+
+/* 5. Switch */
+.switch__control {
+  width: 2.25rem;
+  height: 1.25rem;
+  border-radius: 9999px;
+  background-color: var(--field-background);
+  border: 1px solid var(--border-secondary);
+  padding: 2px;
+  transition:
+    background-color var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) var(--ease-out);
+}
+
+.switch:hover .switch__control,
+.switch:has([data-slot="switch-content"][data-hovered="true"]) .switch__control {
+  background-color: var(--surface-secondary);
+  border-color: var(--border-tertiary);
+}
+
+.switch[aria-checked="true"] .switch__control,
+.switch[data-selected="true"] .switch__control {
+  background-color: var(--accent);
+  border-color: var(--accent);
+}
+
+.switch[aria-checked="true"]:hover .switch__control,
+.switch[data-selected="true"]:hover .switch__control,
+.switch:has([data-slot="switch-content"][data-hovered="true"])[data-selected="true"] .switch__control {
+  background-color: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.switch__thumb {
+  margin-inline-start: 0;
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 9999px;
+  background-color: var(--muted);
+  box-shadow: none;
+  transition:
+    margin var(--dur-base) var(--ease-drawer),
+    background-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.switch:hover .switch__thumb {
+  background-color: var(--foreground);
+}
+
+.switch[aria-checked="true"] .switch__thumb,
+.switch[data-selected="true"] .switch__thumb {
+  margin-inline-start: calc(100% - 0.875rem);
+  background-color: var(--accent-foreground);
+  box-shadow: none;
+}
+
+/* 6. Checkbox & Radio */
+.checkbox__control {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 0.25rem;
+  border: 1px solid var(--border-secondary);
+  background-color: var(--field-background);
+  box-shadow: none;
+}
+
+.checkbox:hover .checkbox__control,
+.checkbox:has([data-slot="checkbox-content"][data-hovered="true"]) .checkbox__control {
+  border-color: var(--foreground-secondary);
+  background-color: var(--surface-secondary);
+}
+
+.checkbox[aria-checked="true"] .checkbox__control,
+.checkbox[data-selected="true"] .checkbox__control {
+  border-color: var(--accent);
+  background-color: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.radio__control {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 9999px;
+  border: 1px solid var(--border-secondary);
+  background-color: var(--field-background);
+  box-shadow: none;
+}
+
+.radio:hover .radio__control,
+.radio:has([data-slot="radio-content"][data-hovered="true"]) .radio__control {
+  border-color: var(--foreground-secondary);
+}
+
+.radio[data-selected] .radio__control,
+.radio:has(input:checked) .radio__control {
+  border-color: var(--accent);
+  background-color: var(--accent);
+}
+
+/* 7. Tabs */
+.tabs__list-container {
+  background-color: var(--surface);
+  border-radius: 0.625rem;
+  padding: 0.25rem;
+  overflow: visible;
+}
+
+.tabs__tab {
+  border-radius: 0.375rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--muted);
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+
+@media (hover: hover) {
+  .tabs__tab:not([data-selected="true"]):not([data-disabled="true"]):hover,
+  .tabs__tab[data-hovered="true"]:not([data-selected="true"]):not([data-disabled="true"]) {
+    opacity: 1;
+    color: var(--foreground);
+    background-color: oklch(1 0 0 / 0.04);
+  }
+}
+
+.tabs__tab[data-selected="true"] {
+  color: var(--foreground);
+}
+
+.tabs__indicator {
+  border-radius: 0.375rem;
+  background-color: var(--surface-secondary);
+}
+
+.tabs__separator {
+  display: none;
+}
+
+/* 8. Cards, Modals, AlertDialogs, Drawers, Tooltips, Toasts, Alerts */
+.card {
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  box-shadow: none;
+}
+
+.modal__dialog,
+.alert-dialog__dialog {
+  background-color: var(--overlay);
+  border: 1px solid var(--separator);
+  border-radius: 1rem;
+  box-shadow: var(--overlay-shadow);
+  padding: 1.5rem;
+}
+
+.modal__header,
+.alert-dialog__header {
+  gap: 0.375rem;
+  padding-inline-end: 2rem;
+}
+
+.modal__heading,
+.alert-dialog__heading {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--foreground);
+}
+
+.modal__body,
+.alert-dialog__body {
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+.modal__header + .modal__body,
+.alert-dialog__header + .alert-dialog__body {
+  margin-top: 0.875rem;
+}
+
+.modal__body + .modal__footer,
+.alert-dialog__body + .alert-dialog__footer {
+  margin-top: 1.125rem;
+  padding-top: 0.875rem;
+  border-top: 1px solid var(--separator);
+}
+
+.modal__close-trigger,
+.alert-dialog__close-trigger {
+  top: 1.25rem;
+  inset-inline-end: 1.25rem;
+}
+
+.alert-dialog__icon {
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 0.5rem;
+}
+
+.drawer__dialog {
+  background-color: var(--overlay);
+  border-inline-start: 1px solid var(--separator);
+  box-shadow: var(--overlay-shadow);
+  padding: 1.5rem;
+}
+
+.drawer__header {
+  padding-inline-end: 2.25rem;
+  padding-bottom: 0.875rem;
+  border-bottom: 1px solid var(--separator);
+}
+
+.drawer__header + .drawer__body {
+  margin-top: 1rem;
+}
+
+.drawer__body + .drawer__footer {
+  margin-top: 1rem;
+  padding-top: 0.875rem;
+  border-top: 1px solid var(--separator);
+}
+
+.drawer__close-trigger {
+  top: 1.25rem;
+  inset-inline-end: 1.25rem;
+}
+
+.toast {
+  background-color: var(--overlay);
+  border: 1px solid var(--separator);
+  border-radius: 0.75rem;
+  box-shadow: var(--overlay-shadow);
+}
+
+.tooltip {
+  background-color: var(--surface-tertiary);
+  border: 1px solid var(--separator);
+  color: var(--foreground);
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  box-shadow: var(--overlay-shadow);
+}
+
+.alert {
+  border-radius: 0.625rem;
+  padding: 0.75rem 0.875rem;
+  gap: 0.625rem;
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+
+.alert--danger {
+  background: color-mix(in oklab, var(--danger) 7%, var(--surface));
+  border-color: var(--danger-border);
+}
+
+.alert--warning {
+  background: color-mix(in oklab, var(--warning) 7%, var(--surface));
+  border-color: var(--warning-border);
+}
+
+.alert--success {
+  background: color-mix(in oklab, var(--success) 7%, var(--surface));
+  border-color: var(--success-border);
+}
+
+.alert--accent {
+  background: color-mix(in oklab, var(--accent) 5%, var(--surface));
+  border-color: var(--border-secondary);
+}
+
+/* 9. Chips & Download Task Status Badges */
+.chip {
+  border-radius: 0.375rem;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.01em;
+}
+
+.chip--quiet {
+  --chip-bg: oklch(1 0 0 / 0.04);
+  --chip-fg: var(--muted);
+}
+
+.chip--strong {
+  --chip-bg: oklch(1 0 0 / 0.08);
+  --chip-fg: var(--foreground-secondary);
+}
+
+.chip--downloading {
+  --chip-bg: var(--state-downloading-soft);
+  --chip-fg: var(--state-downloading-fg);
+}
+
+.chip--complete {
+  --chip-bg: var(--state-complete-soft);
+  --chip-fg: var(--state-complete-fg);
+}
+
+.chip--paused,
+.chip--selecting {
+  --chip-bg: var(--state-paused-soft);
+  --chip-fg: var(--state-paused-fg);
+}
+
+.chip--postprocessing,
+.chip--seeding,
+.chip--info {
+  --chip-bg: var(--state-postprocessing-soft);
+  --chip-fg: var(--state-postprocessing-fg);
+}
+
+.chip--error {
+  --chip-bg: var(--state-error-soft);
+  --chip-fg: var(--state-error-fg);
+}
+
+.chip--queued {
+  --chip-bg: var(--state-queued-soft);
+  --chip-fg: var(--state-queued-fg);
+}
+
+/* 10. ProgressBar & Status Fills */
+.progress-bar__track {
+  background-color: var(--surface-tertiary);
+  border-radius: 9999px;
+}
+
+.progress-bar__fill {
+  border-radius: 9999px;
+}
+
+.progress-bar--downloading {
+  --progress-bar-fill: var(--state-downloading);
+}
+
+.progress-bar--complete {
+  --progress-bar-fill: var(--state-complete);
+}
+
+.progress-bar--paused {
+  --progress-bar-fill: var(--state-paused);
+}
+
+.progress-bar--postprocessing {
+  --progress-bar-fill: var(--state-postprocessing);
+}
+
+.progress-bar--error {
+  --progress-bar-fill: var(--state-error);
+}
+
+.progress-bar--queued {
+  --progress-bar-fill: var(--state-queued);
+}
+
+/* Scrollbars & Number Inputs */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: oklch(1 0 0 / 0.10);
+  background-clip: content-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(1 0 0 / 0.18);
+  background-clip: content-box;
+}
+
+/* Tactile press utility */
+.press-tactile {
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+/* Live throughput meter */
+.meter {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 11px;
+}
+
+.meter i {
+  width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--info);
+  transform: scaleY(0.35);
+  transform-origin: bottom;
+  animation: meter 1.1s var(--ease-in-out) infinite;
+}
+
+.meter i:nth-child(2) {
+  animation-delay: 0.12s;
+}
+
+.meter i:nth-child(3) {
+  animation-delay: 0.24s;
+}
+
+.meter i:nth-child(4) {
+  animation-delay: 0.36s;
+}
+
+@keyframes meter {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+/* Quiet entrance for list content and page windows */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.rise-in {
+  animation: rise-in var(--dur-base) var(--ease-out) both;
+}
+
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.995) translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.page-enter {
+  animation: page-enter 180ms var(--ease-out) both;
+}
+
+/* Reduced motion: keep color/opacity feedback, drop movement and scale. */
+@media (prefers-reduced-motion: reduce) {
+  .rise-in,
+  .page-enter {
+    animation: none;
+  }
+
+  .meter i {
+    animation: none;
+    transform: scaleY(0.6);
+  }
+
+  .press-tactile {
+    transition:
+      background-color var(--dur-fast) ease,
+      opacity var(--dur-fast) ease,
+      border-color var(--dur-fast) ease,
+      color var(--dur-fast) ease;
+  }
+}

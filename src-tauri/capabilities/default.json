@@ -7,8 +7,7 @@
   ],
   "permissions": [
     "core:default",
-    "updater:default",
-    "process:default",
-    "dialog:default"
+    "core:window:allow-set-focus",
+    "core:window:allow-unminimize"
   ]
 }

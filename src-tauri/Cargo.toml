@@ -1,12 +1,12 @@
 [package]
 name = "app"
-version = "0.6.0"
-description = "Desktop download manager with browser extension integration"
+version = "0.7.0"
+description = "dax — media URL extractor"
 authors = ["you"]
 license = ""
 repository = ""
-edition = "2021"
-rust-version = "1.77.2"
+edition = "2024"
+rust-version = "1.99.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -20,8 +20,8 @@ tauri-build = { version = "2.6.3", features = [] }
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-log = "0.4"
 tauri = { version = "2.11.3", features = [] }
-tauri-plugin-updater = "2.10.1"
-tauri-plugin-process = "2.3.1"
-tauri-plugin-dialog = "2.7.2"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+mimalloc = "0.1"
+tauri-plugin-updater = "2.14.0"

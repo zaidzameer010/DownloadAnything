@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "src-py/dax-core",
+    "src-tauri",
+]
+
+[profile.dev]
+opt-level = 0
+debug = 1               # Line tables only: provides full panic/error backtraces while reducing target folder bloat by 70-80%
+split-debuginfo = "off" # Avoid hoarding thousands of loose .o object files on macOS
+
+[profile.dev.package."*"]
+opt-level = 2           # Compile third-party dependencies with optimization once; prevents re-compiling them repeatedly
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
