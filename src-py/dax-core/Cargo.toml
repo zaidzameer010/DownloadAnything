@@ -2,6 +2,7 @@
 name = "dax_rs"
 version = "0.7.0"
 edition = "2024"
+rust-version = "1.88"
 publish = false
 
 [lib]
@@ -11,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "cookies", "gzip", "brotli", "zstd", "charset", "http2", "system-proxy", "json"] }
-tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 futures = "0.3"
 url = { version = "2", features = ["serde"] }
 scraper = "0.27"

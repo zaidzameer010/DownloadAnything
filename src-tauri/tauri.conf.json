@@ -7,7 +7,7 @@
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "bun --cwd=ui run dev",
-    "beforeBuildCommand": "bun --cwd=ui run build"
+    "beforeBuildCommand": "bun run backend:bundle && bun --cwd=ui run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -30,6 +30,14 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "externalBin": [
+      "binaries/aria2-next"
+    ],
+    "resources": {
+      "resources/backend/": "backend/",
+      "resources/venv/": "venv/",
+      "resources/python/": "python/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -1,15 +1,22 @@
-use crate::extract::candidates::{Candidate, contains_media_token, looks_media_str};
-use crate::extract::regex_scan;
-use crate::extract::unescape::unescape_js;
-use crate::model::{Quality, SourceLayer};
-use base64::Engine;
-use regex::Regex;
-use scraper::{Html, Selector};
-use serde_json::Value;
+//! JSON-blob layer: script blobs and `data-*` JSON objects.
+
 use std::sync::LazyLock;
 
-static SCRIPT_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("script").unwrap());
-static ALL_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("*").unwrap());
+use base64::Engine;
+use scraper::{Html, Selector};
+use serde_json::Value;
+
+use crate::extract::candidates::{
+    Candidate, contains_media_token, height_from_label, looks_media_str, resolution_dims,
+};
+use crate::extract::kvs::{self, Flashvars};
+use crate::extract::meta::is_junk_thumbnail;
+use crate::extract::regex_scan;
+use crate::extract::selector;
+use crate::model::{Quality, SourceLayer};
+
+static SCRIPT_SEL: LazyLock<Selector> = LazyLock::new(|| selector("script"));
+static ALL_SEL: LazyLock<Selector> = LazyLock::new(|| selector("*"));
 
 /// Variable/anchor names that commonly hold player config blobs.
 const ANCHORS: &[&str] = &[
@@ -60,21 +67,223 @@ const URL_KEYS: &[&str] = &[
     "manifesturl",
 ];
 
-fn key_is_urlish(k: &str) -> bool {
-    let k = k.to_lowercase();
-    URL_KEYS.contains(&k.as_str())
-        || k.contains("url")
-        || k.ends_with("src")
-        || k.contains("m3u8")
-        || k.contains("mpd")
+/// Maximum recursion depth for one JSON blob.
+///
+/// Hostile pages can nest objects arbitrarily deep; player configs need a
+/// handful of levels, and a bound keeps the recursive walk off the stack limit.
+const MAX_JSON_DEPTH: u8 = 32;
+
+/// Longest string still attempted as base64 or hex.
+const MAX_ENCODED_LEN: usize = 200_000;
+
+/// What the JSON-blob layer found on one document.
+#[derive(Debug, Default)]
+pub(crate) struct Findings {
+    /// Candidate addresses in walk order.
+    pub candidates: Vec<Candidate>,
+    /// First plausible duration in seconds.
+    pub duration_secs: Option<f64>,
+    /// First title-ish string.
+    pub title: Option<String>,
+    /// First player preview/poster URL.
+    pub thumbnail: Option<String>,
 }
 
-/// Keys that always name a media/stream address — signed API URLs often
-/// carry no file extension, so the media-token check would reject them.
-/// Weak keys ("url", "src", "link", …) still require a media token.
-fn is_strong_url_key(k: &str) -> bool {
+impl Findings {
+    /// Fold a KVS flashvars blob into the findings.
+    fn merge_flashvars(&mut self, flashvars: Flashvars) {
+        self.candidates.extend(flashvars.candidates);
+        if self.title.is_none() {
+            self.title = flashvars.title;
+        }
+        if self.thumbnail.is_none() {
+            self.thumbnail = flashvars.thumbnail;
+        }
+    }
+}
+
+/// Walk a parsed JSON value and return what it yielded.
+pub(crate) fn walk_value(value: &Value) -> Findings {
+    let mut findings = Findings::default();
+    walk_json(value, &mut findings, 0);
+    findings
+}
+
+/// One inline `<script>` worth parsing.
+#[derive(Debug, Clone)]
+pub(crate) struct ScriptBlob {
+    id: String,
+    script_type: String,
+    text: String,
+}
+
+/// Collect inline script text and JSON-valued `data-*` attributes.
+///
+/// The DOM is `!Sync`, so the page pipeline extracts owned text serially and
+/// hands it to worker threads that do the expensive JSON parsing.
+pub(crate) fn collect(document: &Html) -> (Vec<ScriptBlob>, Vec<String>) {
+    let mut scripts = Vec::new();
+    for element in document.select(&SCRIPT_SEL) {
+        let value = element.value();
+        if value.attr("src").is_some() {
+            continue;
+        }
+        let text = element.text().collect::<String>();
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        scripts.push(ScriptBlob {
+            id: value.attr("id").unwrap_or("").to_owned(),
+            script_type: value.attr("type").unwrap_or("").to_lowercase(),
+            text: text.to_owned(),
+        });
+    }
+    let mut data_json = Vec::new();
+    for element in document.select(&ALL_SEL) {
+        for (name, value) in element.value().attrs() {
+            if !name.starts_with("data-") {
+                continue;
+            }
+            let value = value.trim();
+            if value.len() > 8 && (value.starts_with('{') || value.starts_with('[')) {
+                data_json.push(value.to_owned());
+            }
+        }
+    }
+    (scripts, data_json)
+}
+
+/// Find every JSON blob in the collected script text and walk it for media URLs.
+///
+/// Raw script text is not regex-scanned here — the whole-body scan in the page
+/// pipeline already covers it; only decoded blobs need their own pass.
+pub(crate) fn extract(scripts: &[ScriptBlob], data_json: &[String]) -> Findings {
+    let mut findings = Findings::default();
+    for script in scripts {
+        let text = script.text.as_str();
+        if (script.id == "__NEXT_DATA__"
+            || script.script_type.contains("json")
+            || text.starts_with('{'))
+            && let Ok(parsed) = serde_json::from_str::<Value>(text)
+        {
+            walk_json(&parsed, &mut findings, 0);
+            continue;
+        }
+        // Unanchored scripts (window.__cfg = {...} etc.): lift the first object
+        // literal, else parse it as KVS flashvars.
+        if !ANCHORS.iter().any(|anchor| text.contains(anchor)) {
+            if let Some(equal) = text.find('=')
+                && let Some(blob) = extract_balanced(text, equal + 1)
+            {
+                consume_blob(&blob, &mut findings);
+            }
+            continue;
+        }
+        for anchor in ANCHORS {
+            let mut search_from = 0;
+            while let Some(position) = text[search_from..].find(anchor) {
+                let position = search_from + position + anchor.len();
+                // Skip to '=' then to the opening brace.
+                let Some(equal) = text[position..].find('=') else {
+                    break;
+                };
+                let equal = position + equal;
+                if equal - position > 8 {
+                    break;
+                }
+                if let Some(blob) = extract_balanced(text, equal + 1) {
+                    consume_blob(&blob, &mut findings);
+                }
+                search_from = equal + 1;
+                if search_from >= text.len() {
+                    break;
+                }
+            }
+        }
+    }
+    // data-* attributes containing JSON objects (e.g. video.js data-setup).
+    for value in data_json {
+        if let Ok(parsed) = serde_json::from_str::<Value>(value) {
+            walk_json(&parsed, &mut findings, 0);
+        }
+    }
+    findings
+}
+
+/// Parse a blob as JSON, falling back to KVS flashvars key/value pairs.
+fn consume_blob(blob: &str, findings: &mut Findings) {
+    if let Ok(parsed) = serde_json::from_str::<Value>(blob) {
+        walk_json(&parsed, findings, 0);
+    } else {
+        findings.merge_flashvars(kvs::flashvars_candidates(blob));
+    }
+}
+
+/// Extract a balanced `{...}` / `[...]` / `(...)` block starting at `from`.
+fn extract_balanced(text: &str, from: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut index = from;
+    while index < bytes.len() && !matches!(bytes[index], b'{' | b'[' | b'(') {
+        index += 1;
+    }
+    let start = index;
+    let mut stack: Vec<u8> = Vec::new();
+    let mut in_string: Option<u8> = None;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(quote) = in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == quote {
+                in_string = None;
+            }
+        } else {
+            match byte {
+                b'"' | b'\'' | b'`' => in_string = Some(byte),
+                b'{' | b'[' | b'(' => stack.push(byte),
+                b'}' | b']' | b')' => {
+                    let wanted = match byte {
+                        b'}' => b'{',
+                        b']' => b'[',
+                        _ => b'(',
+                    };
+                    if stack.pop() != Some(wanted) {
+                        return None;
+                    }
+                    if stack.is_empty() {
+                        return Some(text[start..=index].to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Whether a JSON key may hold a media URL.
+fn key_is_urlish(key: &str) -> bool {
+    let key = key.to_lowercase();
+    URL_KEYS.contains(&key.as_str())
+        || key.contains("url")
+        || key.ends_with("src")
+        || key.contains("m3u8")
+        || key.contains("mpd")
+}
+
+/// Keys that always name a media/stream address.
+///
+/// Signed API URLs often carry no file extension, so the media-token check
+/// would reject them. Weak keys (`url`, `src`, `link`, …) still require a
+/// media token.
+fn is_strong_url_key(key: &str) -> bool {
     matches!(
-        k,
+        key,
         "video_url"
             | "videourl"
             | "videopath"
@@ -102,313 +311,26 @@ fn is_strong_url_key(k: &str) -> bool {
     )
 }
 
-/// Find every JSON blob in the document and walk them for media URLs.
-/// Returns candidates plus a media duration, page title, and player preview
-/// thumbnail found alongside them (player-config `preview_url`, `poster`,
-/// `video_title`, blob `title` keys, ...).
-/// Raw script text is not regex-scanned here — the whole-body scan in
-/// `page_layers` already covers it; only decoded blobs need their own pass.
-pub fn extract(doc: &Html) -> (Vec<Candidate>, Option<f64>, Option<String>, Option<String>) {
-    let mut out = Vec::new();
-    let mut dur = None;
-    let mut title = None;
-    let mut thumb = None;
-    for el in doc.select(&SCRIPT_SEL) {
-        let v = el.value();
-        if v.attr("src").is_some() {
-            continue;
-        }
-        let id = v.attr("id").unwrap_or("");
-        let ty = v.attr("type").unwrap_or("").to_lowercase();
-        let text = el.text().collect::<String>();
-        let text = text.trim();
-        if text.is_empty() {
-            continue;
-        }
-        if (id == "__NEXT_DATA__" || ty.contains("json") || text.starts_with('{'))
-            && let Ok(v) = serde_json::from_str::<Value>(text)
-        {
-            walk_json(&v, &mut out, &mut dur, &mut title, &mut thumb, 0);
-            continue;
-        }
-        // Unanchored scripts (window.__cfg = {...} etc.): try to lift the
-        // first object literal, then a regex pass over the whole body.
-        if !ANCHORS.iter().any(|a| text.contains(a)) {
-            if let Some(eq) = text.find('=')
-                && let Some(blob) = extract_balanced(text, eq + 1)
-            {
-                if let Ok(v) = serde_json::from_str::<Value>(&blob) {
-                    walk_json(&v, &mut out, &mut dur, &mut title, &mut thumb, 0);
-                } else {
-                    let (fv, fv_title, fv_thumb) = flashvars_candidates(&blob);
-                    out.extend(fv);
-                    if title.is_none() {
-                        title = fv_title;
-                    }
-                    if thumb.is_none() {
-                        thumb = fv_thumb;
-                    }
-                }
-            }
-            continue;
-        }
-        for a in ANCHORS {
-            let mut search_from = 0;
-            while let Some(pos) = text[search_from..].find(a) {
-                let pos = search_from + pos + a.len();
-                // skip to '=' then to the opening brace
-                let Some(eq) = text[pos..].find('=') else {
-                    break;
-                };
-                let eq = pos + eq;
-                if eq - pos > 8 {
-                    break;
-                }
-                if let Some(blob) = extract_balanced(text, eq + 1) {
-                    if let Ok(v) = serde_json::from_str::<Value>(&blob) {
-                        walk_json(&v, &mut out, &mut dur, &mut title, &mut thumb, 0);
-                    } else {
-                        // JS object literal (KVS flashvars et al.) —
-                        // parse key: 'value' pairs directly.
-                        let (fv, fv_title, fv_thumb) = flashvars_candidates(&blob);
-                        out.extend(fv);
-                        if title.is_none() {
-                            title = fv_title;
-                        }
-                        if thumb.is_none() {
-                            thumb = fv_thumb;
-                        }
-                    }
-                }
-                search_from = eq + 1;
-                if search_from >= text.len() {
-                    break;
-                }
-            }
-        }
-    }
-    // data-* attributes containing JSON objects (e.g. video.js data-setup).
-    for el in doc.select(&ALL_SEL) {
-        for (name, value) in el.value().attrs() {
-            if !name.starts_with("data-") {
-                continue;
-            }
-            let value = value.trim();
-            if value.len() > 8
-                && (value.starts_with('{') || value.starts_with('['))
-                && let Ok(v) = serde_json::from_str::<Value>(value)
-            {
-                walk_json(&v, &mut out, &mut dur, &mut title, &mut thumb, 0);
-            }
-        }
-    }
-    (out, dur, title, thumb)
-}
-
-/// Extract a balanced {...} / [...] / (...) block starting search at `from`.
-fn extract_balanced(text: &str, from: usize) -> Option<String> {
-    let bytes = text.as_bytes();
-    let mut i = from;
-    while i < bytes.len() && !matches!(bytes[i], b'{' | b'[' | b'(') {
-        i += 1;
-    }
-    let start = i;
-    let mut stack: Vec<u8> = Vec::new();
-    let mut in_str: Option<u8> = None;
-    let mut esc = false;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if let Some(q) = in_str {
-            if esc {
-                esc = false;
-            } else if b == b'\\' {
-                esc = true;
-            } else if b == q {
-                in_str = None;
-            }
-        } else {
-            match b {
-                b'"' | b'\'' | b'`' => in_str = Some(b),
-                b'{' | b'[' | b'(' => stack.push(b),
-                b'}' | b']' | b')' => {
-                    let want = match b {
-                        b'}' => b'{',
-                        b']' => b'[',
-                        _ => b'(',
-                    };
-                    if stack.pop() != Some(want) {
-                        return None;
-                    }
-                    if stack.is_empty() {
-                        return Some(text[start..=i].to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// KVS (Kernel Video Sharing) flashvars: `video_url` / `video_alt_url<N>`
-/// hold the quality variants, `<key>_text` the quality label, and
-/// license-protected sites obfuscate URLs as `function/0/<url>` decoded via
-/// `license_code` (same algorithm as yt-dlp's KVS extractor). Also grabs
-/// `video_title` (clean page title) and `preview_url` / `poster` (preview thumbnail).
-fn flashvars_candidates(blob: &str) -> (Vec<Candidate>, Option<String>, Option<String>) {
-    static PAIR: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"([A-Za-z0-9_]+)\s*:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')"#).unwrap()
-    });
-    let pairs: Vec<(String, std::borrow::Cow<'_, str>)> = PAIR
-        .captures_iter(blob)
-        .map(|c| {
-            let v = c
-                .get(2)
-                .or_else(|| c.get(3))
-                .map(|m| m.as_str())
-                .unwrap_or("");
-            (c[1].to_string(), unescape_js(v))
-        })
-        .collect();
-    let get = |k: &str| -> Option<&str> {
-        pairs
-            .iter()
-            .find(|(key, _)| key == k)
-            .map(|(_, v)| v.as_ref())
-    };
-    let license = get("license_code");
-    let mut out = Vec::new();
-    for (k, v) in &pairs {
-        // KVS keys are strong keys — extensionless signed URLs are accepted.
-        if !is_kvs_url_key(k) || !(looks_media_str(v) || v.starts_with("http")) {
-            continue;
-        }
-        let mut url = v.clone();
-        if url.starts_with("function/0/") {
-            match license.and_then(|l| kvs_real_url(&url, l)) {
-                Some(real) => url = std::borrow::Cow::Owned(real),
-                None => continue,
-            }
-        }
-        let mut c = Candidate::new(url, SourceLayer::JsonBlob);
-        if let Some(label) = get(&format!("{k}_text")) {
-            c.label = Some(label.to_string());
-            c.quality = Some(Quality {
-                height: label_height(label).and_then(|h| u32::try_from(h).ok()),
-                label: Some(label.to_string()),
-                ..Default::default()
-            });
-        }
-        out.push(c);
-    }
-    let title = get("video_title")
-        .filter(|t| !t.trim().is_empty())
-        .map(str::to_string);
-    // Highest resolution or primary preview/poster from player flashvars
-    let thumb = [
-        "preview_url7",
-        "preview_url6",
-        "preview_url5",
-        "preview_url4",
-        "preview_url3",
-        "preview_url2",
-        "preview_url1",
-        "preview_url",
-        "poster",
-        "screen_url",
-        "preview",
-        "thumbnail",
-        "thumb_url",
-        "image",
-    ]
-    .iter()
-    .find_map(|k| get(k))
-    .map(str::trim)
-    .filter(|t| !t.is_empty() && !crate::extract::meta::is_junk_thumbnail(t))
-    .map(str::to_string);
-    (out, title, thumb)
-}
-
-/// `video_url` or `video_alt_url`/`video_alt_url2`/… (digits only suffix).
-fn is_kvs_url_key(k: &str) -> bool {
-    k == "video_url"
-        || k.strip_prefix("video_alt_url")
-            .is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit()))
-}
-
-/// Deobfuscate `function/0/<url>`: the 32-char hash path segment is shuffled
-/// with the license token (yt-dlp `_kvs_get_real_url`).
-fn kvs_real_url(video_url: &str, license_code: &str) -> Option<String> {
-    let rest = video_url.strip_prefix("function/0/")?;
-    let mut u = url::Url::parse(rest).ok()?;
-    let token = kvs_license_token(license_code);
-    let parts: Vec<String> = u.path().split('/').map(String::from).collect();
-    let hash = parts.get(3)?;
-    if hash.len() < 32 {
-        return None;
-    }
-    let chars: Vec<char> = hash.chars().collect();
-    let mut indices: Vec<usize> = (0..32).collect();
-    let mut accum: usize = 0;
-    for src in (0..32).rev() {
-        accum += token.get(src).copied().unwrap_or(0) as usize;
-        let dest = (src + accum) % 32;
-        indices.swap(src, dest);
-    }
-    let shuffled: String = indices.iter().map(|&i| chars[i]).collect();
-    let tail: String = chars[32..].iter().collect();
-    let mut parts = parts;
-    parts[3] = format!("{shuffled}{tail}");
-    u.set_path(&parts.join("/"));
-    Some(u.to_string())
-}
-
-/// KVS `license_code` → digit token stream (yt-dlp `_kvs_get_license_token`).
-fn kvs_license_token(license_code: &str) -> Vec<u32> {
-    let lc: String = license_code
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .collect();
-    if lc.is_empty() {
-        return Vec::new();
-    }
-    let values: Vec<u32> = lc.chars().filter_map(|c| c.to_digit(10)).collect();
-    let modl: String = lc.chars().map(|c| if c == '0' { '1' } else { c }).collect();
-    let center = modl.len() / 2;
-    let front: u64 = modl[..=center].parse().unwrap_or(0);
-    let back: u64 = modl[center..].parse().unwrap_or(0);
-    let prod = (4u64 * front.abs_diff(back)).to_string();
-    let take = (center + 1).min(prod.len());
-    let mut token = Vec::new();
-    for (i, c) in prod[..take].chars().enumerate() {
-        let Some(cur) = c.to_digit(10) else { continue };
-        for offset in 0..4 {
-            match values.get(i + offset) {
-                Some(&v) => token.push((v + cur) % 10),
-                None => return token,
-            }
-        }
-    }
-    token
-}
-
-fn looks_b64(s: &str) -> bool {
-    let s = s.trim();
-    s.len() >= 24
-        && s.len() <= 2_000_000
-        && s.chars()
+/// Whether a string could be base64 (standard or URL-safe alphabet).
+fn looks_b64(text: &str) -> bool {
+    let text = text.trim();
+    text.len() >= 24
+        && text.len() <= MAX_ENCODED_LEN
+        && text
+            .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_'))
 }
 
-fn looks_hex(s: &str) -> bool {
-    let s = s.trim();
-    s.len() >= 32 && s.len().is_multiple_of(2) && s.chars().all(|c| c.is_ascii_hexdigit())
+/// Whether a string could be hex-encoded bytes.
+fn looks_hex(text: &str) -> bool {
+    let text = text.trim();
+    text.len() >= 32 && text.len().is_multiple_of(2) && text.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Keys whose string value names the content itself. "name" is excluded —
-/// sources arrays abuse it as a quality label.
-fn is_title_key(k: &str) -> bool {
+/// Keys whose string value names the content itself.
+///
+/// `name` is excluded — sources arrays abuse it as a quality label.
+fn is_title_key(key: &str) -> bool {
     [
         "title",
         "video_title",
@@ -417,12 +339,13 @@ fn is_title_key(k: &str) -> bool {
         "episode_title",
     ]
     .iter()
-    .any(|t| k.eq_ignore_ascii_case(t))
+    .any(|title| key.eq_ignore_ascii_case(title))
 }
 
-fn is_thumb_key(k: &str) -> bool {
+/// Keys whose string value names a poster/thumbnail.
+fn is_thumb_key(key: &str) -> bool {
     matches!(
-        k.to_ascii_lowercase().as_str(),
+        key.to_ascii_lowercase().as_str(),
         "poster"
             | "preview_url"
             | "previewurl"
@@ -443,178 +366,299 @@ fn is_thumb_key(k: &str) -> bool {
     )
 }
 
-/// Recursively walk a parsed JSON value collecting media URLs; `dur` grabs
-/// the first plausible "duration" (seconds), `title` the first title-ish
-/// string, and `thumb` the first player preview/poster URL found alongside them.
-pub fn walk_json(
-    v: &Value,
-    out: &mut Vec<Candidate>,
-    dur: &mut Option<f64>,
-    title: &mut Option<String>,
-    thumb: &mut Option<String>,
-    depth: u8,
-) {
-    match v {
+/// Recursively walk a parsed JSON value collecting media URLs, duration,
+/// title and player preview/poster URL.
+fn walk_json(value: &Value, findings: &mut Findings, depth: u8) {
+    if depth > MAX_JSON_DEPTH {
+        return;
+    }
+    match value {
         Value::Object(map) => {
-            for (k, val) in map {
-                if dur.is_none()
-                    && k.eq_ignore_ascii_case("duration")
-                    && let Some(d) = val.as_f64().or_else(|| val.as_str()?.parse().ok())
-                    && (5.0..=86_400.0).contains(&d)
+            for (key, value) in map {
+                if findings.duration_secs.is_none()
+                    && key.eq_ignore_ascii_case("duration")
+                    && let Some(duration) = value.as_f64().or_else(|| value.as_str()?.parse().ok())
+                    && (5.0..=86_400.0).contains(&duration)
                 {
-                    *dur = Some(d);
+                    findings.duration_secs = Some(duration);
                 }
-                if title.is_none()
-                    && is_title_key(k)
-                    && let Some(s) = val.as_str()
+                if findings.title.is_none()
+                    && is_title_key(key)
+                    && let Some(title) = value.as_str()
                 {
-                    let t = s.trim();
-                    if !t.is_empty() && t.len() <= 300 {
-                        *title = Some(t.to_string());
+                    let title = title.trim();
+                    if !title.is_empty() && title.len() <= 300 {
+                        findings.title = Some(title.to_owned());
                     }
                 }
-                if thumb.is_none()
-                    && is_thumb_key(k)
-                    && let Some(s) = val.as_str()
+                if findings.thumbnail.is_none()
+                    && is_thumb_key(key)
+                    && let Some(thumbnail) = value.as_str()
                 {
-                    let t = s.trim();
-                    if !t.is_empty()
-                        && (t.starts_with("http://")
-                            || t.starts_with("https://")
-                            || t.starts_with("//")
-                            || t.starts_with('/'))
-                        && !crate::extract::meta::is_junk_thumbnail(t)
+                    let thumbnail = thumbnail.trim();
+                    if !thumbnail.is_empty()
+                        && (thumbnail.starts_with("http://")
+                            || thumbnail.starts_with("https://")
+                            || thumbnail.starts_with("//")
+                            || thumbnail.starts_with('/'))
+                        && !is_junk_thumbnail(thumbnail)
                     {
-                        *thumb = Some(t.to_string());
+                        findings.thumbnail = Some(thumbnail.to_owned());
                     }
                 }
-                if let Value::String(s) = val {
-                    if key_is_urlish(k)
-                        && (looks_media_str(s)
-                            || (is_strong_url_key(&k.to_lowercase()) && s.starts_with("http")))
+                if let Value::String(text) = value {
+                    if key_is_urlish(key)
+                        && (looks_media_str(text)
+                            || (is_strong_url_key(&key.to_lowercase()) && text.starts_with("http")))
                     {
-                        let mut c = Candidate::new(s.as_str(), SourceLayer::JsonBlob);
-                        c.label = Some(k.clone());
-                        out.push(c);
-                    } else if depth < 2 && looks_b64(s) && s.len() < 200_000 {
-                        if let Ok(dec) = base64::engine::general_purpose::STANDARD
-                            .decode(s.trim())
-                            .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(s.trim()))
+                        let mut candidate = Candidate::new(text.as_str(), SourceLayer::JsonBlob);
+                        candidate.label = Some(key.clone());
+                        candidate.quality = quality_of_object(map);
+                        findings.candidates.push(candidate);
+                    } else if depth < 2 && looks_b64(text) && text.len() < MAX_ENCODED_LEN {
+                        if let Ok(decoded) = base64::engine::general_purpose::STANDARD
+                            .decode(text.trim())
+                            .or_else(|_| {
+                                base64::engine::general_purpose::URL_SAFE.decode(text.trim())
+                            })
                         {
-                            consume_decoded(&dec, out, dur, title, thumb, depth);
+                            consume_decoded(&decoded, findings, depth);
                         }
                     } else if depth < 2
-                        && looks_hex(s)
-                        && s.len() < 200_000
-                        && let Ok(dec) = hex::decode(s.trim())
+                        && looks_hex(text)
+                        && text.len() < MAX_ENCODED_LEN
+                        && let Ok(decoded) = hex::decode(text.trim())
                     {
-                        consume_decoded(&dec, out, dur, title, thumb, depth);
+                        consume_decoded(&decoded, findings, depth);
                     }
-                } else if (k.eq_ignore_ascii_case("sources") || k.eq_ignore_ascii_case("videos"))
-                    && val.is_array()
+                } else if (key.eq_ignore_ascii_case("sources")
+                    || key.eq_ignore_ascii_case("videos"))
+                    && value.is_array()
                 {
-                    extract_sources_array(val, out, thumb);
-                    walk_json(val, out, dur, title, thumb, depth + 1);
+                    extract_sources_array(value, findings);
+                    walk_json(value, findings, depth + 1);
                 } else {
-                    walk_json(val, out, dur, title, thumb, depth + 1);
+                    walk_json(value, findings, depth + 1);
                 }
             }
         }
-        Value::Array(a) => a
+        Value::Array(items) => items
             .iter()
-            .for_each(|v| walk_json(v, out, dur, title, thumb, depth + 1)),
+            .for_each(|item| walk_json(item, findings, depth + 1)),
         _ => {}
     }
 }
 
-/// JW-player-style "sources"/"videos": [{"file": "...", "label": "720p"}, ...]
-fn extract_sources_array(val: &Value, out: &mut Vec<Candidate>, thumb: &mut Option<String>) {
-    let Some(arr) = val.as_array() else { return };
-    for item in arr {
-        let Some(obj) = item.as_object() else {
+/// JW-player-style `sources`/`videos`: `[{"file": "...", "label": "720p"}, ...]`.
+fn extract_sources_array(value: &Value, findings: &mut Findings) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    for item in items {
+        let Some(object) = item.as_object() else {
             continue;
         };
-        if thumb.is_none()
-            && let Some(img) = ["image", "poster", "thumbnail", "preview"]
+        if findings.thumbnail.is_none()
+            && let Some(image) = ["image", "poster", "thumbnail", "preview"]
                 .iter()
-                .find_map(|k| obj.get(*k).and_then(Value::as_str))
+                .find_map(|key| object.get(*key).and_then(Value::as_str))
         {
-            let img = img.trim();
-            if !img.is_empty() && !crate::extract::meta::is_junk_thumbnail(img) {
-                *thumb = Some(img.to_string());
+            let image = image.trim();
+            if !image.is_empty() && !is_junk_thumbnail(image) {
+                findings.thumbnail = Some(image.to_owned());
             }
         }
         let url = ["file", "src", "url", "stream", "source"]
             .iter()
-            .find_map(|k| obj.get(*k).and_then(Value::as_str));
+            .find_map(|key| object.get(*key).and_then(Value::as_str));
         let Some(url) = url else { continue };
         if !looks_media_str(url) && !url.starts_with("http") {
             continue;
         }
-        let mut c = Candidate::new(url, SourceLayer::JsonBlob);
-        let label = obj
-            .get("label")
-            .or_else(|| obj.get("quality"))
-            .or_else(|| obj.get("name"))
-            .and_then(Value::as_str)
-            .map(String::from);
-        let height = obj
-            .get("height")
-            .or_else(|| obj.get("res"))
-            .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()))
-            .or_else(|| label.as_deref().and_then(label_height));
-        if label.is_some() || height.is_some() {
-            c.quality = Some(Quality {
-                height: height.and_then(|h| u32::try_from(h).ok()),
-                label,
-                ..Default::default()
-            });
+        let mut candidate = Candidate::new(url, SourceLayer::JsonBlob);
+        let mut quality = quality_of_object(object);
+        if let Some(name) = object.get("name").and_then(Value::as_str)
+            && quality
+                .as_ref()
+                .is_none_or(|quality| quality.label.is_none())
+        {
+            quality.get_or_insert_with(Quality::default).label = Some(name.to_owned());
         }
-        out.push(c);
+        candidate.quality = quality;
+        findings.candidates.push(candidate);
     }
 }
 
-/// Quality names that don't carry digits ("hd", "sd", "full") → heights.
-fn label_height(l: &str) -> Option<u64> {
-    let l = l.trim().to_lowercase();
-    if let Some(h) = l.trim_end_matches('p').parse::<u64>().ok()
-        && (64..=4320).contains(&h)
-    {
-        return Some(h);
+/// Resolution/bandwidth hints carried by the JSON object next to a URL key
+/// (`{"url": …, "height": 1080, "bandwidth": 5_000_000}`) or a sources entry
+/// (`quality: 720`, `resolution: "1920x1080"`, `res: "720p"`).
+fn quality_of_object(map: &serde_json::Map<String, Value>) -> Option<Quality> {
+    let number = |key: &str| -> Option<u64> {
+        map.get(key).and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+    };
+    let (res_width, res_height) = map
+        .get("resolution")
+        .or_else(|| map.get("res"))
+        .and_then(Value::as_str)
+        .map(resolution_dims)
+        .unwrap_or_default();
+    let quality_value = map.get("quality");
+    let label = map
+        .get("label")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| quality_value.and_then(Value::as_str).map(str::to_owned));
+    let height = number("height")
+        .or_else(|| quality_value.and_then(Value::as_u64))
+        .or_else(|| number("res"))
+        .or(res_height.map(u64::from))
+        .or_else(|| label.as_deref().and_then(height_from_label).map(u64::from));
+    let width = number("width").or(res_width.map(u64::from));
+    let bandwidth = number("bandwidth");
+    if height.is_none() && width.is_none() && bandwidth.is_none() && label.is_none() {
+        return None;
     }
-    Some(match l.as_str() {
-        "mobile" | "tiny" => 144,
-        "lowest" => 240,
-        "low" => 360,
-        "sd" | "medium" => 480,
-        "hd" => 720,
-        "full" | "fullhd" | "fhd" => 1080,
-        "qhd" | "quadhd" | "2k" => 1440,
-        "uhd" | "4k" => 2160,
-        _ => return None,
+    Some(Quality {
+        height: height.and_then(|height| u32::try_from(height).ok()),
+        width: width.and_then(|width| u32::try_from(width).ok()),
+        bandwidth,
+        label,
     })
 }
 
 /// A decoded blob: re-parse as JSON or scan for media tokens.
-fn consume_decoded(
-    dec: &[u8],
-    out: &mut Vec<Candidate>,
-    dur: &mut Option<f64>,
-    title: &mut Option<String>,
-    thumb: &mut Option<String>,
-    depth: u8,
-) {
-    let Ok(text) = std::str::from_utf8(dec) else {
+fn consume_decoded(decoded: &[u8], findings: &mut Findings, depth: u8) {
+    let Ok(text) = std::str::from_utf8(decoded) else {
         return;
     };
     let text = text.trim();
     if (text.starts_with('{') || text.starts_with('['))
-        && let Ok(v) = serde_json::from_str::<Value>(text)
+        && let Ok(value) = serde_json::from_str::<Value>(text)
     {
-        walk_json(&v, out, dur, title, thumb, depth + 1);
+        walk_json(&value, findings, depth + 1);
         return;
     }
     if contains_media_token(text) {
-        out.extend(regex_scan::scan_text(text));
+        findings.candidates.extend(regex_scan::scan_text(text));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn walk_json_collects_title_alongside_candidates() {
+        // Player-config/JSON blobs carry the content title next to the media
+        // URLs — first title-ish key wins; "name" is excluded (sources abuse
+        // it as a quality label). Also grabs player preview/poster URLs.
+        let value: Value = serde_json::from_str(
+            r#"{"video_title": "Clean Name", "duration": 42, "preview_url": "https://cdn.x/preview.jpg",
+                "sources": [{"file": "https://cdn.x/v.mp4", "label": "720p", "name": "720p"}]}"#,
+        )
+        .unwrap();
+        let findings = walk_value(&value);
+        assert_eq!(findings.title.as_deref(), Some("Clean Name"));
+        assert_eq!(findings.duration_secs, Some(42.0));
+        assert_eq!(
+            findings.thumbnail.as_deref(),
+            Some("https://cdn.x/preview.jpg")
+        );
+        assert!(
+            !findings.candidates.is_empty(),
+            "sources must still yield candidates"
+        );
+    }
+
+    #[test]
+    fn json_sources_carry_numeric_quality_and_sibling_resolution() {
+        let value: Value = serde_json::from_str(
+            r#"{"sources":[
+                 {"file":"https://cdn.x/a.mp4","quality":720},
+                 {"file":"https://cdn.x/b.mp4","resolution":"1920x1080"},
+                 {"file":"https://cdn.x/c.mp4","label":"4k"}
+               ],
+               "url":"https://cdn.x/d.mp4","height":"480","bandwidth":900000}"#,
+        )
+        .unwrap();
+        let findings = walk_value(&value);
+        let quality = |name: &str| {
+            findings
+                .candidates
+                .iter()
+                .find(|candidate| candidate.raw.ends_with(name))
+                .and_then(|candidate| candidate.quality.clone())
+                .unwrap_or_else(|| panic!("{name} missing: {:?}", findings.candidates))
+        };
+        assert_eq!(quality("a.mp4").height, Some(720));
+        assert_eq!(quality("b.mp4").height, Some(1080));
+        assert_eq!(quality("c.mp4").height, Some(2160));
+        let direct = quality("d.mp4");
+        assert_eq!(direct.height, Some(480));
+        assert_eq!(direct.bandwidth, Some(900_000));
+    }
+
+    #[test]
+    fn depth_cap_stops_hostile_nesting() {
+        let mut value = serde_json::json!({"url": "https://cdn.x/v.mp4"});
+        for _ in 0..100 {
+            value = serde_json::json!({"nested": value});
+        }
+        assert!(
+            walk_value(&value).candidates.is_empty(),
+            "media beyond the depth cap must be skipped, not overflow the stack"
+        );
+
+        let mut shallow = serde_json::json!({"url": "https://cdn.x/v.mp4"});
+        for _ in 0..10 {
+            shallow = serde_json::json!({"nested": shallow});
+        }
+        assert_eq!(walk_value(&shallow).candidates.len(), 1);
+    }
+
+    #[test]
+    fn base64_decoded_json_is_walked() {
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(r#"{"url":"https://cdn.x/v.mp4"}"#);
+        let value = serde_json::json!({ "config": encoded });
+        let findings = walk_value(&value);
+        assert!(
+            findings
+                .candidates
+                .iter()
+                .any(|candidate| candidate.raw.ends_with("v.mp4")),
+            "{:?}",
+            findings.candidates
+        );
+    }
+
+    #[test]
+    fn data_attributes_with_json_are_walked() {
+        let document = Html::parse_document(
+            r#"<div data-setup='{"sources":[{"file":"https://cdn.x/v.mp4"}]}'></div>"#,
+        );
+        let (scripts, data_json) = collect(&document);
+        let findings = extract(&scripts, &data_json);
+        assert!(
+            findings
+                .candidates
+                .iter()
+                .any(|candidate| candidate.raw.ends_with("v.mp4")),
+            "{:?}",
+            findings.candidates
+        );
+    }
+
+    #[test]
+    fn balanced_extraction_handles_nested_strings() {
+        assert_eq!(
+            extract_balanced(r#"x = {"a":"}"};"#, 0).as_deref(),
+            Some(r#"{"a":"}"}"#)
+        );
+        assert_eq!(extract_balanced("no braces", 0), None);
     }
 }

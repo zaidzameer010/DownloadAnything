@@ -87,12 +87,18 @@ def torrent_headers(req: dict[str, Any]) -> dict[str, str]:
     headers = {"User-Agent": DEFAULT_UA}
     if ref := req.get("referer"):
         headers["Referer"] = str(ref)
-    host = (urlsplit(url).hostname or "").lower()
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        host = ""
     cookies: list[str] = []
     for ctx in req.get("contexts") or []:
         if not isinstance(ctx, dict):
             continue
-        ctx_host = (urlsplit(str(ctx.get("url") or "")).hostname or "").lower()
+        try:
+            ctx_host = (urlsplit(str(ctx.get("url") or "")).hostname or "").lower()
+        except ValueError:
+            continue
         if host and ctx_host and not host_matches(host, ctx_host):
             continue
         for h in ctx.get("headers") or []:
@@ -105,15 +111,43 @@ def torrent_headers(req: dict[str, Any]) -> dict[str, str]:
     return headers
 
 
+def _host(url: str) -> str:
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+class _ScopedRedirect(urllib.request.HTTPRedirectHandler):
+    """Keep the captured session on the host it was captured for — a
+    tracker redirecting to another host must not receive its cookies or the
+    page URL (which may carry a passkey) as the Referer."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and _host(newurl) != _host(req.full_url):
+            new.remove_header("Cookie")
+            new.remove_header("Referer")
+        return new
+
+
 def fetch_torrent(url: str, headers: dict[str, str], *, verify: bool = True) -> bytes:
     """Fetch .torrent bytes over http(s) with the request's headers."""
+    try:
+        scheme = urlsplit(url).scheme
+    except ValueError as e:
+        raise ValueError("invalid torrent URL") from e
+    if scheme not in ("http", "https"):
+        raise ValueError("torrent URL must be http(s)")
     req = urllib.request.Request(url, headers=headers)
-    ctx = None
+    handlers: list[urllib.request.BaseHandler] = [_ScopedRedirect()]
     if not verify:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    opener = urllib.request.build_opener(*handlers)
+    with opener.open(req, timeout=30) as resp:
         data = resp.read(MAX_TORRENT_BYTES + 1)
     if not data:
         raise ValueError("empty torrent file")
@@ -123,7 +157,7 @@ def fetch_torrent(url: str, headers: dict[str, str], *, verify: bool = True) -> 
 
 
 def task_options(
-    s: "AppSettings", req: dict[str, Any], *, dir_path: str, magnet: bool
+    s: AppSettings, req: dict[str, Any], *, dir_path: str, magnet: bool
 ) -> dict[str, Any]:
     """Per-task BT option pairs for aria2.addUri / aria2.addTorrent."""
     opts: dict[str, Any] = {

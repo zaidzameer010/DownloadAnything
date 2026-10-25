@@ -19,14 +19,17 @@ import {
 } from '@gravity-ui/icons'
 
 const VIDEO_EXT = new Set([
-  'mp4', 'webm', 'mkv', 'mov', 'm4v', 'flv', 'ts', 'avi', 'wmv', 'mpg', 'mpeg',
-  'm2ts', 'm3u8', 'mpd',
+  'mp4', 'webm', 'mkv', 'mov', 'm4v', 'ts', 'm3u8', 'mpd',
 ])
 const AUDIO_EXT = new Set([
-  'mp3', 'm4a', 'ogg', 'opus', 'wav', 'flac', 'aac', 'aiff', 'alac', 'wma', 'm3u',
+  'mp3', 'm4a', 'opus', 'wav', 'flac', 'aac', 'm3u',
 ])
 /** Anything whose bytes are media — the postprocess gate. */
 const MEDIA_EXT = new Set([...VIDEO_EXT, ...AUDIO_EXT])
+/** Containers the backend no longer supports — never postprocess them. */
+const RETIRED_EXT = new Set([
+  'ogg', 'oga', 'avi', '3gp', 'wmv', 'flv', 'mpg', 'mpeg', 'wma', 'aiff', 'm2ts', 'alac',
+])
 const IMAGE_EXT = new Set([
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'heic', 'heif', 'svg', 'bmp',
   'ico', 'tiff',
@@ -73,6 +76,7 @@ export function interceptKind(dl: ChromeDownloadMeta): 'hls' | 'dash' | 'file' {
 export function isMediaFile(dl: ChromeDownloadMeta): boolean {
   const mime = (dl.mime || '').toLowerCase()
   const ext = (dl.ext || '').toLowerCase()
+  if (RETIRED_EXT.has(ext)) return false
   return (
     mime.startsWith('video/') ||
     mime.startsWith('audio/') ||

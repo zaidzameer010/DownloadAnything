@@ -9,6 +9,7 @@ reconnect or stray probe would kill the whole worker.
 """
 
 import os
+
 import uvicorn
 
 from .app import APP

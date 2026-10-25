@@ -19,7 +19,7 @@ import orjson
 
 # Isolate app data before anything imports dax.settings.
 _TMP = Path(tempfile.mkdtemp(prefix="dax-test-"))
-os.environ.setdefault("HOME", str(_TMP))
+os.environ["HOME"] = str(_TMP)
 
 from dax import db as db_mod  # noqa: E402
 from dax import downloads as dl  # noqa: E402
@@ -37,6 +37,18 @@ ex.DATA_DIR = st.DATA_DIR
 
 def _settings(**kw) -> AppSettings:
     return AppSettings(**kw)
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _aria2_path() -> str | None:
+    """The aria2-next binary the tests point `aria2_next_path` at — the
+    backend itself no longer auto-discovers it."""
+    for p in sorted(_REPO_ROOT.glob("aria2-next*")):
+        if p.is_file() and p.suffix not in (".sha256", ".sig", ".txt", ".md") and os.access(p, os.X_OK):
+            return str(p)
+    return None
 
 
 # ---- settings ----------------------------------------------------------------
@@ -62,6 +74,24 @@ def test_settings_roundtrip_camel_case():
     assert loaded.api_token == "tok-123"
     AppSettings().save(d)
     assert AppSettings.load(d).api_token, "empty token regenerates on load"
+
+
+def test_settings_failed_save_rolls_back():
+    """A rejected category (duplicate name) must roll the whole save back —
+    a half-written settings row would later be committed by a task write."""
+    d = _sdb()
+    AppSettings(api_token="old", max_concurrent_downloads=3,
+                categories=[{"name": "a", "path": "/a"}]).save(d)
+    try:
+        AppSettings(api_token="new", max_concurrent_downloads=9,
+                    categories=[{"name": "dup", "path": "/1"},
+                                {"name": "dup", "path": "/2"}]).save(d)
+        raise AssertionError("duplicate categories must be rejected")
+    except sqlite3.IntegrityError:
+        pass
+    raw = d.load_settings()
+    assert raw["api_token"] == "old" and raw["max_concurrent_downloads"] == 3
+    assert raw["categories"] == [{"name": "a", "path": "/a"}]
 
 
 def test_settings_load_skips_wrong_typed_keys():
@@ -93,6 +123,33 @@ def test_settings_bool_columns_and_zero_roundtrip():
     assert s.embed_subtitles is True
     assert s.check_certificate is False
     assert s.retries == 0, "a valid zero must load"
+
+
+def test_resolve_ffmpeg_caches_found_paths_only():
+    """Found ffmpeg paths cache per configured value (PATH+stat per download
+    otherwise); misses are NOT cached — a mid-session install must resolve
+    on the next call."""
+    ff = _TMP / "ffmpeg-fake"
+    ff.write_text("x")
+    s = _settings(ffmpeg_path=str(ff))
+    st._ffmpeg_paths.clear()
+    try:
+        assert st.resolve_ffmpeg(s) == str(ff)
+        ff.unlink()
+        assert st.resolve_ffmpeg(s) == str(ff), \
+            "the found path is cached — the file can even be replaced"
+    finally:
+        st._ffmpeg_paths.clear()
+    # A miss must not poison the cache: simulate nothing discoverable.
+    orig_which, orig_isfile = st.shutil.which, Path.is_file
+    st.shutil.which = lambda *a, **k: None
+    Path.is_file = lambda self, *a, **k: False
+    try:
+        s2 = _settings(ffmpeg_path="/nope/ffmpeg")
+        assert st.resolve_ffmpeg(s2) is None
+        assert "/nope/ffmpeg" not in st._ffmpeg_paths
+    finally:
+        st.shutil.which, Path.is_file = orig_which, orig_isfile
 
 
 def test_extract_params_zero_retries_and_timeout():
@@ -181,6 +238,9 @@ def test_check_name_conflict_disk_and_tasks():
         return DownloadReq(url="u", **kw)
     c = dl.check_name_conflict(shared, req(filename_hint="Song", category="vids"))
     assert c["conflict"] and c["suggested"] == "Song (2)"
+    c = dl.check_name_conflict(shared, req(filename_hint="song", category="vids"))
+    assert c["conflict"] and c["suggested"] == "song (2)", \
+        "case-insensitive filesystems collide on case alone"
     c = dl.check_name_conflict(shared, req(filename="Song.mp4", category="vids"))
     assert c["suggested"] == "Song (2).mp4"
     c = dl.check_name_conflict(shared, req(filename="Song.mkv", category="vids"))
@@ -376,6 +436,18 @@ def test_filter_container_of_script_path():
     assert filt.container_of("https://x/remote_control.php?file=abc") is None
     # Only script paths qualify — a page URL with a media query is still a page.
     assert filt.container_of("https://x/watch?next=v.mp4") is None
+
+
+def test_filter_kind_of_manifest_query_case_insensitive():
+    """role() lowercases path+query; kind_of() must too — otherwise a sniffed
+    `?FORMAT=M3U8` context is skipped as a non-media progressive URL."""
+    assert filt.kind_of("https://cdn.x/v?FORMAT=M3U8") == "hls"
+    assert filt.kind_of("https://cdn.x/v?TYPE=MPD") == "dash"
+    from dax.models import ContextHeaders
+    opts = ex.ExtractOptions(contexts=[
+        ContextHeaders(url="https://cdn.x/v?FORMAT=M3U8", headers=[])])
+    items = ex._sniffed_extract(opts, "https://x/page")
+    assert items and items[0]["formats"][0]["kind"] == "hls"
 
 
 def test_filter_candidate_order():
@@ -878,6 +950,7 @@ def test_browser_jar_loads_once_per_key():
     class FakeYDL:
         def __init__(self, params):
             calls.append(params)
+            self.params = params
             self.cookiejar = jar_obj
 
         def __enter__(self):
@@ -897,6 +970,23 @@ def test_browser_jar_loads_once_per_key():
         assert ex._browser_jar(ex.ExtractOptions()) is None
     finally:
         ex.YoutubeDL = orig
+        ex._cookie_jar_cache.clear()
+
+
+def test_browser_jar_does_not_rewrite_cookie_file():
+    """Opening a jar must not save on close — yt-dlp's close() writes the
+    whole jar (decrypted browser cookies included) into the user's file."""
+    p = _TMP / "jar-cookies.txt"
+    p.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".example.com\tTRUE\t/\tFALSE\t2147483647\tpersist\tKEEP\n"
+    )
+    before = p.read_text()
+    ex._cookie_jar_cache.clear()
+    try:
+        assert ex._browser_jar(ex.ExtractOptions(cookies_file=str(p))) is not None
+        assert p.read_text() == before
+    finally:
         ex._cookie_jar_cache.clear()
 
 
@@ -962,9 +1052,10 @@ def test_format_pick_quality_matrix():
     O = ex.ORIG_AUDIO
     # Audio row → original audio, else best available.
     assert dl._format_pick({"quality": {"audioOnly": True}}) == f"{O}/ba/b"
-    # Page/DASH video row: picked height + original audio merged.
+    # Page/DASH video row: an exact-height muxed row wins (one leg, no
+    # remux), else picked height + original audio merged.
     assert dl._format_pick({"quality": {"height": 720}}) == \
-        f"bv*[height<=720]+{O}/bv*[height<=720]+ba/b[height<=720]/bv*+{O}/bv*+ba/b"
+        f"b[height=720]/bv*[height<=720]+{O}/bv*[height<=720]+ba/b[height<=720]/bv*+{O}/bv*+ba/b"
     # HLS variant row: the muxed variant at/below the pick first.
     assert dl._format_pick({"media": "hls", "quality": {"height": 1080}}) == \
         f"b[height<=1080]/bv*[height<=1080]+{O}/bv*[height<=1080]+ba/bv*+{O}/bv*+ba/b"
@@ -977,16 +1068,16 @@ def test_format_pick_quality_matrix():
     # the UI marks every repr row 'dash', including yt-dlp page picks
     # (the 1080p→360p regression: b[height<=h] prefers muxed = fmt 18).
     assert dl._format_pick({"reprId": "137", "quality": {"height": 1080}}) == \
-        f"137[acodec!=none]/137+{O}/137+ba/137/" \
+        f"137[acodec!=none]/137+{O}/137+ba/137/b[height=1080]/" \
         f"bv*[height<=1080]+{O}/bv*[height<=1080]+ba/b[height<=1080]/bv*+{O}/bv*+ba/b"
     assert dl._format_pick(
         {"media": "dash", "reprId": "399", "quality": {"height": 1080}}) == \
-        f"399[acodec!=none]/399+{O}/399+ba/399/" \
+        f"399[acodec!=none]/399+{O}/399+ba/399/b[height=1080]/" \
         f"bv*[height<=1080]+{O}/bv*[height<=1080]+ba/b[height<=1080]/bv*+{O}/bv*+ba/b"
     # MPD rep ids aren't yt-dlp ids — the rid rungs miss at resolve time and
     # the height ladder lands the picked variant.
     assert dl._format_pick({"media": "hls", "reprId": "v9", "quality": {"height": 1080}}) == \
-        f"v9[acodec!=none]/v9+{O}/v9+ba/v9/" \
+        f"v9[acodec!=none]/v9+{O}/v9+ba/v9/b[height=1080]/" \
         f"bv*[height<=1080]+{O}/bv*[height<=1080]+ba/b[height<=1080]/bv*+{O}/bv*+ba/b"
 
 
@@ -1013,6 +1104,42 @@ def test_format_pick_resolves_original_audio():
     with YoutubeDL({"quiet": True}) as ydl:
         picked = list(ydl.build_format_selector(spec)({"formats": fmts}))
     assert picked[0]["format_id"] == "v+a-dub"
+
+
+def test_format_pick_exact_muxed_wins_without_downgrade():
+    """`b[height=h]` resolves only a muxed row at the EXACT picked height —
+    a page with a same-resolution combined stream downloads one leg; a page
+    offering only a LOWER muxed rung still merges split tracks rather than
+    trading the pick for a smaller file (the 1080p→360p fmt-18 trap)."""
+    from yt_dlp import YoutubeDL
+
+    def row(fid, h, vc, ac, tbr):
+        return {"format_id": fid, "vcodec": vc, "acodec": ac, "height": h,
+                "tbr": float(tbr), "url": fid, "ext": "mp4", "protocol": "https"}
+
+    spec = dl._format_pick({"quality": {"height": 720}})
+    # Selectors expect formats pre-sorted worst→best — the extractor's
+    # order, which is what determines "best" inside each atom.
+    fmts = [
+        row("a", None, "none", "mp4a", 128),
+        row("mux360", 360, "avc1", "mp4a", 700),
+        row("v720", 720, "avc1", "none", 4000),
+        row("mux720", 720, "avc1", "mp4a", 2000),
+    ]
+    ctx = {"formats": fmts, "incomplete_formats": False,
+           "has_merged_format": True}
+    with YoutubeDL({"quiet": True}) as ydl:
+        picked = list(ydl.build_format_selector(spec)(ctx))
+    assert [f["format_id"] for f in picked] == ["mux720"], \
+        "exact-height muxed format wins — one combined leg, no remux"
+    # No 720 muxed row → the split merge must win, not the 360 muxed.
+    fmts2 = [f for f in fmts if f["format_id"] != "mux720"]
+    ctx2 = {"formats": fmts2, "incomplete_formats": False,
+            "has_merged_format": True}
+    with YoutubeDL({"quiet": True}) as ydl:
+        picked = list(ydl.build_format_selector(spec)(ctx2))
+    assert picked[0]["format_id"] == "v720+a", \
+        "b[height<=720] must not steal the pick for a lower muxed rung"
 
 
 def test_remux_honors_container_pick():
@@ -1084,6 +1211,33 @@ def test_ydl_params_settings_mapping():
     assert [x["key"] for x in p2["postprocessors"]] == ["FFmpegVideoRemuxer"]
 
 
+def test_download_does_not_rewrite_cookie_file():
+    """Download params may carry a cookiefile; YoutubeDL.close() saves the
+    whole jar back (browser cookies included), so _ydl_download must clear
+    it before closing."""
+    p = _TMP / "dl-cookies.txt"
+    p.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".example.com\tTRUE\t/\tFALSE\t2147483647\tpersist\tKEEP\n"
+    )
+    before = p.read_text()
+    db, _ = _db()
+    t = dl.Task("cookiedl", {"url": "https://x/v.mp4", "createdAt": 1})
+    s = _settings(
+        cookies_file=str(p), downloader_engine="ytdlp",
+        embed_thumbnail=False, embed_subtitles=False,
+        embed_metadata=False, embed_chapters=False,
+    )
+    orig = dl._download_info
+    dl._download_info = lambda *a, **k: {"filepath": "x"}
+    try:
+        dl._ydl_download(t, s, db, dl._ydl_dl_params(t, s, db),
+                         "https://x/v.mp4")
+    finally:
+        dl._download_info = orig
+    assert p.read_text() == before
+
+
 def test_youtube_client_args_excludes_broken_embedded():
     """web_embedded's config download crashes upstream
     (KeyError INNERTUBE_CONTEXT in _fix_embedded_ytcfg — yt-dlp#14826
@@ -1108,15 +1262,45 @@ def test_progress_hook_accumulates_and_persists():
     h({"status": "downloading", "downloaded_bytes": 400,
        "total_bytes": 1000, "speed": 5})
     assert t.status == "active" and t.downloaded == 400
-    assert t.total == 5000, "expectedSize seeds the total; hook totals only raise it"
+    assert t.total == 1000, \
+        "single-leg: the exact total replaces an overestimated probe seed"
     h({"status": "finished", "total_bytes": 1000})
     assert t.done_bytes == 1000
     # A+V: the second leg rides on the finished first leg.
     h({"status": "downloading", "downloaded_bytes": 300, "total_bytes": 900, "speed": 7})
     assert t.downloaded == 1300
+    assert t.total == 1900, "finished legs + the current leg's exact size"
     # Persisted to the db — the 800ms throttle writes the first tick.
     row = db.load_all_tasks("/x")
     assert row[0][0]["completedLength"] == "400"
+
+
+def test_progress_hook_pair_seed_survives_first_leg():
+    """A merged pair downloads as sequential legs: the first leg's exact
+    size must not replace the pair-sized seed, or the bar would read 100%
+    and drop when the audio leg starts."""
+    t = dl.Task("gp", {"url": "u", "expectedSize": 5000})
+    t.pair = True
+    h = dl._progress_hook(t, _db()[0])
+    h({"status": "downloading", "downloaded_bytes": 3000,
+       "total_bytes": 3000, "speed": 5})
+    assert t.total == 5000, "pair seed wins while no leg has finished"
+    h({"status": "finished", "total_bytes": 3000})
+    h({"status": "downloading", "downloaded_bytes": 500,
+       "total_bytes": 2000, "speed": 5})
+    assert t.total == 5000, "video leg + audio leg is the exact pair total"
+    assert t.downloaded == 3500
+    # An overestimated seed is corrected once both legs are known.
+    t2 = dl.Task("gp2", {"url": "u", "expectedSize": 9000})
+    t2.pair = True
+    h2 = dl._progress_hook(t2, _db()[0])
+    h2({"status": "downloading", "downloaded_bytes": 3000,
+        "total_bytes": 3000, "speed": 5})
+    assert t2.total == 9000
+    h2({"status": "finished", "total_bytes": 3000})
+    h2({"status": "downloading", "downloaded_bytes": 500,
+        "total_bytes": 2000, "speed": 5})
+    assert t2.total == 5000, "exact pair total beats the probe estimate"
 
 
 def test_progress_hook_fragment_estimate_converges():
@@ -1153,6 +1337,44 @@ def test_progress_hook_fragment_estimate_converges():
     assert "fragments" not in t2.snapshot_entry("/x")
 
 
+def test_progress_hook_fragment_legs_combine():
+    """Split A+V fragment legs (HLS video then audio): each leg reports its
+    own fragment_index/count — progress must accumulate across legs, not
+    reset to 0 when the audio leg starts."""
+    db, _ = _db()
+    t = dl.Task("gl", {"url": "u"})
+    h = dl._progress_hook(t, db)
+    # Video leg: 53 fragments.
+    for i in (0, 30, 52):
+        h({"status": "downloading", "downloaded_bytes": (i + 1) * 1_000_000,
+           "fragment_count": 53, "fragment_index": i,
+           "filename": "v.f4992.mp4", "speed": 5})
+    assert (t.frags_done, t.frags_total) == (52, 53)
+    h({"status": "finished", "total_bytes": 53_000_000,
+       "filename": "v.f4992.mp4"})
+    assert t.done_bytes == 53_000_000
+    assert (t.frags_done, t.frags_total) == (53, 53)
+    # Audio leg: a NEW filename with its own 54-fragment count — the bar
+    # must keep the finished 53 as its base, not reset.
+    h({"status": "downloading", "downloaded_bytes": 500_000,
+       "fragment_count": 54, "fragment_index": 0,
+       "filename": "v.faudio.mp4", "speed": 5})
+    assert (t.frags_done, t.frags_total) == (53, 107), \
+        "audio leg rides the video leg's fragment base — no reset to 0"
+    h({"status": "downloading", "downloaded_bytes": 3_000_000,
+       "fragment_count": 54, "fragment_index": 20,
+       "filename": "v.faudio.mp4", "speed": 5})
+    assert (t.frags_done, t.frags_total) == (73, 107)
+    assert t.downloaded == 53_000_000 + 3_000_000, \
+        "bytes combine across legs too"
+    h({"status": "finished", "total_bytes": 5_000_000,
+       "filename": "v.faudio.mp4"})
+    assert (t.frags_done, t.frags_total) == (107, 107)
+    assert t.downloaded == 58_000_000
+    entry = t.snapshot_entry("/x")
+    assert entry["fragments"] == {"done": 107, "total": 107}
+
+
 def test_progress_hook_resume_never_dips():
     """Retry/resume relaunches the worker with done_bytes=0 while the db-
     persisted progress stays on the task — a finished A+V leg is not
@@ -1169,6 +1391,188 @@ def test_progress_hook_resume_never_dips():
     h({"status": "downloading", "downloaded_bytes": 9_000_000,
        "total_bytes": 12_000_000, "speed": 5})
     assert t.downloaded == 9_000_000
+
+
+def test_progress_hook_finished_never_dips():
+    """A finished leg reports the file's exact size; the task's displayed
+    progress must ratchet, not fall back to the leg accumulator."""
+    t = dl.Task("gdip", {"url": "u"})
+    t.downloaded = 8_000_000
+    h = dl._progress_hook(t, _db()[0])
+    h({"status": "finished", "total_bytes": 5_000_000})
+    assert t.downloaded == 8_000_000
+    assert t.done_bytes == 5_000_000
+
+
+def test_progress_hook_zeroes_speed_on_finish():
+    """A finished leg has no download speed — a stale value would keep
+    inflating the header/row readout through postprocessing."""
+    t = dl.Task("gspd", {"url": "u"})
+    h = dl._progress_hook(t, _db()[0])
+    h({"status": "downloading", "downloaded_bytes": 10,
+       "total_bytes": 100, "speed": 5})
+    assert t.speed == 5
+    h({"status": "finished", "total_bytes": 100})
+    assert t.speed == 0
+
+
+def test_progress_hook_playlist_ignores_task_fragments():
+    """Parallel playlist workers share one task — a task-level fragment
+    counter would be clobbered by every worker. Item rows carry it."""
+    req = {"url": "u", "playlist": {"title": "P", "items": [
+        {"index": 1, "title": "a"}, {"index": 2, "title": "b"}]}}
+    t = dl.Task("gplf", req)
+    h1 = dl._progress_hook(t, _db()[0])
+    h2 = dl._progress_hook(t, _db()[0])
+    h1({"status": "downloading", "downloaded_bytes": 10_000,
+        "fragment_count": 20, "fragment_index": 5,
+        "total_bytes_estimate": 40_000,
+        "info_dict": {"playlist_index": 1, "format_id": "1"}})
+    h2({"status": "downloading", "downloaded_bytes": 8_000,
+        "fragment_count": 40, "fragment_index": 30,
+        "total_bytes_estimate": 12_000,
+        "info_dict": {"playlist_index": 2, "format_id": "2"}})
+    assert (t.frags_done, t.frags_total) == (0, 0), \
+        "task-level fragment counters are single-task only"
+    assert "fragments" not in t.snapshot_entry("/x")
+    assert t._pl_by_idx[1]["downloaded"] == 10_000
+    assert t._pl_by_idx[1]["total"] == 40_000
+    assert t._pl_by_idx[2]["downloaded"] == 8_000
+    assert t._pl_by_idx[2]["total"] == 12_000
+    assert t.filename == "", "playlist rows name the playlist, not a leg"
+    assert t._pl_by_idx[1]["filename"] == ""
+
+
+def test_progress_hook_fragment_legs_keep_total_unknown():
+    """Fragment legs have no byte total — a finished leg must not fake one
+    from its own bytes, or the next leg reads done > total."""
+    t = dl.Task("gft", {"url": "u"})
+    h = dl._progress_hook(t, _db()[0])
+    h({"status": "downloading", "downloaded_bytes": 1_000_000,
+       "fragment_count": 10, "fragment_index": 10, "speed": 5})
+    h({"status": "finished", "total_bytes": 1_000_000})
+    assert t.total == 0, "fragment bytes are not a byte total"
+    h({"status": "downloading", "downloaded_bytes": 200_000,
+       "fragment_count": 5, "fragment_index": 1, "speed": 5})
+    assert t.downloaded == 1_200_000
+    assert t.total == 0, "the second leg rides the first leg's bytes"
+    snap = t.snapshot_entry("/x")
+    assert snap["totalLength"] == "0"
+    assert snap["fragments"] == {"done": 11, "total": 15}
+
+
+def test_progress_hook_byte_leg_clears_finished_fragments():
+    """Mixed HLS-video + progressive-audio pair: once the fragment legs are
+    done the fragment bar would sit at 100% — the byte leg takes over."""
+    t = dl.Task("gmix", {"url": "u"})
+    h = dl._progress_hook(t, _db()[0])
+    h({"status": "downloading", "downloaded_bytes": 1_000_000,
+       "fragment_count": 10, "fragment_index": 10, "speed": 5})
+    assert (t.frags_done, t.frags_total) == (10, 10)
+    h({"status": "finished", "total_bytes": 1_000_000})
+    assert (t.frags_done, t.frags_total) == (10, 10)
+    h({"status": "downloading", "downloaded_bytes": 200_000,
+       "total_bytes": 2_000_000, "speed": 5})
+    assert (t.frags_done, t.frags_total) == (0, 0)
+    assert t.total == 3_000_000
+    assert "fragments" not in t.snapshot_entry("/x")
+
+
+def test_pp_hook_does_not_shrink_item_bytes():
+    """The PP hook's filesize is the extractor's pre-postprocess number —
+    it must not replace the exact leg bytes already accumulated."""
+    req = {"url": "u", "playlist": {"title": "P", "items": [{"index": 1}]}}
+    t = dl.Task("gpp", req)
+    it = t._pl_by_idx[1]
+    it.update(status="active", done=1_000, downloaded=1_000, total=1_000)
+    dl._pp_hook(t)({
+        "status": "finished",
+        "info_dict": {"playlist_index": 1,
+                      "filepath": "/out/P/01 - a.mp4", "filesize": 800},
+    })
+    assert it["status"] == "complete"
+    assert it["done"] == 1_000 and it["downloaded"] == 1_000
+    assert it["filename"] == "/out/P/01 - a.mp4"
+    assert t.filename == "", "playlist task keeps its own folder name"
+
+
+def test_subtitle_writes_never_report_media_progress():
+    """yt-dlp's dl() hands the ydl's progress hooks to the subtitle FD too.
+    _ydl_download mutes them while the deferred replay runs, so caption
+    bytes never land in the task's total or filename."""
+    seen: list[list] = []
+    task = dl.Task("gsub", {"url": "https://x/v.mp4"})
+
+    class FakeYDL:
+        def __init__(self, params):
+            self.params = params
+            self._progress_hooks = list(params.get("progress_hooks") or [])
+            self._write_subtitles = (
+                lambda i, f: seen.append(list(self._progress_hooks)) or {}
+            )
+            self._write_thumbnails = lambda *a, **k: {}
+            self.add_post_processor = lambda *a, **k: None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post_process(self, filename, info, files_to_move=None):
+            return info
+
+    orig_ydl, orig_info = dl.YoutubeDL, dl._download_info
+    s = _settings(embed_thumbnail=False, embed_subtitles=True,
+                  embed_metadata=False, embed_chapters=False,
+                  downloader_engine="ytdlp")
+
+    def fake_info(ydl, t, st_, url):
+        ydl._write_subtitles({"requested_subtitles": {}}, "f")
+        ydl.post_process("f", {}, {})
+        return {"filepath": "x"}
+
+    dl.YoutubeDL, dl._download_info = FakeYDL, fake_info
+    try:
+        dl._ydl_download(
+            task, s, _db()[0], dl._ydl_dl_params(task, s, _db()[0]),
+            "https://x/v.mp4",
+        )
+    finally:
+        dl.YoutubeDL, dl._download_info = orig_ydl, orig_info
+    assert seen == [[]], "the subtitle write must not see media hooks"
+    assert task.downloaded == 0 and task.filename == ""
+
+
+def test_download_req_carries_title_and_duration():
+    """The item's title/runtime ride the request (camelCase wire keys) so a
+    restored task still shows them."""
+    req = DownloadReq(url="u", title="T", duration_secs=12.5)
+    d = dl._req_to_dict(req)
+    assert d["title"] == "T" and d["durationSecs"] == 12.5
+
+
+def test_snapshot_carries_task_metadata():
+    """Title/duration/quality/page identity ride the snapshot so the UI can
+    show the picked item's metadata instead of only the output filename."""
+    t = dl.Task("gm", {
+        "url": "u", "title": "Original Title", "durationSecs": 92.5,
+        "quality": {"height": 1080, "bandwidth": 4_200_000},
+        "reprId": "137", "pageUrl": "https://x/page",
+    })
+    d = t.snapshot_entry("/x")["dax"]
+    assert d["title"] == "Original Title"
+    assert d["durationSecs"] == 92.5
+    assert d["quality"] == {"height": 1080, "bandwidth": 4_200_000}
+    assert d["reprId"] == "137" and d["pageUrl"] == "https://x/page"
+
+
+def test_playlist_snapshot_carries_item_duration():
+    req = {"url": "u", "playlist": {"title": "P", "items": [
+        {"index": 1, "title": "a", "durationSecs": 61.0}]}}
+    t = dl.Task("gdur", req)
+    it = t.snapshot_entry("/x")["playlist"]["items"][0]
+    assert it["duration_secs"] == 61.0
 
 
 def test_pp_hook_waits_for_download_phase():
@@ -1210,10 +1614,11 @@ def test_req_thumbnail_pp_downloads_and_injects():
     tmp = _TMP / "thumbpp"
     t = dl.Task("g", {"url": "u", "thumbnail": "https://cdn.x/cover.jpg"})
     pp = dl._ReqThumbnailPP(t, str(tmp))
-    pp._downloader = _fake_dl(io.BytesIO(b"imgdata"))
+    payload = b"\xff\xd8\xff\xe0" + b"imgdata"
+    pp._downloader = _fake_dl(io.BytesIO(payload))
     files, info = pp.run({})
     path = info["thumbnails"][0]["filepath"]
-    assert path.endswith("cover.jpg") and Path(path).read_bytes() == b"imgdata"
+    assert path.endswith("cover.jpg") and Path(path).read_bytes() == payload
     assert files == []
 
 
@@ -1240,6 +1645,28 @@ def test_req_thumbnail_pp_skips_extractors_and_failures():
     pp2._downloader = _fake_dl(None, boom=True)
     _, info2 = pp2.run({})
     assert "thumbnails" not in info2
+
+
+def test_req_thumbnail_pp_rejects_non_image_and_oversize():
+    """A 200 login page or an oversized body must not become the embedded
+    cover — the download finishes without one instead of failing in ffmpeg."""
+    import io
+
+    t = dl.Task("g", {"url": "u", "thumbnail": "https://cdn.x/cover.jpg"})
+    pp = dl._ReqThumbnailPP(t, str(_TMP / "thumbpp3"))
+    pp._downloader = _fake_dl(io.BytesIO(b"<html>login</html>"))
+    _, info = pp.run({})
+    assert "thumbnails" not in info
+
+    old = dl._ReqThumbnailPP.MAX_BYTES
+    dl._ReqThumbnailPP.MAX_BYTES = 8
+    try:
+        pp2 = dl._ReqThumbnailPP(t, str(_TMP / "thumbpp4"))
+        pp2._downloader = _fake_dl(io.BytesIO(b"\xff\xd8\xff" + b"x" * 8))
+        _, info2 = pp2.run({})
+        assert "thumbnails" not in info2
+    finally:
+        dl._ReqThumbnailPP.MAX_BYTES = old
 
 
 def test_fix_thumbnail_exts_corrects_mislabeled_bytes():
@@ -1279,6 +1706,15 @@ def test_fix_thumbnail_exts_corrects_mislabeled_bytes():
     dl._fix_thumbnail_exts(info2, ftm2)
     assert info2["thumbnails"][0]["filepath"] == str(jpg)
     assert ftm2 == {str(jpg): str(jpg)}
+
+    # Non-image bytes (login/error page) are dropped, not embedded.
+    bad = tmp / "bad.jpg"
+    bad.write_bytes(b"<html>login</html>")
+    info4 = {"thumbnails": [{"filepath": str(bad)}]}
+    ftm4 = {str(bad): str(tmp / "final.jpg")}
+    dl._fix_thumbnail_exts(info4, ftm4)
+    assert info4["thumbnails"][0]["filepath"] is None
+    assert ftm4 == {}
 
 
 def test_ranged_fragment_native_fetch_sends_no_range_when_whole():
@@ -1422,15 +1858,15 @@ def test_control_pause_terminal_is_noop():
     assert t.status == "complete", "pausing a finished task must not resurrect it"
 
 
-def test_control_remove_and_clear_result():
+def test_control_remove_clears_task():
     state, t = _state_with_task("complete")
     r, e = dl._control_local(state, t, "remove")
     assert (r, e) == ("OK", None)
     assert state.registry.get(t.gid) is None
     assert state.db.load_all_tasks("/x") == []
-    # clearResult = remove (Rust parity): works on live tasks too.
+    # Works on live tasks too — the worker's cancel path unwinds it.
     state2, t2 = _state_with_task("active")
-    r, e = dl._control_local(state2, t2, "clearResult")
+    r, e = dl._control_local(state2, t2, "remove")
     assert (r, e) == ("OK", None)
     assert state2.registry.get(t2.gid) is None
 
@@ -1465,7 +1901,7 @@ def test_control_delete_removes_file_on_disk():
     assert state.db.load_all_tasks("/x") == []
 
 
-def test_control_restart_and_unpause_all():
+def test_control_download_restart_and_unpause_all():
     state, t = _state_with_task("error")
     t.error = "network failed"
     t.downloaded = 100
@@ -1592,6 +2028,24 @@ def test_extract_per_url_failure_isolation():
         ex._extract_one = orig
 
 
+def test_extract_chain_all_sources_missing_returns_error_page():
+    """The auto chain must always return a page dict: a broken-IE host with
+    no Rust extractor and no captured contexts used to return None and crash
+    the whole batch in run()'s page.get('playlist')."""
+    orig_r, orig_s = ex._rust_extract, ex._sniffed_page
+    ex._rust_extract = lambda o, u: None
+    ex._sniffed_page = lambda o, u: None
+    ex._broken_ie.insert("broken.x", True)
+    try:
+        pages = asyncio.run(ex.extract(
+            ex.ExtractOptions(), ["https://broken.x/watch"]))
+    finally:
+        ex._rust_extract, ex._sniffed_page = orig_r, orig_s
+        ex._broken_ie.pop("broken.x", None)
+    assert pages[0]["items"] == []
+    assert pages[0]["error"] and pages[0]["error_code"] == ex.CODE_FAIL
+
+
 def test_extract_result_caches_success_only():
     """A second identical probe reuses the result; empty/error pages are
     never cached so a retry re-probes."""
@@ -1642,6 +2096,42 @@ def test_extract_single_flight_shares_one_probe():
         a, b = asyncio.run(both())
         assert calls == ["https://same"], "one extraction, two callers"
         assert a[0]["items"] == b[0]["items"]
+    finally:
+        ex._extract_one = orig
+        ex._result_cache.clear()
+        ex._inflight.clear()
+
+
+def test_extract_single_flight_survives_waiter_cancel():
+    """A caller that abandons its await (disconnected client, closed dialog)
+    must not cancel the shared in-flight probe for the other waiters —
+    the task is shielded from the first awaiter's cancellation."""
+    ex._result_cache.clear()
+    calls = []
+    orig = ex._extract_one
+
+    async def slow(opts, u):
+        calls.append(u)
+        await asyncio.sleep(0.05)
+        return {"input": u, "items": [{"formats": [{"url": "https://x/v.mp4"}]}]}
+
+    ex._extract_one = slow
+    try:
+        async def run():
+            t1 = asyncio.create_task(
+                ex.extract(ex.ExtractOptions(), ["https://same"]))
+            t2 = asyncio.create_task(
+                ex.extract(ex.ExtractOptions(), ["https://same"]))
+            await asyncio.sleep(0.01)  # both waiters attach to the shared task
+            t1.cancel()
+            try:
+                await t1
+            except asyncio.CancelledError:
+                pass
+            return await t2
+        pages = asyncio.run(run())
+        assert calls == ["https://same"], "one extraction despite the cancel"
+        assert pages[0]["items"], "surviving waiter still gets the probe"
     finally:
         ex._extract_one = orig
         ex._result_cache.clear()
@@ -1798,6 +2288,55 @@ def test_stat_row_caches_and_reuses_session():
         ex._stat_cache.clear()
 
 
+def test_stat_row_cache_keys_the_cookie_session():
+    """The stat cache key carries the resolved cookie — a second session on
+    the same stable URL must re-probe, not inherit another session's size."""
+    ex._stat_cache.clear()
+    calls = []
+
+    class Resp:
+        status_code = 200
+        headers = {"content-length": "1234",
+                   "content-type": "application/octet-stream"}
+
+        def iter_content(self):
+            yield b""
+
+        def close(self):
+            pass
+
+    class Session:
+        def head(self, url, headers, timeout):
+            calls.append(url)
+            return Resp()
+
+        def get(self, url, headers, timeout, stream):
+            return Resp()
+
+    orig = ex._stat_session
+    ex._stat_session = lambda: Session()
+    try:
+        opts = ex.ExtractOptions()
+        row = {"url": "https://cdn.x/v.mp4",
+               "headers": {"referer": "https://x", "cookie": "s=1"}}
+        ex._stat_row(row, opts)
+        assert row["probed_size"] == 1234 and len(calls) == 1
+        # Same URL + referer but a different cookie → new probe.
+        row2 = {"url": "https://cdn.x/v.mp4",
+                "headers": {"referer": "https://x", "cookie": "s=2"}}
+        ex._stat_row(row2, opts)
+        assert row2["probed_size"] == 1234 and len(calls) == 2, \
+            "a different cookie session must re-probe, not share the entry"
+        # Identical session → cache hit.
+        row3 = {"url": "https://cdn.x/v.mp4",
+                "headers": {"referer": "https://x", "cookie": "s=1"}}
+        ex._stat_row(row3, opts)
+        assert len(calls) == 2
+    finally:
+        ex._stat_session = orig
+        ex._stat_cache.clear()
+
+
 def test_probe_info_cache_indexes_playlist_entries():
     """A playlist probe indexes each entry under its own page URL — an entry
     add downloads that video's dict, not the whole list."""
@@ -1847,8 +2386,9 @@ class _FakeYdl:
     def post_process(self, filename, info, files_to_move=None):
         return info
 
-    def extract_info(self, url, download=True):
+    def extract_info(self, url, download=True, ie_key=None):
         self.calls.append("extract")
+        self.ie_key = ie_key
         return {"id": "fresh", "_type": "video"}
 
     def process_ie_result(self, info, download=True):
@@ -1919,6 +2459,82 @@ def test_download_extracts_fresh_on_miss_and_stale_replay():
         assert t2.status == "complete"
         assert ex.cached_info(opts, "https://x/stale") is None, \
             "the poisoned entry must be dropped"
+    finally:
+        _FakeYdl.fail_process = None
+        ex._info_cache.clear()
+
+
+def test_download_info_forces_generic_for_media_urls():
+    """A task whose URL is media itself must extract via GenericIE — a
+    claiming site extractor (udemy.com/assets/*.m3u8 → udemy:course)
+    hunts a page id in a manifest URL and dies."""
+    db, _ = _db()
+    reg = dl.Registry(db, _settings())
+    ex._info_cache.clear()
+    t = reg.add({"url": "https://www.udemy.com/assets/1/f/hls/a.m3u8?token=z",
+                 "createdAt": 1})
+    ydl = _run_with_fake_ydl(t, _settings(), db)
+    assert ydl.ie_key == "Generic"
+    t2 = reg.add({"url": "https://x/watch?v=2", "createdAt": 1})
+    ydl2 = _run_with_fake_ydl(t2, _settings(), db)
+    assert ydl2.ie_key is None
+
+
+def test_replay_ctx_headers_x_headers_media_only():
+    """x-* headers (signed-CDN device/session ids like x-did) replay onto
+    media targets on the capturing host — page targets keep the strict
+    allowlist so stale API auth headers can't poison site extractors."""
+    ctxs = [("https://cdn.x/media/a.mpd", [
+        ("x-did", "dev-1"), ("x-playback-session-id", "s-1"),
+        ("authorization", "Bearer stale"), ("referer", "https://x/")])]
+
+    h: dict = {}
+    ex.replay_ctx_headers(h, ctxs, "https://cdn.x/media/a.mpd", custom=True)
+    assert h["x-did"] == "dev-1" and h["x-playback-session-id"] == "s-1"
+    assert "authorization" not in {k.lower() for k in h}
+    assert h["Referer"] == "https://x/"
+
+    h2: dict = {}
+    ex.replay_ctx_headers(h2, ctxs, "https://cdn.x/media/a.mpd")
+    assert "x-did" not in h2 and h2["Referer"] == "https://x/"
+
+    # A different host gets nothing — custom or not.
+    h3: dict = {}
+    ex.replay_ctx_headers(h3, ctxs, "https://other.y/a.mpd", custom=True)
+    assert not h3
+
+
+def test_ydl_dl_params_injects_ts_repair_for_nopts():
+    """fMP4 legs assembled from HLS/DASH fragments carry trailing NOPTS
+    packets — every copy-mux ffmpeg PP dies on 'unknown timestamp'.
+    Each ffmpeg PP output position gets a setts repair; 'default' must
+    stay unset so non-ffmpeg tools (AtomicParsley) never see it."""
+    db, _ = _db()
+    t = dl.Task("g", {"url": "https://x/v.m3u8"})
+    p = dl._ydl_dl_params(t, _settings(), db)
+    ppa = p["postprocessor_args"]
+    assert "default" not in ppa
+    args = ppa["merger+ffmpeg_o"]
+    assert args[0] == "-bsf" and "setts=pts=if(eq(PTS" in args[1]
+    assert ppa["videoremuxer+ffmpeg_o"] == args
+
+
+def test_cached_replay_postprocess_error_skips_reextract():
+    """A post-processing (ffmpeg) failure is not a stale-probe problem —
+    the cached info must not trigger a re-extract."""
+    db, _ = _db()
+    reg = dl.Registry(db, _settings())
+    ex._info_cache.clear()
+    opts = ex.ExtractOptions()
+    info = _fake_page_info("pp", "https://x/pp")
+    ex._register_info(opts, "https://x/pp", info, [(info, ex._item(info, None))])
+    _FakeYdl.fail_process = ValueError("ERROR: Postprocessing: Conversion failed!")
+    try:
+        t = reg.add({"url": "https://x/pp", "createdAt": 1})
+        ydl = _run_with_fake_ydl(t, _settings(), db)
+        assert ydl.calls == ["process"], \
+            "a postprocess failure must not fall back to extract_info"
+        assert t.status == "error"
     finally:
         _FakeYdl.fail_process = None
         ex._info_cache.clear()
@@ -2047,7 +2663,9 @@ def test_apply_settings_types_and_live_concurrency():
 
 def test_ui_target_guard():
     """Traversal outside ui/dist falls back to index.html — is_relative_to
-    keeps a hypothetical dist2 sibling out (a str-prefix check passed it)."""
+    keeps a hypothetical dist2 sibling out (a str-prefix check passed it).
+    The catch-all path arrives with a leading slash; an absolute join would
+    serve index.html for every asset."""
     from dax import app
 
     idx = app.UI_DIST / "index.html"
@@ -2055,6 +2673,31 @@ def test_ui_target_guard():
     assert app._resolve_ui_target("../../etc/passwd") == idx
     assert app._resolve_ui_target("assets/../app.js") == \
         (app.UI_DIST / "app.js").resolve()
+    assert app._resolve_ui_target("/assets/app.js") == \
+        (app.UI_DIST / "assets/app.js").resolve()
+    assert app._resolve_ui_target("/../etc/passwd") == idx
+
+
+def test_ui_assets_get_a_real_media_type():
+    """Litestar's File derives Content-Type from `filename`; without it the
+    bundle is served as octet-stream and browsers refuse the module script."""
+    from litestar.response import File
+
+    from dax import app
+
+    tmp = _TMP / "uidist"
+    (tmp / "assets").mkdir(parents=True, exist_ok=True)
+    (tmp / "index.html").write_text("<html></html>")
+    probe = tmp / "assets" / "probe.js"
+    probe.write_text("export const x = 1\n")
+    old = (app.UI_DIST, app.UI_DIST_RESOLVED)
+    app.UI_DIST, app.UI_DIST_RESOLVED = tmp, tmp.resolve()
+    try:
+        resp = asyncio.run(app.static_ui.fn(None, None, "/assets/probe.js"))
+        assert isinstance(resp, File)
+        assert resp.media_type == "text/javascript"
+    finally:
+        app.UI_DIST, app.UI_DIST_RESOLVED = old
 
 
 class _FakeWs:
@@ -2101,6 +2744,33 @@ def test_task_db_updated_at_is_ms():
     assert updated > 1_000_000_000_000, "updated_at must be ms"
 
 
+def test_tmp_sweep_keeps_db_tasks_outside_restore_window():
+    """load_all_tasks caps at 1000; a task outside that window still owns
+    its tmp dir, so the sweep must use the db's gid set, not the registry's."""
+    import shutil
+    import time
+
+    d = _TMP / f"sweep-{next(_db_seq)}"
+    d.mkdir(parents=True, exist_ok=True)
+    db = db_mod.TaskDb.open(d / "dax.db")
+    db.insert_task("oldpaused", {"url": "u"}, "paused", 0, 1)
+    old_data = st.DATA_DIR
+    st.DATA_DIR = d
+    tmp = Path(st.task_tmp_dir("oldpaused"))
+    try:
+        tmp.mkdir(parents=True, exist_ok=True)
+        part = tmp / "part.bin"
+        part.write_bytes(b"x")
+        old = time.time() - 7200
+        os.utime(part, (old, old))
+        assert "oldpaused" in db.all_task_gids()
+        dl.sweep_orphaned_tmp(_settings(), db.all_task_gids())
+        assert part.is_file(), "db-owned tmp dir must survive the sweep"
+    finally:
+        st.DATA_DIR = old_data
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---- PyO3 bridge -------------------------------------------------------------
 
 def test_dax_rs_bridge_extract():
@@ -2113,13 +2783,31 @@ def test_dax_rs_bridge_extract():
     assert out[0]["items"] == []
 
 
-def test_dax_rs_bridge_bad_options():
+def test_rust_extract_forwards_cookie_context():
+    """The Rust page fetch must carry the resolved session cookies — the
+    same session yt-dlp gets — or cookie-gated pages 403 on one side only.
+    The cookie rides `contexts` scoped to the page origin."""
     from dax import dax_rs
+    sent: dict = {}
+    orig_extract = dax_rs.extract
+    orig_ck = ex._cookie_header_for_url
+
+    def fake(opts_json, urls):
+        sent.update(orjson.loads(opts_json))
+        return orjson.dumps([{"input": urls[0], "items": [],
+                              "error": "HTTP 403"}]).decode()
+
+    dax_rs.extract = fake
+    ex._cookie_header_for_url = lambda o, u: ("https://x", "sess=1")
     try:
-        dax_rs.extract("not-json", ["https://x"])
-        raise AssertionError("bad options must raise")
-    except ValueError:
-        pass
+        page = ex._rust_extract(ex.ExtractOptions(), "https://x/watch")
+    finally:
+        dax_rs.extract = orig_extract
+        ex._cookie_header_for_url = orig_ck
+    ctx = (sent.get("contexts") or [])[-1]
+    assert ctx["url"] == "https://x"
+    assert {"name": "Cookie", "value": "sess=1"} in ctx["headers"]
+    assert page["extractor"] == "rust" and page["items"] == []
 
 
 # ---- settings migration ------------------------------------------------------
@@ -2158,6 +2846,21 @@ def test_settings_rebuild_drops_legacy_columns_and_preserves_token():
     s.save(d)
     s2 = AppSettings.load(d)
     assert s2.parallel_segments == 32
+
+
+def test_settings_legacy_table_without_id_preserves_token():
+    """The ancient kv-shaped settings table has no `id` column — opening it
+    must rebuild the table and carry its api token over, not crash on a
+    WHERE id = 1 query."""
+    p = _TMP / "kv-settings.db"
+    conn = sqlite3.connect(p)
+    conn.execute("CREATE TABLE settings (api_token TEXT NOT NULL DEFAULT '')")
+    conn.execute("INSERT INTO settings (api_token) VALUES ('tok-kv')")
+    conn.commit()
+    conn.close()
+
+    d = db_mod.TaskDb.open(p)
+    assert AppSettings.load(d).api_token == "tok-kv"
 
 
 def test_settings_additive_migration_preserves_values():
@@ -2230,6 +2933,9 @@ def test_aria2_next_settings_roundtrip_and_global_options():
     assert gopts["lowest-speed-limit"] == "128K"
     assert gopts["retry-wait"] == "5"
     assert gopts["state-save-interval"] == "15"
+    assert aria2_next.global_options_from_settings(
+        AppSettings(retries=0))["max-tries"] == "1", \
+        "aria2 treats 0 as unlimited; the setting's 0 means no retry"
 
 
 def test_aria2_next_ytdlp_registration_and_protocol_routing():
@@ -2243,12 +2949,25 @@ def test_aria2_next_ytdlp_registration_and_protocol_routing():
     assert ed is not Aria2cFD
     assert get_external_downloader("aria2-next") is aria2_next.Aria2NextFD
 
-    exe = aria2_next.resolve_aria2_next()
-    assert exe is not None, "aria2-next binary should be resolved"
+    exe = _aria2_path()
+    assert exe is not None, "aria2-next binary should be present at the repo root"
+    assert aria2_next.resolve_aria2_next(_settings(aria2_next_path=exe)) == exe
+    prev = os.environ.get("ARIA2_NEXT_PATH")
+    try:
+        os.environ["ARIA2_NEXT_PATH"] = ""
+        assert aria2_next.resolve_aria2_next(_settings()) is None
+        # Bundled desktop app: Tauri exports the sidecar path, the setting stays empty.
+        os.environ["ARIA2_NEXT_PATH"] = exe
+        assert aria2_next.resolve_aria2_next(_settings()) == exe
+    finally:
+        if prev is None:
+            os.environ.pop("ARIA2_NEXT_PATH", None)
+        else:
+            os.environ["ARIA2_NEXT_PATH"] = prev
 
     db, _ = _db()
     task = dl.Task("a1b2c3d4e5f60718", {"url": "https://example.com/video.mp4"})
-    s = _settings(downloader_engine="aria2_next")
+    s = _settings(downloader_engine="aria2_next", aria2_next_path=exe)
     params = dl._ydl_dl_params(task, s, db)
     assert params["external_downloader"] == aria2_next.EXTERNAL_DOWNLOADER_MAP
 
@@ -2303,6 +3022,28 @@ def test_aria2_next_delegated_fd_inherits_ydl_progress_hooks():
         assert fd._progress_hooks.count(hook) == 1
 
 
+def test_aria2_next_cli_version_caches_per_mtime():
+    """`exe --version` is a subprocess — status polls cache it by binary
+    mtime; a swapped binary re-probes automatically."""
+    from dax.aria2_next import daemon
+
+    cnt = _TMP / "cli-version-count"
+    exe = _TMP / "fake-aria2-next"
+    exe.write_text(
+        f"#!/bin/sh\necho x >> {cnt}\necho 'aria2-next version 9.9.9'\n")
+    exe.chmod(0o755)
+    try:
+        assert daemon._cli_version(str(exe)) == "9.9.9"
+        assert daemon._cli_version(str(exe)) == "9.9.9"
+        assert len(cnt.read_text().splitlines()) == 1, \
+            "second call must hit the mtime cache"
+        os.utime(exe)  # mtime bump = binary swapped → re-probe
+        assert daemon._cli_version(str(exe)) == "9.9.9"
+        assert len(cnt.read_text().splitlines()) == 2
+    finally:
+        daemon._cli_versions.pop(str(exe), None)
+
+
 def test_aria2_next_leg_gid():
     from dax import aria2_next
 
@@ -2335,6 +3076,32 @@ def test_aria2_next_direct_leg_falls_back_to_native():
     assert calls and calls[0][:3] == ("https://example.com/f.bin", 0, 0)
 
 
+def test_aria2_next_direct_leg_rpc_error_falls_back_to_native():
+    """A dropped RPC socket raises instead of returning False; the leg must
+    still reach yt-dlp's native fallback."""
+    from dax import aria2_next
+
+    class _Daemon:
+        def ensure_running(self, s):
+            return None
+
+    calls: list[tuple] = []
+    with dl.YoutubeDL({"quiet": True}) as ydl:
+        fd = aria2_next.Aria2NextFD(ydl, {"_dax_aria2_daemon": _Daemon()})
+
+        def boom(*a, **k):
+            raise ConnectionError("rpc reset")
+
+        fd._download_http_single = boom
+        fd._fetch_ranged_fragment = lambda *a, **k: calls.append(a)
+        rc = fd._call_downloader(
+            str(_TMP / "fallback-rpc.bin.part"),
+            {"url": "https://example.com/f.bin"},
+        )
+    assert rc == 0
+    assert calls and calls[0][:3] == ("https://example.com/f.bin", 0, 0)
+
+
 def test_aria2_next_max_tries_is_a_stall_budget():
     """aria2's max-tries counts consecutive per-slot failures, not whole
     download retries; the yt-dlp retry count must not cap it at 3."""
@@ -2355,7 +3122,8 @@ def test_aria2_next_daemon_ws_rpc_and_e2e_download():
     import threading
     from dax import aria2_next
 
-    if not aria2_next.resolve_aria2_next():
+    aria2_exe = _aria2_path()
+    if not aria2_exe:
         print("  SKIP  aria2-next binary not found — e2e unexercised")
         return
 
@@ -2433,7 +3201,8 @@ def test_aria2_next_daemon_ws_rpc_and_e2e_download():
 
     daemon = aria2_next.Aria2NextDaemon(state_root=_TMP / "aria2-state-e2e")
     try:
-        s = _settings(downloader_engine="aria2_next", aria2_rpc_port=16895, aria2_split=4)
+        s = _settings(downloader_engine="aria2_next", aria2_rpc_port=16895,
+                      aria2_split=4, aria2_next_path=aria2_exe)
         rpc = daemon.ensure_running(s)
         ver = rpc.get_version()
         assert ver.get("product") == "aria2-next"
@@ -2449,6 +3218,7 @@ def test_aria2_next_daemon_ws_rpc_and_e2e_download():
         out_folder.mkdir(parents=True, exist_ok=True)
         s_dl = _settings(
             downloader_engine="aria2_next",
+            aria2_next_path=aria2_exe,
             categories=[{"name": "default", "path": str(out_folder)}],
         )
         req_dict = {
@@ -2551,6 +3321,53 @@ def test_aria2_next_daemon_ws_rpc_and_e2e_download():
             )
         assert ok is True
         assert ranged_out.read_bytes() == big[1000:2000] + big[500_000:501_000]
+
+        # 2d. AES-128 fragments decrypt inside the worker pool — the output
+        # is plaintext and the durable marker is the `.dec` file.
+        from yt_dlp.aes import aes_cbc_encrypt_bytes
+        import struct
+
+        def enc_seg(data: bytes, seq: int) -> bytes:
+            key = bytes(range(16))
+            pad = 16 - len(data) % 16
+            return aes_cbc_encrypt_bytes(data + bytes([pad]) * pad, key, struct.pack(">8xq", seq))
+
+        key = bytes(range(16))
+        enc0 = enc_seg(seg0, 0)
+        enc1 = enc_seg(seg1, 1)
+        enc_out = out_folder / "frags_encrypted.bin"
+        with dl.YoutubeDL(frag_params) as ydl:
+            fd = aria2_next.Aria2NextFD(ydl, frag_params)
+            orig_fetch = fd._fetch_ranged_fragment
+
+            def serve_enc(url, start, end, frag_out, info_dict, task):
+                # No HTTP route for the ciphertext — native-fetch writes it
+                # directly so the test exercises the decrypt path only.
+                Path(frag_out).write_bytes(enc0 if "seg0" in url else enc1)
+
+            fd._fetch_ranged_fragment = serve_enc
+            try:
+                ok = fd.real_download(
+                    str(enc_out),
+                    {
+                        "id": "encefrag",
+                        "title": "encefrag",
+                        "ext": "bin",
+                        "protocol": "m3u8_frag_urls",
+                        "url": f"http://127.0.0.1:{srv_port}/enc.m3u8",
+                        "fragments": [
+                            {"url": "x://seg0", "byte_range": {"start": 0, "end": 1},
+                             "decrypt_info": {"METHOD": "AES-128", "KEY": key}},
+                            {"url": "x://seg1", "byte_range": {"start": 0, "end": 1},
+                             "decrypt_info": {"METHOD": "AES-128", "KEY": key}},
+                        ],
+                    },
+                )
+            finally:
+                fd._fetch_ranged_fragment = orig_fetch
+        assert ok is True
+        assert enc_out.read_bytes() == seg0 + seg1, \
+            "AES-128 fragments must reach the output as plaintext"
 
         # 3. Task controls (pause / unpause / remove) over WebSocket RPC
         ctrl_gid = "1234567890abcdef"
@@ -2721,6 +3538,63 @@ def test_torrent_headers_replay_cookies_for_host():
     assert "User-Agent" in h
 
 
+def test_fetch_torrent_rejects_non_http_schemes():
+    try:
+        tr.fetch_torrent("file:///etc/hosts", {})
+        raise AssertionError("file:// must be rejected")
+    except ValueError:
+        pass
+
+
+def test_fetch_torrent_strips_session_on_cross_host_redirect():
+    """A tracker redirecting to another host must not receive the captured
+    Cookie/Referer — urllib forwards request headers to redirect targets."""
+    import http.server
+    import threading
+
+    seen: dict[str, dict] = {}
+
+    class Target(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen[self.path] = dict(self.headers)
+            body = b"d8:announce0:e"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    class Redirect(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            host = "localhost" if self.path == "/cross" else "127.0.0.1"
+            loc = f"http://{host}:{target.server_address[1]}{self.path}.torrent"
+            self.send_response(302)
+            self.send_header("Location", loc)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    target = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Target)
+    redirect = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    threading.Thread(target=target.serve_forever, daemon=True).start()
+    threading.Thread(target=redirect.serve_forever, daemon=True).start()
+    headers = {"Cookie": "sid=secret", "Referer": "https://tracker/page"}
+    try:
+        base = f"http://127.0.0.1:{redirect.server_address[1]}"
+        assert tr.fetch_torrent(base + "/same", headers)
+        assert tr.fetch_torrent(base + "/cross", headers)
+    finally:
+        redirect.shutdown()
+        target.shutdown()
+    assert seen["/same.torrent"].get("Cookie") == "sid=secret"
+    assert seen["/cross.torrent"].get("Cookie") is None
+    assert seen["/cross.torrent"].get("Referer") is None
+
+
 def test_torrent_status_mapping():
     t = _torrent_task()
     dl._apply_torrent_status(t, {
@@ -2837,6 +3711,15 @@ def test_submit_torrent_attach_and_resume_paths():
                             "bittorrent": {"fileSelectionState": "awaiting"}})
     dl._submit_torrent(rpc4, t3, _settings())
     assert rpc4.calls == []
+
+    # Explicit resume before metadata/files exist → stay parked; unpausing a
+    # blank selection never completes.
+    t3b = _torrent_task({"url": _MAGNET, "kind": "torrent", "createdAt": 1})
+    t3b.status = "waiting"
+    rpc4b = _FakeRpc(status={"status": "paused", "files": [],
+                             "bittorrent": {"fileSelectionState": "awaiting"}})
+    dl._submit_torrent(rpc4b, t3b, _settings())
+    assert rpc4b.calls == []
 
     # Terminal leftover with the same gid → remove, purge, re-add.
     t4 = _torrent_task({"url": _MAGNET, "kind": "torrent", "createdAt": 1})
@@ -3159,6 +4042,40 @@ def test_finish_playlist_marks_items():
     assert final.endswith("Mix")
 
 
+def test_finish_playlist_sizes_from_disk():
+    """Item sizes come from the finished files — leg bytes are pre-merge and
+    the extractor's filesize is pre-postprocess. The returned entry names
+    the moved file; archive-skips recover theirs from the numbered output."""
+    out = _TMP / "plout"
+    folder = out / "Mix"
+    folder.mkdir(parents=True, exist_ok=True)
+    a = folder / "01 - a.mp4"
+    a.write_bytes(b"x" * 300)
+    b = folder / "02 - b.mp4"
+    b.write_bytes(b"y" * 500)
+    req = {"url": "u", "category": "cat", "playlist": {
+        "title": "Mix",
+        "items": [{"index": 1, "id": "a"}, {"index": 2, "id": "b"}]}}
+    t = dl.Task("plsz", req)
+    t.playlist_items[0].update(
+        status="complete", done=999, downloaded=999, total=999,
+        filename=str(a),
+    )
+    tmp = Path(st.task_tmp_dir("plsz"))
+    tmp.mkdir(parents=True, exist_ok=True)
+    (tmp / "archive.txt").write_text("youtube b\n")
+    s = _settings(categories=[{"name": "cat", "path": str(out)}])
+    info = {"_type": "playlist", "entries": [
+        {"playlist_index": 1, "requested_downloads": [{"filepath": str(a)}]},
+    ]}
+    final = dl._finish_playlist(t, info, s)
+    assert final == str(folder)
+    assert (t.playlist_items[0]["done"], t.playlist_items[0]["total"]) == (300, 300)
+    assert t.playlist_items[1]["status"] == "complete"
+    assert t.playlist_items[1]["filename"] == str(b)
+    assert (t.playlist_items[1]["done"], t.playlist_items[1]["total"]) == (500, 500)
+
+
 def test_download_info_replays_cached_listing_under_both_sigs():
     """A playlist task replays the probe's cached listing regardless of
     which probe produced it: the video pass registers playlist?list pages
@@ -3291,6 +4208,21 @@ def test_playlist_worker_failure_marks_its_items():
     assert final.endswith("P")
 
 
+def test_restore_marks_failed_playlist_items_error():
+    """A restored errored playlist must not show its entries as queued —
+    a task-level error means every item failed."""
+    db, _ = _db()
+    req = {"url": "u", "playlist": {
+        "title": "P", "items": [{"index": 1}, {"index": 2}]}}
+    db.insert_task("gpe", req, "error", 0, 1)
+    db.mark_error("gpe", "1", "boom")
+    reg = dl.Registry(db, _settings())
+    reg.restore(db.load_all_tasks("/x"))
+    t = reg.get("gpe")
+    assert all(it["status"] == "error" for it in t.playlist_items)
+    assert all(it["error"] == "boom" for it in t.playlist_items)
+
+
 def test_snapshot_playlist_reports_item_size_sums():
     """The task row's bytes are the sum of every item's merged (video+audio)
     size — including archive-skipped items recovered from disk — not just
@@ -3347,6 +4279,117 @@ def test_req_to_dict_playlist_camelizes():
     item = d["playlist"]["items"][0]
     assert item["ieKey"] == "Youtube" and item["durationSecs"] == 61.0
     assert d["playlist"]["title"] == "Mix"
+
+
+def test_mime_helpers_classify_captured_streams():
+    """Extension captures carry mime/kind/height — the fallback must map
+    them to a wire kind/container without a URL extension."""
+    assert filt.container_from_mime("video/mp4") == "mp4"
+    assert filt.container_from_mime("video/x-matroska; codecs=avc1") == "mkv"
+    assert filt.container_from_mime("audio/mpeg") == "mp3"
+    assert filt.container_from_mime("text/html") is None
+    assert filt.kind_from_mime("application/vnd.apple.mpegurl") == "hls"
+    assert filt.kind_from_mime("application/dash+xml") == "dash"
+    assert filt.kind_from_mime("video/mp4") == "progressive"
+    assert filt.kind_from_mime("text/html") is None
+
+
+def test_role_script_paths_are_not_manifests():
+    """A script path serves its media from the query — `/master.php` must
+    not be classified as a manifest by the path token alone."""
+    assert filt.role("https://x/master.php?file=v.mp4") == "progressive"
+    assert filt.role("https://x/manifest.php") == "progressive"
+    assert filt.role("https://x/videos/master.m3u8") == "master"
+
+
+def test_codec_pref_ignores_audio_codec():
+    """`codecs` joins video + audio; only the video codec decides the
+    compatibility tier."""
+    assert filt._codec_pref({"codecs": "vp09.00.10.08, opus"}) == 1
+    assert filt._codec_pref({"codecs": "av01.0.05M.08, opus"}) == 0
+    assert filt._codec_pref({"codecs": "hvc1.1.6.L93, mp4a.40.2"}) == 2
+
+
+def test_rank_formats_dedupes_same_url_keeping_richest():
+    """One row per URL — the same ladder URL arrives from a sources array,
+    a sibling JSON key and a raw script; the richer row wins."""
+    out = filt.rank_formats([
+        {"url": "https://x/v.mp4", "kind": "progressive",
+         "quality": {"label": "file"}},
+        {"url": "https://x/v.mp4", "kind": "progressive",
+         "quality": {"height": 1080}, "container": "mp4"},
+    ])
+    assert len(out) == 1
+    assert out[0]["quality"]["height"] == 1080
+    assert out[0]["container"] == "mp4"
+
+
+def test_sniffed_extract_keeps_extensionless_streams():
+    """The extension's kind/mime/height must survive into the fallback —
+    an extensionless `/stream/abc` served as video/mp4 used to be dropped."""
+    from dax.models import ContextHeaders, ExtractOptions
+
+    opts = ExtractOptions(contexts=[
+        ContextHeaders(
+            url="https://cdn.x/stream/abc", kind="file", mime="video/mp4",
+            height=720, label="720p",
+        ),
+    ])
+    items = ex._sniffed_extract(opts, "https://site.com/page")
+    assert items, "extensionless captured stream must survive"
+    row = items[0]["formats"][0]
+    assert row["url"] == "https://cdn.x/stream/abc"
+    assert row["kind"] == "progressive"
+    assert row["container"] == "mp4"
+    assert row["quality"]["height"] == 720
+
+    hls = ExtractOptions(contexts=[
+        ContextHeaders(url="https://cdn.x/live/abc", kind="hls",
+                       mime="application/vnd.apple.mpegurl"),
+    ])
+    rows = ex._sniffed_extract(hls, "https://site.com/page")
+    assert rows and rows[0]["formats"][0]["kind"] == "hls"
+
+
+def test_context_headers_carry_capture_metadata():
+    """The extension's capture fields ride the context struct (camelCase
+    wire keys) instead of being ignored by msgspec."""
+    import msgspec
+    from dax.models import ContextHeaders
+
+    c = msgspec.convert(
+        {"url": "u", "kind": "file", "mime": "video/mp4",
+         "height": 720, "label": "720p"},
+        ContextHeaders,
+    )
+    assert c.kind == "file" and c.mime == "video/mp4"
+    assert c.height == 720 and c.label == "720p"
+
+
+def test_kind_of_extensionless_manifest():
+    """role() already recognizes extensionless signed manifests; kind_of()
+    must agree or the sniffed fallback drops them as non-media."""
+    assert filt.kind_of("https://cdn.x/media/hls/?s=abc") == "hls"
+    assert filt.kind_of("https://cdn.x/manifest/v1?token=a") == "hls"
+    assert filt.kind_of("https://cdn.x/watch/123") == "progressive"
+
+
+def test_taskdb_close_is_idempotent():
+    """Shutdown may run twice (restart, test teardown); closing an already
+    closed connection must not raise."""
+    db, _ = _db()
+    db.close()
+    db.close()
+
+
+def test_retired_media_extensions_are_rejected():
+    """Containers we no longer support must not fall through role()'s
+    extensionless progressive fallback."""
+    for ext in (
+        "ogg", "oga", "avi", "3gp", "wmv", "flv",
+        "mpg", "mpeg", "wma", "aiff", "m2ts", "alac",
+    ):
+        assert filt.role(f"https://cdn.x/v.{ext}") is None, ext
 
 
 # ---- runner ------------------------------------------------------------------

@@ -11,10 +11,11 @@ import os
 import secrets
 import shutil
 import string
-import structlog
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 if TYPE_CHECKING:
     from .db import TaskDb
@@ -110,7 +111,7 @@ class AppSettings:
     retries: int = 3
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any], fallback_token: str = "") -> "AppSettings":
+    def from_dict(cls, raw: dict[str, Any], fallback_token: str = "") -> AppSettings:
         s = cls()
         known = {f.name for f in fields(cls)}
         for k, v in raw.items():
@@ -137,7 +138,7 @@ class AppSettings:
         return {_snake_to_camel(f.name): getattr(self, f.name) for f in fields(self)}
 
     @classmethod
-    def load(cls, db: "TaskDb") -> "AppSettings":
+    def load(cls, db: TaskDb) -> AppSettings:
         """The settings row in dax.db (snake_case columns). Fresh install —
         the ws guard needs a real token before the first save persists."""
         raw = db.load_settings()
@@ -151,9 +152,10 @@ class AppSettings:
                 raw[k] = bool(v)
         return cls.from_dict(raw)
 
-    def save(self, db: "TaskDb") -> None:
+    def save(self, db: TaskDb) -> None:
         vals = {f.name: getattr(self, f.name) for f in fields(self)}
-        db.save_settings(vals, vals.pop("categories"))
+        categories = vals.pop("categories")
+        db.save_settings(vals, categories)
 
     def rotate_tokens(self) -> None:
         self.api_token = new_token(24)
@@ -181,10 +183,7 @@ def out_dir(s: AppSettings, category: str | None = None) -> str:
     """Final destination dir: the request's category path, then the first
     category, then the app-data downloads dir. `~` expands so subprocess/
     dir consumers get real paths."""
-    cats = [
-        c for c in s.categories
-        if isinstance(c, dict) and c.get("path")
-    ]
+    cats = [c for c in s.categories if isinstance(c, dict) and c.get("path")]
     if category:
         for c in cats:
             if c.get("name") == category:
@@ -208,15 +207,29 @@ def clean_task_tmp(gid: str) -> None:
     shutil.rmtree(task_tmp_dir(gid), ignore_errors=True)
 
 
+# Found ffmpeg paths by configured value — PATH scans and stat calls repeat
+# per download/postprocess otherwise. Misses are NOT cached: a mid-session
+# install still resolves on the next call.
+_ffmpeg_paths: dict[str, str] = {}
+
+
 def resolve_ffmpeg(s: AppSettings) -> str | None:
     """ffmpeg binary path: explicit setting, PATH, then macOS Homebrew dirs."""
+    if hit := _ffmpeg_paths.get(s.ffmpeg_path):
+        return hit
+    found: str | None = None
     if s.ffmpeg_path:
         expanded = os.path.expanduser(s.ffmpeg_path)
         if Path(expanded).is_file():
-            return expanded
-    if found := shutil.which("ffmpeg"):
-        return found
-    for candidate in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
-        if Path(candidate).is_file():
-            return candidate
-    return None
+            found = expanded
+    if found is None:
+        if hit := shutil.which("ffmpeg"):
+            found = hit
+        else:
+            for candidate in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+                if Path(candidate).is_file():
+                    found = candidate
+                    break
+    if found:
+        _ffmpeg_paths[s.ffmpeg_path] = found
+    return found

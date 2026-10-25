@@ -18,6 +18,7 @@ auto skips step 1 for pages yt-dlp has no dedicated extractor for when
 """
 
 import asyncio
+import contextlib
 import copy
 import functools
 import os
@@ -25,6 +26,7 @@ import re
 import threading
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
+from http.cookiejar import CookieJar
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -37,9 +39,12 @@ from yt_dlp.utils import UnsupportedError
 
 from .filter import (
     AUDIO_EXTS,
+    MAX_CANDIDATES,
     VIDEO_EXTS,
+    container_from_mime,
     container_of,
     has_media,
+    kind_from_mime,
     kind_of,
     order_candidates,
     rank_formats,
@@ -60,6 +65,19 @@ log = structlog.get_logger(__name__)
 ORIG_AUDIO = "ba[format_note*=original]"
 
 DEFAULT_ACCEPT_LANG = "en-US,en;q=0.9"
+
+# Cache budgets. Signed format URLs outlive the result TTL by hours; the
+# info cache is longer-lived because a download replays it.
+_BROKEN_IE_MAX = 1024
+_BROKEN_IE_TTL = 1800
+_COOKIE_JAR_MAX = 8
+_COOKIE_JAR_TTL = 1800
+_RESULT_CACHE_MAX = 512
+_RESULT_CACHE_TTL = 300
+_INFO_CACHE_MAX = 512
+_INFO_CACHE_TTL = 1800
+_STAT_CACHE_MAX = 2048
+_STAT_CACHE_TTL = 600
 
 
 @functools.cache
@@ -108,14 +126,18 @@ def replay_ctx_headers(
     *,
     collect_cookies: bool = False,
     ua_from_ctx: bool = False,
+    custom: bool = False,
 ) -> list[tuple[str, str]]:
     """Replay captured browser headers onto same-host requests and,
     optionally, harvest `Cookie:` headers into (host, header) jar seeds.
     `contexts` yields (ctx_url, [(name, value)]) pairs normalized by the
     caller (msgspec Structs or raw request dicts). Only presentation
-    headers replay — captured authorization/x-*/origin headers are scoped
-    to the request that carried them and poison API calls when replayed
-    globally (a stale SAPISIDHASH broke youtube extraction)."""
+    headers replay — captured authorization/origin headers are scoped to
+    the request that carried them and poison API calls when replayed
+    globally (a stale SAPISIDHASH broke youtube extraction). `custom` —
+    set only for media targets, where every request is the manifest or a
+    segment — also replays x-* headers: signed CDN tokens bind the
+    request to device/session headers like x-did and 403 without them."""
     host = (urlsplit(url).hostname or "").lower()
     cookies: list[tuple[str, str]] = []
     for ctx_url, ctx_headers in contexts:
@@ -142,6 +164,8 @@ def replay_ctx_headers(
                     headers["User-Agent"] = value
             elif name == "accept-language":
                 headers["Accept-Language"] = value
+            elif custom and name.startswith("x-"):
+                headers[name] = value
     return cookies
 
 
@@ -164,9 +188,7 @@ def apply_common_ydl_opts(
         args["generic"] = {"impersonate": ["chrome"]}
 
 
-def _ydl_params(
-    opts: ExtractOptions, url: str
-) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+def _ydl_params(opts: ExtractOptions, url: str) -> tuple[dict[str, Any], list[tuple[str, str]]]:
     """Params + captured cookies. Cookies never ride in http_headers —
     yt-dlp 2026 deprecates header cookies (a redirect could leak them to a
     foreign host); they're seeded into the cookiejar scoped to the domain
@@ -184,6 +206,7 @@ def _ydl_params(
         url,
         collect_cookies=True,
         ua_from_ctx=not opts.user_agent,
+        custom=_is_media_url(url),
     )
     params: dict[str, Any] = {
         "quiet": False,
@@ -232,9 +255,22 @@ def _seed_cookies(ydl: YoutubeDL, seeds: list[tuple[str, str]]) -> None:
                 continue
             ydl.cookiejar.set_cookie(
                 http.cookiejar.Cookie(
-                    0, name, value, None, False,
-                    domain, True, True, "/", True,
-                    False, None, False, None, None, {},
+                    0,
+                    name,
+                    value,
+                    None,
+                    False,
+                    domain,
+                    True,
+                    True,
+                    "/",
+                    True,
+                    False,
+                    None,
+                    False,
+                    None,
+                    None,
+                    {},
                 )
             )
 
@@ -262,9 +298,7 @@ def _kind(fmt: dict[str, Any]) -> str:
     # the protocol so m3u8/mpd audio renditions don't read as video streams.
     vc, ac = fmt.get("vcodec"), fmt.get("acodec")
     if vc in (None, "none") and (
-        vc == "none"
-        or ac not in (None, "none")
-        or str(fmt.get("ext") or "").lower() in AUDIO_EXTS
+        vc == "none" or ac not in (None, "none") or str(fmt.get("ext") or "").lower() in AUDIO_EXTS
     ):
         return "audio"
     proto = fmt.get("protocol") or ""
@@ -277,9 +311,7 @@ def _kind(fmt: dict[str, Any]) -> str:
 
 def _codecs(fmt: dict[str, Any]) -> str | None:
     parts = [
-        c
-        for c in (fmt.get("vcodec"), fmt.get("acodec"))
-        if c and c not in ("none", "unknown")
+        c for c in (fmt.get("vcodec"), fmt.get("acodec")) if c and c not in ("none", "unknown")
     ]
     return ", ".join(parts) or None
 
@@ -350,10 +382,7 @@ def _link(
         return None
     # Video-only rows download merged with the best audio — stats show
     # the pair, not the silent half.
-    pair = (
-        fmt.get("vcodec") not in (None, "none")
-        and fmt.get("acodec") in (None, "none")
-    )
+    pair = fmt.get("vcodec") not in (None, "none") and fmt.get("acodec") in (None, "none")
     link: dict[str, Any] = {"url": url, "kind": _kind(fmt), "source": "extractor"}
     height, width = fmt.get("height"), fmt.get("width")
     tbr = fmt.get("tbr") or fmt.get("vbr") or fmt.get("abr")
@@ -394,16 +423,10 @@ def _link(
     return link
 
 
-def _item(
-    info: dict[str, Any], referer: str | None, pick: Any = None
-) -> dict[str, Any] | None:
+def _item(info: dict[str, Any], referer: str | None, pick: Any = None) -> dict[str, Any] | None:
     live = bool(info.get("is_live")) or info.get("live_status") == "is_live"
     audio = _best_audio(info.get("formats") or [], info.get("duration"), pick)
-    formats = [
-        lk
-        for f in info.get("formats") or []
-        if (lk := _link(f, live, referer, audio))
-    ]
+    formats = [lk for f in info.get("formats") or [] if (lk := _link(f, live, referer, audio))]
     deduped = rank_formats(formats, info.get("duration"))
     if not deduped:
         return None
@@ -475,12 +498,7 @@ def _is_unsupported(e: BaseException) -> bool:
     if isinstance(e, UnsupportedError):
         return True
     msg = str(e)
-    if "Unsupported URL" in msg or "No suitable extractor" in msg:
-        return True
-    cause = getattr(e, "exc_info", None)
-    if cause and len(cause) > 1 and isinstance(cause[1], UnsupportedError):
-        return True
-    return False
+    return "Unsupported URL" in msg or "No suitable extractor" in msg
 
 
 def _is_extractor_bug(e: BaseException) -> bool:
@@ -492,7 +510,7 @@ def _is_extractor_bug(e: BaseException) -> bool:
 
 # Hosts whose dedicated extractor is broken upstream — the auto chain skips
 # the doomed yt-dlp page pass for 30 min; candidate probing is unaffected.
-_broken_ie: TTLCache[str, bool] = TTLCache(1024, 1800)
+_broken_ie: TTLCache[str, bool] = TTLCache(_BROKEN_IE_MAX, _BROKEN_IE_TTL)
 
 
 def _mark_ie_broken(url: str) -> None:
@@ -562,9 +580,7 @@ def _ytdlp_extract(opts: ExtractOptions, raw: str, probe: bool = False) -> dict[
         else None
     )
     sources = entries if entries else [info]
-    pairs = [
-        (e, it) for e in sources if e and (it := _item(e, opts.referer, pick))
-    ]
+    pairs = [(e, it) for e in sources if e and (it := _item(e, opts.referer, pick))]
     if opts.max_items:
         pairs = pairs[: opts.max_items]
     items = [it for _, it in pairs]
@@ -599,10 +615,12 @@ def _ytdlp_extract(opts: ExtractOptions, raw: str, probe: bool = False) -> dict[
     return page
 
 
-_cookie_jar_cache: TTLCache[tuple, Any] = TTLCache(8, 1800)
+_cookie_jar_cache: TTLCache[tuple[str, str, float], CookieJar] = TTLCache(
+    _COOKIE_JAR_MAX, _COOKIE_JAR_TTL
+)
 
 
-def _browser_jar(opts: ExtractOptions) -> Any | None:
+def _browser_jar(opts: ExtractOptions) -> CookieJar | None:
     """Browser/cookie-file jar shared by every yt-dlp instance — loading
     decrypts the whole browser store, so it runs once per (browser, file,
     mtime) instead of once per probed candidate."""
@@ -632,6 +650,9 @@ def _browser_jar(opts: ExtractOptions) -> Any | None:
                 yopts["cookiefile"] = cfile
             with YoutubeDL(yopts) as ydl:
                 jar = ydl.cookiejar
+                # Loading must not write back: close() saves the whole jar
+                # (decrypted browser cookies included) into the user's file.
+                ydl.params["cookiefile"] = None
             _cookie_jar_cache.insert(key, jar)
         except Exception as e:
             log.warning("cookie load failed", error=e)
@@ -660,22 +681,31 @@ def _cookie_header_for_url(opts: ExtractOptions, url: str) -> tuple[str, str] | 
 def _ctx_title(opts: ExtractOptions) -> str | None:
     """First non-empty title carried by the captured contexts — the page
     title on the tab the extension sniffed those URLs from."""
-    return next(
-        (t for c in opts.contexts if (t := (c.title or "").strip())), None
-    )
+    return next((t for c in opts.contexts if (t := (c.title or "").strip())), None)
 
 
 # Codec fourccs sniffed from the moov box — video then audio.
 _CODEC_TAGS = (
-    b"avc1", b"avc3", b"hvc1", b"hev1", b"vp09", b"vp08", b"av01", b"mp4v",
-    b"mp4a", b"ac-3", b"ec-3", b"Opus", b"fLaC",
+    b"avc1",
+    b"avc3",
+    b"hvc1",
+    b"hev1",
+    b"vp09",
+    b"vp08",
+    b"av01",
+    b"mp4v",
+    b"mp4a",
+    b"ac-3",
+    b"ec-3",
+    b"Opus",
+    b"fLaC",
 )
 _STAT_BYTES = 64 * 1024
 
 # HEAD/range results keyed by (url, referer) — re-probing the same row in a
 # later batch reuses them. Signed URLs make the key unique per session.
-_stat_cache: TTLCache[tuple[str, str], tuple[int | None, str | None]] = TTLCache(
-    2048, 600
+_stat_cache: TTLCache[tuple[str, str, str], tuple[int | None, str | None]] = TTLCache(
+    _STAT_CACHE_MAX, _STAT_CACHE_TTL
 )
 _stat_local = threading.local()
 
@@ -699,16 +729,17 @@ def _stat_row(fmt: dict[str, Any], opts: ExtractOptions) -> None:
     url = str(fmt.get("url") or "")
     if not url.startswith(("http://", "https://")):
         return
-    headers = {
-        k: v for k, v in (fmt.get("headers") or {}).items() if isinstance(v, str)
-    }
+    headers = {k: v for k, v in (fmt.get("headers") or {}).items() if isinstance(v, str)}
     # Signed CDN URLs often bind the key to session cookies — the
     # extraction jar is what lets a stat probe past "wrong key" 403s.
     if not any(k.lower() == "cookie" for k in headers) and (
         ck := _cookie_header_for_url(opts, url)
     ):
         headers["cookie"] = ck[1]
-    key = (url, headers.get("referer") or "")
+    # Cookies ride in the key: two sessions on one cookie-gated URL must
+    # not share a stat entry — a signed URL differs per session anyway, so
+    # this only extends the same guarantee to stable private URLs.
+    key = (url, headers.get("referer") or "", headers.get("cookie") or "")
     if (hit := _stat_cache.get(key)) is not None:
         size, codecs = hit
         if fmt.get("probed_size") is None and size is not None:
@@ -726,17 +757,14 @@ def _stat_row(fmt: dict[str, Any], opts: ExtractOptions) -> None:
         # An error body's content-length is not the file size — xhpingcdn
         # answers bad-key probes with a 9-byte 403 stub.
         if r.status_code < 400 and (cl := r.headers.get("content-length")):
-            try:
+            with contextlib.suppress(ValueError):
                 size = int(cl)
-            except ValueError:
-                pass
         codecs: str | None = None
         # The range GET doubles as the size source for HEAD-rejecting
         # servers: 206 carries the total in Content-Range. Only run it
         # when something is still missing.
         if size is None or (
-            not fmt.get("codecs")
-            and "video" in str(r.headers.get("content-type") or "")
+            not fmt.get("codecs") and "video" in str(r.headers.get("content-type") or "")
         ):
             resp = session.get(
                 url,
@@ -753,21 +781,17 @@ def _stat_row(fmt: dict[str, Any], opts: ExtractOptions) -> None:
                         )
                     ):
                         size = int(m.group(1))
-                    elif resp.status_code == 200 and (
-                        cl := resp.headers.get("content-length")
-                    ):
-                        try:
+                    elif resp.status_code == 200 and (cl := resp.headers.get("content-length")):
+                        with contextlib.suppress(ValueError):
                             size = int(cl)
-                        except ValueError:
-                            pass
                 if (
                     not fmt.get("codecs")
                     and resp.status_code < 400
                     and "video" in str(resp.headers.get("content-type") or "")
                 ):
-                    buf = b""
+                    buf = bytearray()
                     for chunk in resp.iter_content():
-                        buf += chunk
+                        buf.extend(chunk)
                         if len(buf) >= _STAT_BYTES:
                             break
                     if tags := dict.fromkeys(t for t in _CODEC_TAGS if t in buf):
@@ -780,7 +804,11 @@ def _stat_row(fmt: dict[str, Any], opts: ExtractOptions) -> None:
             fmt["codecs"] = codecs
         if size is not None or codecs is not None:
             _stat_cache.insert(key, (size, codecs))
-    except Exception:
+    except Exception as e:
+        # Best-effort probe: the row keeps its unset fields. Log the host,
+        # never the signed URL (its query carries the access token).
+        host = (urlsplit(url).hostname or "").lower()
+        log.debug("stat probe failed", host=host, error=clean_text(str(e)))
         return
 
 
@@ -795,8 +823,7 @@ def _stat_missing(formats: list[dict[str, Any]], opts: ExtractOptions) -> None:
     stat = [
         f
         for f in formats
-        if f.get("kind") == "progressive"
-        and (f.get("probed_size") is None or not f.get("codecs"))
+        if f.get("kind") == "progressive" and (f.get("probed_size") is None or not f.get("codecs"))
     ]
     if stat:
         with ThreadPoolExecutor(max_workers=min(len(stat), _PROBE_WORKERS)) as pool:
@@ -871,11 +898,11 @@ def _probe_rust_item(
     ladder = False
     workers = min(len(cands), _PROBE_WORKERS)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for cand, probed in zip(manifest, pool.map(probe, manifest)):
+        for cand, probed in zip(manifest, pool.map(probe, manifest), strict=True):
             if fold(cand, probed) > 1:
                 ladder = True
         if not ladder:
-            for cand, probed in zip(rest, pool.map(probe, rest)):
+            for cand, probed in zip(rest, pool.map(probe, rest), strict=True):
                 fold(cand, probed)
     shaped = rank_formats(merged_formats, raw_item.get("duration_secs"))
     if not shaped:
@@ -891,8 +918,11 @@ def _probe_rust_item(
     if dur := (raw_item.get("duration_secs") or probed_meta.get("duration_secs")):
         item["duration_secs"] = float(dur)
     if thumb := next(
-        (str(t) for t in (raw_item.get("thumbnail"), probed_meta.get("thumbnail"))
-         if t and not site_asset(str(t))),
+        (
+            str(t)
+            for t in (raw_item.get("thumbnail"), probed_meta.get("thumbnail"))
+            if t and not site_asset(str(t))
+        ),
         None,
     ):
         item["thumbnail"] = thumb
@@ -927,17 +957,18 @@ def _rust_extract(opts: ExtractOptions, raw: str) -> dict[str, Any] | None:
         from . import dax_rs
     except Exception as e:
         log.warning(
-            "dax_rs module missing — run src-py/build-dax-rs.sh; "
-            "rust fallback skipped",
+            "dax_rs module missing — run `bun run backend:bundle`; rust fallback skipped",
             error=e,
         )
         return None
     o = msgspec.to_builtins(opts)
     if cookie_ctx := _cookie_header_for_url(opts, raw):
         origin, cookie_hdr = cookie_ctx
-        o.setdefault("contexts", []).append(
+        # msgspec.Struct doesn't validate at construction — a caller-side
+        # contexts=None serializes to null and .append would crash on it.
+        o["contexts"] = (o.get("contexts") or []) + [
             {"url": origin, "headers": [{"name": "Cookie", "value": cookie_hdr}]}
-        )
+        ]
     try:
         out = orjson.loads(dax_rs.extract(orjson.dumps(o).decode(), [raw]))
     except Exception as e:
@@ -963,6 +994,17 @@ def _rust_extract(opts: ExtractOptions, raw: str) -> dict[str, Any] | None:
     return page
 
 
+def _ctx_kind(c: Any) -> str | None:
+    """Wire kind from the extension's capture classification — the only
+    signal for an extensionless stream (`/stream/abc` served as video/mp4)."""
+    kind = (c.kind or "").lower()
+    if kind.startswith("hls"):
+        return "hls"
+    if kind == "dash":
+        return "dash"
+    return kind_from_mime(c.mime or "")
+
+
 def _sniffed_extract(opts: ExtractOptions, raw: str) -> list[dict[str, Any]] | None:
     """Extension-captured media URLs → candidate media links, classified and
     ordered by dax.filter (manifests first — the extension's own capture
@@ -973,11 +1015,21 @@ def _sniffed_extract(opts: ExtractOptions, raw: str) -> list[dict[str, Any]] | N
         if not c.url or c.url in seen:
             continue
         seen.add(c.url)
-        if kind_of(c.url) == "progressive" and container_of(c.url) is None:
-            continue  # not media-looking — the extension captured a page/API URL
-        link: dict[str, Any] = {"url": c.url, "kind": kind_of(c.url), "source": "direct"}
-        if container := container_of(c.url):
+        kind = _ctx_kind(c)
+        if kind is None:
+            kind = kind_of(c.url)
+            if kind == "progressive" and container_of(c.url) is None:
+                continue  # not media-looking — the extension captured a page/API URL
+        link: dict[str, Any] = {"url": c.url, "kind": kind, "source": "direct"}
+        if container := container_of(c.url) or container_from_mime(c.mime or ""):
             link["container"] = container
+        quality: dict[str, Any] = {}
+        if c.height:
+            quality["height"] = int(c.height)
+        if c.label:
+            quality["label"] = c.label
+        if quality:
+            link["quality"] = quality
         referer = opts.referer or next(
             (h.value for h in c.headers if h.name.lower() == "referer"),
             None,
@@ -987,7 +1039,7 @@ def _sniffed_extract(opts: ExtractOptions, raw: str) -> list[dict[str, Any]] | N
         links.append(link)
         log.info("sniffed fallback candidate", url=c.url)
 
-    if not (ordered := order_candidates(links, limit=8)):
+    if not (ordered := order_candidates(links, limit=MAX_CANDIDATES)):
         return None
     item: dict[str, Any] = {
         "id": raw,
@@ -1045,7 +1097,7 @@ def _has_dedicated_extractor(url: str) -> bool:
 
 
 @functools.lru_cache(maxsize=512)
-def _claiming_keys(url: str) -> frozenset:
+def _claiming_keys(url: str) -> frozenset[str]:
     """Dedicated extractor keys claiming this URL — a "watch?v=…&list=…"
     page is claimed by the tab/playlist IE while the plain video URL it
     resolves to is claimed by the video IE. That difference marks a URL
@@ -1074,12 +1126,13 @@ async def _flat_listing_probe(
     (the claiming IE set differs from the resolved URL's — watch?v+list is
     a tab-IE URL, the video a video-IE one), or the pass found nothing on a
     URL a dedicated extractor claims (a dead video inside a live list)."""
-    claims = _claiming_keys(raw)
+    # Iterating every yt-dlp extractor is CPU work — keep it off the loop.
+    claims = await asyncio.to_thread(_claiming_keys, raw)
     if not claims:
         return None
     if has_media(page):
         resolved = page.get("final_url") or raw
-        if not (claims - _claiming_keys(resolved)):
+        if not (claims - await asyncio.to_thread(_claiming_keys, resolved)):
             return None
     pl_opts = msgspec.structs.replace(opts, playlist=True)
     listing = await asyncio.to_thread(_ytdlp_extract, pl_opts, raw)
@@ -1122,7 +1175,7 @@ async def _extract_one(opts: ExtractOptions, raw: str) -> dict[str, Any]:
     if (
         opts.ytdlp_generic is False
         and not _is_media_url(raw)
-        and not _has_dedicated_extractor(raw)
+        and not await asyncio.to_thread(_has_dedicated_extractor, raw)
     ):
         rust = await asyncio.to_thread(_rust_extract, opts, raw)
         if has_media(rust):
@@ -1137,11 +1190,7 @@ async def _extract_one(opts: ExtractOptions, raw: str) -> dict[str, Any]:
 
     # auto: Python yt-dlp first; Rust custom extractor fallback on failure/empty.
     # A host whose dedicated extractor is broken upstream skips the pass.
-    page = (
-        None
-        if _ie_broken(raw)
-        else await asyncio.to_thread(_ytdlp_extract, opts, raw)
-    )
+    page = None if _ie_broken(raw) else await asyncio.to_thread(_ytdlp_extract, opts, raw)
     if has_media(page) or (page or {}).get("playlist"):
         return page
     rust = await asyncio.to_thread(_rust_extract, opts, raw)
@@ -1149,44 +1198,65 @@ async def _extract_one(opts: ExtractOptions, raw: str) -> dict[str, Any]:
         return rust
     if rust and rust.get("items"):
         return rust
-    return await asyncio.to_thread(_sniffed_page, opts, raw) or page or rust
+    return (
+        await asyncio.to_thread(_sniffed_page, opts, raw)
+        or page
+        or rust
+        or {
+            "input": raw,
+            "items": [],
+            "error": "extraction failed",
+            "error_code": CODE_FAIL,
+        }
+    )
 
 
 # Extract results are cached briefly: re-opening the probe sheet or retrying
 # after tweaking options re-pays the full yt-dlp network probe otherwise.
 # Signed format URLs outlive this TTL by hours — failures are never cached.
-_result_cache: TTLCache[tuple, dict[str, Any]] = TTLCache(512, 300)
+_result_cache: TTLCache[tuple[Any, ...], dict[str, Any]] = TTLCache(
+    _RESULT_CACHE_MAX, _RESULT_CACHE_TTL
+)
 
 # Successful probes' info dicts — the download worker feeds them to
 # ydl.process_ie_result instead of re-extracting the page (a second
 # webpage+player+JS-challenge+cookie round-trip per download otherwise).
 # 30 minutes: signed format URLs outlive it by hours, and a failed replay
 # drops the entry and extracts fresh.
-_info_cache: TTLCache[tuple, dict[str, Any]] = TTLCache(512, 1800)
+_info_cache: TTLCache[tuple[Any, ...], dict[str, Any]] = TTLCache(_INFO_CACHE_MAX, _INFO_CACHE_TTL)
 
 
-def _ctx_key(opts: ExtractOptions) -> tuple:
+def _ctx_key(opts: ExtractOptions) -> tuple[Any, ...]:
     """Contexts fingerprint — session cookies change what a page yields."""
     return tuple(
-        (c.url, c.title, tuple((h.name, h.value) for h in c.headers))
-        for c in opts.contexts
+        (c.url, c.title, tuple((h.name, h.value) for h in c.headers)) for c in opts.contexts
     )
 
 
-def _opts_key(opts: ExtractOptions) -> tuple:
+def _opts_key(opts: ExtractOptions) -> tuple[Any, ...]:
     """Cache identity of an options struct — contexts included (session
     cookies change what a page yields), so a fresh push with new captures
     still gets a fresh probe."""
     return (
-        opts.extractor_engine, opts.ytdlp_generic, opts.cookies_file,
-        opts.cookies_browser, opts.referer, opts.user_agent, opts.proxy,
-        opts.timeout_secs, opts.retries, opts.rate_limit_rps, opts.max_items,
-        opts.player_client, opts.check_certificate, opts.playlist,
+        opts.extractor_engine,
+        opts.ytdlp_generic,
+        opts.cookies_file,
+        opts.cookies_browser,
+        opts.referer,
+        opts.user_agent,
+        opts.proxy,
+        opts.timeout_secs,
+        opts.retries,
+        opts.rate_limit_rps,
+        opts.max_items,
+        opts.player_client,
+        opts.check_certificate,
+        opts.playlist,
         _ctx_key(opts),
     )
 
 
-def _info_sig(opts: ExtractOptions) -> tuple:
+def _info_sig(opts: ExtractOptions) -> tuple[Any, ...]:
     """Extraction identity for download reuse — only what changes the media
     a page yields AND survives into the download request: session sources
     (cookie file/browser, captured contexts), egress (proxy, UA), and the
@@ -1194,9 +1264,14 @@ def _info_sig(opts: ExtractOptions) -> tuple:
     legitimately carries the picked row's own referer), the engine, and
     probe-only knobs (timeouts, retries, item caps)."""
     return (
-        opts.cookies_file, opts.cookies_browser, opts.proxy,
-        opts.user_agent, opts.player_client, opts.check_certificate,
-        opts.playlist, _ctx_key(opts),
+        opts.cookies_file,
+        opts.cookies_browser,
+        opts.proxy,
+        opts.user_agent,
+        opts.player_client,
+        opts.check_certificate,
+        opts.playlist,
+        _ctx_key(opts),
     )
 
 
@@ -1252,7 +1327,7 @@ def drop_cached_info(opts: ExtractOptions, url: str) -> None:
 # In-flight extractions keyed like _result_cache — two callers probing the
 # same URL at once share one network round-trip (the UI dedupes per input
 # box, not per backend call).
-_inflight: dict[tuple, asyncio.Task] = {}
+_inflight: dict[tuple[Any, ...], asyncio.Task[dict[str, Any]]] = {}
 
 
 async def extract(opts: ExtractOptions, urls: list[str]) -> list[dict[str, Any]]:
@@ -1261,7 +1336,7 @@ async def extract(opts: ExtractOptions, urls: list[str]) -> list[dict[str, Any]]
     sem = asyncio.Semaphore(_clamp(opts.extract_concurrency, 8))
     sig = _opts_key(opts)
 
-    async def run(u: str, key: tuple) -> dict[str, Any]:
+    async def run(u: str, key: tuple[Any, ...]) -> dict[str, Any]:
         async with sem:
             try:
                 page = await _extract_one(opts, u)
@@ -1269,8 +1344,10 @@ async def extract(opts: ExtractOptions, urls: list[str]) -> list[dict[str, Any]]
                 # A bad URL or a broken extractor must not sink the batch.
                 log.exception("extract failed", url=u)
                 return {
-                    "input": u, "items": [],
-                    "error": clean_text(str(e)), "error_code": CODE_FAIL,
+                    "input": u,
+                    "items": [],
+                    "error": clean_text(str(e)),
+                    "error_code": CODE_FAIL,
                 }
             if not page.get("playlist"):
                 try:
@@ -1293,6 +1370,9 @@ async def extract(opts: ExtractOptions, urls: list[str]) -> list[dict[str, Any]]
             task = asyncio.create_task(run(u, key))
             _inflight[key] = task
             task.add_done_callback(lambda _: _inflight.pop(key, None))
-        return await task
+        # Shield: awaiting a shared Task propagates cancellation into it —
+        # one caller dropping mid-probe must not cancel the extraction for
+        # every other waiter on the same URL.
+        return await asyncio.shield(task)
 
     return list(await asyncio.gather(*(one(u) for u in urls)))

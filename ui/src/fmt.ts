@@ -18,12 +18,52 @@ export function taskName(d: DownloadInfo): string {
   const base = p?.split(/[\\/]/).pop()
   return (
     d.bittorrent?.name ||
+    d.playlist?.title ||
     base ||
+    d.dax?.title ||
     d.dax?.filename ||
     d.dax?.filenameHint ||
-    d.playlist?.title ||
     d.gid
   )
+}
+
+/** 0..1 progress for a task. Playlist tasks count items (their byte total
+ *  only covers started items); fragment downloads count segments; the rest
+ *  use bytes. Restored playlist tasks lose per-item progress — they fall
+ *  back to the persisted byte counters. */
+export function taskProgress(d: DownloadInfo): number | null {
+  const pl = d.playlist?.items
+  if (pl && pl.length > 0) {
+    const touched = pl.some((i) => i.status !== 'waiting' || i.downloaded > 0)
+    if (touched) {
+      let done = 0
+      for (const it of pl) {
+        if (it.status === 'complete') done += 1
+        else if (it.status === 'active' && it.total > 0)
+          done += Math.min(1, it.downloaded / it.total)
+      }
+      return done / pl.length
+    }
+  }
+  const frags = d.fragments
+  if (frags) return frags.total > 0 ? frags.done / frags.total : null
+  const total = Number(d.totalLength ?? 0)
+  const done = Number(d.completedLength ?? 0)
+  return total > 0 ? done / total : null
+}
+
+/** Remaining time — bytes for plain tasks, average segment size × remaining
+ *  segments for fragment downloads. Playlist ETA is item-rate, not bytes. */
+export function taskEta(d: DownloadInfo): string | null {
+  const speed = Number(d.downloadSpeed ?? 0)
+  if (speed <= 0 || d.playlist?.items?.length) return null
+  const done = Number(d.completedLength ?? 0)
+  const frags = d.fragments
+  if (frags && frags.total > 0 && frags.done > 0 && done > 0) {
+    const remaining = (done / frags.done) * (frags.total - frags.done)
+    return fmtEta(0, Math.ceil(remaining), speed)
+  }
+  return fmtEta(done, Number(d.totalLength ?? 0), speed)
 }
 
 // ---- torrents ----------------------------------------------------------------
@@ -147,6 +187,12 @@ export function fmtBytes(n: number): string {
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
   let i = 0
   while (n >= 1000 && i < units.length - 1) {
+    n /= 1000
+    i++
+  }
+  // Rounding can land on the next unit — 999.95 KB must print "1.0 MB",
+  // never "1000 KB".
+  if (n >= 999.5 && i < units.length - 1) {
     n /= 1000
     i++
   }

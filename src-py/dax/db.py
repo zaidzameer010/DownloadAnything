@@ -6,13 +6,14 @@ restarts and are restored as 'paused' on load. The legacy schema
 renamed/added, legacy ones left in place harmlessly.
 """
 
-import orjson
-import structlog
 import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Any
+
+import orjson
+import structlog
 
 log = structlog.get_logger(__name__)
 
@@ -92,22 +93,51 @@ CREATE TABLE IF NOT EXISTS settings (
 """
 
 # Must equal the settings DDL's column set — a mismatch marks the table stale.
-_SETTINGS_COLUMNS = frozenset({
-    "id", "api_port", "api_token", "max_concurrent_downloads",
-    "extractor_engine", "ytdlp_generic", "downloader_engine",
-    "parallel_segments", "player_client",
-    "ffmpeg_path", "aria2_next_path", "aria2_rpc_port", "aria2_split",
-    "aria2_max_connection_per_server", "aria2_min_split_size",
-    "aria2_file_allocation", "aria2_min_tls_version",
-    "aria2_max_overall_download_limit", "aria2_max_download_limit",
-    "aria2_lowest_speed_limit", "aria2_retry_wait", "aria2_state_save_interval",
-    "bt_seed_ratio", "bt_seed_time", "bt_max_peers", "bt_listen_port",
-    "bt_enable_dht", "bt_enable_pex", "bt_enable_lpd", "bt_sequential",
-    "bt_trackers",
-    "media_format", "embed_thumbnail", "embed_subtitles",
-    "embed_chapters", "embed_metadata", "check_certificate",
-    "cookies_file", "cookies_browser", "timeout_secs", "retries",
-})
+_SETTINGS_COLUMNS = frozenset(
+    {
+        "id",
+        "api_port",
+        "api_token",
+        "max_concurrent_downloads",
+        "extractor_engine",
+        "ytdlp_generic",
+        "downloader_engine",
+        "parallel_segments",
+        "player_client",
+        "ffmpeg_path",
+        "aria2_next_path",
+        "aria2_rpc_port",
+        "aria2_split",
+        "aria2_max_connection_per_server",
+        "aria2_min_split_size",
+        "aria2_file_allocation",
+        "aria2_min_tls_version",
+        "aria2_max_overall_download_limit",
+        "aria2_max_download_limit",
+        "aria2_lowest_speed_limit",
+        "aria2_retry_wait",
+        "aria2_state_save_interval",
+        "bt_seed_ratio",
+        "bt_seed_time",
+        "bt_max_peers",
+        "bt_listen_port",
+        "bt_enable_dht",
+        "bt_enable_pex",
+        "bt_enable_lpd",
+        "bt_sequential",
+        "bt_trackers",
+        "media_format",
+        "embed_thumbnail",
+        "embed_subtitles",
+        "embed_chapters",
+        "embed_metadata",
+        "check_certificate",
+        "cookies_file",
+        "cookies_browser",
+        "timeout_secs",
+        "retries",
+    }
+)
 
 # Column name → its DDL tail ("INTEGER NOT NULL DEFAULT 3") — the additive
 # settings migration ALTERs missing columns in with these declarations.
@@ -143,6 +173,7 @@ class TaskDb:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._lock = threading.Lock()
+        self._closed = False
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -153,25 +184,18 @@ class TaskDb:
     def _migrate(self) -> None:
         """Legacy table → TaskDb schema: rename req→req_json, add the
         new columns. Unknown legacy columns (result, postprocessed) stay."""
-        cols = {
-            r[1]
-            for r in self._conn.execute("PRAGMA table_info(tasks)").fetchall()
-        }
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(tasks)").fetchall()}
         # Missing settings columns are added and stale ones dropped in
         # place — rebuilding the table would reset every setting to
         # defaults. A table without `id` is a foreign shape (the ancient
         # kv store): rebuild it, carrying the api token over so a paired
         # extension keeps working.
-        s_cols = {
-            r[1]
-            for r in self._conn.execute("PRAGMA table_info(settings)").fetchall()
-        }
+        s_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(settings)").fetchall()}
         if s_cols and "id" not in s_cols:
             token = None
             if "api_token" in s_cols:
-                row = self._conn.execute(
-                    "SELECT api_token FROM settings WHERE id = 1"
-                ).fetchone()
+                # The foreign shape has no `id` column — read its only row.
+                row = self._conn.execute("SELECT api_token FROM settings LIMIT 1").fetchone()
                 token = row[0] if row else None
             self._conn.execute("DROP TABLE settings")
             self._conn.execute(_SETTINGS_SCHEMA)
@@ -200,13 +224,20 @@ class TaskDb:
         # seconds-era code get created_at — the column is ms, so scale up.
         # Idempotent: converted values land above the threshold.
         self._conn.execute(
-            "UPDATE tasks SET updated_at = created_at * 1000 "
-            "WHERE updated_at < 100000000000"
+            "UPDATE tasks SET updated_at = created_at * 1000 WHERE updated_at < 100000000000"
         )
 
     @classmethod
-    def open(cls, path: Path) -> "TaskDb":
+    def open(cls, path: Path) -> TaskDb:
         return cls(path)
+
+    def close(self) -> None:
+        """Close the SQLite connection. Idempotent; call once at shutdown."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._conn.close()
 
     def load_settings(self) -> dict[str, Any] | None:
         """The settings row as a snake_case field dict, categories included."""
@@ -223,29 +254,33 @@ class TaskDb:
             return None
         if not row:
             return None
-        out = dict(zip(cols, row))
+        out = dict(zip(cols, row, strict=True))
         out.pop("id", None)
         out["categories"] = [{"name": n, "path": p} for n, p in cats]
         return out
 
-    def save_settings(
-        self, values: dict[str, Any], categories: list[dict[str, str]]
-    ) -> None:
+    def save_settings(self, values: dict[str, Any], categories: list[dict[str, str]]) -> None:
         """Raises on sqlite error — a silently lost settings row mints a new
         token next boot and breaks the paired extension."""
         cols = ", ".join(values)
         ph = ", ".join("?" for _ in values)
         with self._lock:
-            self._conn.execute(
-                f"INSERT OR REPLACE INTO settings (id, {cols}) VALUES (1, {ph})",
-                tuple(values.values()),
-            )
-            self._conn.execute("DELETE FROM categories")
-            self._conn.executemany(
-                "INSERT INTO categories (name, path) VALUES (?, ?)",
-                [(c.get("name", ""), c.get("path", "")) for c in categories],
-            )
-            self._conn.commit()
+            try:
+                self._conn.execute(
+                    f"INSERT OR REPLACE INTO settings (id, {cols}) VALUES (1, {ph})",
+                    tuple(values.values()),
+                )
+                self._conn.execute("DELETE FROM categories")
+                self._conn.executemany(
+                    "INSERT INTO categories (name, path) VALUES (?, ?)",
+                    [(c.get("name", ""), c.get("path", "")) for c in categories],
+                )
+                self._conn.commit()
+            except sqlite3.Error:
+                # A rejected category (e.g. duplicate name) must not leave the
+                # new settings row in the open transaction for a later commit.
+                self._conn.rollback()
+                raise
 
     def insert_task(
         self,
@@ -283,9 +318,7 @@ class TaskDb:
         except sqlite3.Error as e:
             log.warning("task insert failed", gid=gid, error=e)
 
-    def update_progress(
-        self, gid: str, status: str, done: int, total: int, speed: int
-    ) -> None:
+    def update_progress(self, gid: str, status: str, done: int, total: int, speed: int) -> None:
         now = _now_ms()
         try:
             with self._lock:
@@ -360,9 +393,7 @@ class TaskDb:
     def purge_finished(self) -> int:
         try:
             with self._lock:
-                n = self._conn.execute(
-                    "DELETE FROM tasks WHERE status = 'complete'"
-                ).rowcount
+                n = self._conn.execute("DELETE FROM tasks WHERE status = 'complete'").rowcount
                 self._conn.commit()
                 return n
         except sqlite3.Error as e:
@@ -384,7 +415,19 @@ class TaskDb:
             log.warning("pause all failed", error=e)
             return 0
 
-    def load_all_tasks(self, default_download_dir: str) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    def all_task_gids(self) -> set[str]:
+        """Every gid still in the db — the tmp sweep must not treat a task
+        beyond load_all_tasks' restore window as a crash leftover."""
+        try:
+            with self._lock:
+                return {r[0] for r in self._conn.execute("SELECT gid FROM tasks")}
+        except sqlite3.Error as e:
+            log.warning("task gid load failed", error=e)
+            return set()
+
+    def load_all_tasks(
+        self, default_download_dir: str
+    ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
         """(DownloadInfo-shaped dict, req dict) for every non-removed task,
         newest first — the startup restore set. Tasks that were live when
         the backend shut down come back as 'paused'."""
@@ -407,8 +450,18 @@ class TaskDb:
 
         out: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for (
-            gid, url, thumbnail, filename_hint, req_json, raw_status,
-            total, completed, file_path, error_code, error_message, created_at,
+            gid,
+            url,
+            thumbnail,
+            filename_hint,
+            req_json,
+            raw_status,
+            total,
+            completed,
+            file_path,
+            error_code,
+            error_message,
+            created_at,
         ) in rows:
             try:
                 req = orjson.loads(req_json) if req_json else {}
@@ -424,11 +477,13 @@ class TaskDb:
             files = None
             path_val = file_path or filename_hint
             if path_val:
-                files = [{
-                    "path": path_val,
-                    "length": str(total),
-                    "completedLength": str(completed),
-                }]
+                files = [
+                    {
+                        "path": path_val,
+                        "length": str(total),
+                        "completedLength": str(completed),
+                    }
+                ]
             info: dict[str, Any] = {
                 "gid": gid,
                 "status": status,

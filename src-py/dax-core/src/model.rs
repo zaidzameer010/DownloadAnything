@@ -1,84 +1,189 @@
-use serde::Serialize;
+//! Serialized media model shared with the Python side.
+//!
+//! Every type here is part of the JSON contract: field names and enum
+//! spellings must match what `dax/extract.py` reads.
+
+use std::fmt;
+
+use serde::{Serialize, Serializer};
 use url::Url;
 
-/// One logical piece of content (a video, an episode, a track) extracted from a page.
-#[derive(Debug, Clone, Serialize)]
+/// Identifier of one item within a page result.
+///
+/// Serializes as `"page"`, `"direct"` or `"media-<n>"`, the strings the
+/// Python probe and the UI already key on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ItemId {
+    /// The page-level item holding links that belong to no single element.
+    Page,
+    /// The single item synthesized for a direct media URL.
+    Direct,
+    /// One `<video>`/`<audio>` element, 1-based.
+    Media(u32),
+}
+
+impl fmt::Display for ItemId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Page => f.write_str("page"),
+            Self::Direct => f.write_str("direct"),
+            Self::Media(index) => write!(f, "media-{index}"),
+        }
+    }
+}
+
+impl Serialize for ItemId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Page => serializer.serialize_str("page"),
+            Self::Direct => serializer.serialize_str("direct"),
+            Self::Media(index) => serializer.collect_str(&format_args!("media-{index}")),
+        }
+    }
+}
+
+/// One logical piece of content (a video, an episode, a track) found on a page.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MediaItem {
-    pub id: String,
+    /// Stable identifier within the page result.
+    pub id: ItemId,
+    /// Page or player title, when the page exposed one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Page URL the item was extracted from.
     pub page_url: Url,
+    /// Content duration in seconds, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<f64>,
+    /// Poster/thumbnail URL, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<Url>,
+    /// Candidate addresses for this item, in discovery order.
     pub formats: Vec<MediaLink>,
 }
 
+impl MediaItem {
+    /// Page-level item holding links that belong to no single media element.
+    #[must_use]
+    pub fn page(page_url: Url, formats: Vec<MediaLink>) -> Self {
+        Self {
+            id: ItemId::Page,
+            title: None,
+            page_url,
+            duration_secs: None,
+            thumbnail: None,
+            formats,
+        }
+    }
+
+    /// Item synthesized for a direct media URL.
+    #[must_use]
+    pub fn direct(page_url: Url, link: MediaLink) -> Self {
+        Self {
+            id: ItemId::Direct,
+            title: None,
+            page_url,
+            duration_secs: None,
+            thumbnail: None,
+            formats: vec![link],
+        }
+    }
+}
+
+/// Delivery mechanism of a media address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaKind {
+    /// A single downloadable file.
     Progressive,
+    /// An HLS manifest.
     Hls,
+    /// A DASH manifest.
     Dash,
+    /// A single audio file.
     Audio,
 }
 
+/// Discovery layer that produced a link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceLayer {
+    /// `<video>`, `<source>`, `<a>`, `<object>`, `<embed>` or a data attribute.
     Html,
+    /// A JSON blob embedded in a script or data attribute.
     JsonBlob,
+    /// A schema.org JSON-LD object.
     JsonLd,
+    /// An `og:*` or `twitter:*` meta tag.
     Meta,
+    /// The last-resort regex scan over raw source.
     Regex,
+    /// The input URL itself, or a fetched manifest/media response.
     Direct,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+/// Resolution and bitrate hints for one address.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Quality {
+    /// Vertical resolution in pixels.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// Horizontal resolution in pixels.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
+    /// Declared bitrate in bits per second.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bandwidth: Option<u64>,
+    /// Player-provided label such as `720p` or `hd`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+/// Request headers the downloader must replay for a link.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct HeaderHints {
+    /// Page URL to send as `Referer`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub referer: Option<String>,
 }
 
 impl HeaderHints {
+    /// Whether no hint is set, so the field can be omitted from JSON.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.referer.is_none()
     }
 }
 
-/// A candidate media address extracted from the page (to be probed by yt-dlp).
-#[derive(Debug, Clone, Serialize)]
+/// A candidate media address extracted from the page, to be probed by yt-dlp.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MediaLink {
+    /// Absolute media address.
     pub url: Url,
+    /// Delivery mechanism.
     pub kind: MediaKind,
+    /// Resolution/bitrate hints, when the page carried them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quality: Option<Quality>,
+    /// Container named by the URL or a mime attribute.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
+    /// Discovery layer that produced this link.
     pub source: SourceLayer,
+    /// Headers the downloader must replay.
     #[serde(skip_serializing_if = "HeaderHints::is_empty")]
     pub headers: HeaderHints,
+    /// Unix timestamp from a signed-URL expiry parameter, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
-    /// Which <video>/<audio> element this link came from (playlist grouping).
+    /// Which `<video>`/`<audio>` element this link came from; grouping only.
     #[serde(skip)]
-    pub media_index: Option<u32>,
+    pub(crate) media_index: Option<u32>,
 }
 
 impl MediaLink {
+    /// Link with no quality, container, header or expiry hints yet.
+    #[must_use]
     pub fn new(url: Url, kind: MediaKind, source: SourceLayer) -> Self {
         Self {
             url,
@@ -90,5 +195,32 @@ impl MediaLink {
             expires_at: None,
             media_index: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn item_id_serializes_to_python_spelling() {
+        assert_eq!(serde_json::to_value(ItemId::Page).unwrap(), "page");
+        assert_eq!(serde_json::to_value(ItemId::Direct).unwrap(), "direct");
+        assert_eq!(serde_json::to_value(ItemId::Media(2)).unwrap(), "media-2");
+        assert_eq!(ItemId::Media(2).to_string(), "media-2");
+    }
+
+    #[test]
+    fn media_link_omits_empty_hints() {
+        let link = MediaLink::new(
+            Url::parse("https://cdn.x/v.mp4").unwrap(),
+            MediaKind::Progressive,
+            SourceLayer::Html,
+        );
+        let json = serde_json::to_string(&link).unwrap();
+        assert!(!json.contains("headers"), "{json}");
+        assert!(!json.contains("quality"), "{json}");
+        assert!(!json.contains("media_index"), "{json}");
+        assert!(json.contains("\"kind\":\"progressive\""), "{json}");
     }
 }

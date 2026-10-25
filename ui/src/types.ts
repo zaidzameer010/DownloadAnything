@@ -220,11 +220,22 @@ export interface RequestContext {
    *  extension-sniffed fallback item when no extractor metadata exists. */
   title?: string
   headers: HeaderPair[]
+  /** Extension capture classification — keeps extensionless streams and
+   *  carries the resolution encoded in the URL. */
+  kind?: string
+  mime?: string
+  label?: string
+  height?: number
 }
 
 export interface DownloadReq {
   url: string
   createdAt?: number
+  /** The extracted item's own title — the task row/details show it instead
+   *  of only the resolved output filename. */
+  title?: string
+  /** Runtime of the picked item, seconds. */
+  durationSecs?: number
   filenameHint?: string
   /** Verbatim output filename, extension included — Chrome-intercepted
    *  downloads keep the browser-resolved name exactly; never appended to. */
@@ -338,6 +349,7 @@ export interface PlaylistTaskItem {
   url?: string
   title?: string
   thumbnail?: string | null
+  duration_secs?: number | null
   status: 'waiting' | 'active' | 'complete' | 'error'
   downloaded: number
   total: number
@@ -383,6 +395,20 @@ export interface DownloadInfo {
     url?: string
     filenameHint?: string
     filename?: string
+    /** The extracted item's original title and runtime. */
+    title?: string
+    durationSecs?: number
+    /** Quality identity of the picked row. */
+    quality?: {
+      height?: number
+      width?: number
+      bandwidth?: number
+      audioOnly?: boolean
+    }
+    /** yt-dlp format_id of the picked row. */
+    reprId?: string
+    /** The authoritative page the row was extracted from. */
+    pageUrl?: string
     thumbnail?: string
     referer?: string
     /** Request media bucket: file | hls | dash. */

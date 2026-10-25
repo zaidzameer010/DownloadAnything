@@ -25,12 +25,14 @@ own TCP connection.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import shutil
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -42,7 +44,7 @@ from yt_dlp.networking import Request
 from yt_dlp.utils import DownloadCancelled, update_url_query, urljoin
 
 from ..settings import AppSettings
-from .daemon import Aria2NextDaemon, get_daemon, global_options_from_settings, resolve_aria2_next
+from .daemon import Aria2NextDaemon, get_daemon, global_options_from_settings
 from .rpc import Aria2RpcClient, Aria2RpcError
 
 if TYPE_CHECKING:
@@ -53,9 +55,7 @@ log = structlog.get_logger(__name__)
 
 def derive_leg_gid(task_gid: str, leg_name: str) -> str:
     """Deterministic 16-hex-digit non-zero GID for an aria2-next task leg."""
-    digest = hashlib.blake2b(
-        f"{task_gid}:{leg_name}".encode("utf-8"), digest_size=8
-    ).hexdigest()
+    digest = hashlib.blake2b(f"{task_gid}:{leg_name}".encode(), digest_size=8).hexdigest()
     return digest if digest != "0" * 16 else "0000000000000001"
 
 
@@ -112,17 +112,17 @@ class Aria2NextFD(ExternalFD):
 
     @classmethod
     def available(cls, path: str | None = None) -> str | bool:
-        s = None
         if path and path not in ("aria2_next", "aria2-next", "aria2next"):
             p = Path(os.path.expanduser(path))
             if p.is_file():
                 cls.exe = str(p)
                 return str(p)
-        found = resolve_aria2_next(s)
-        if not found:
             return False
-        cls.exe = found
-        return found
+        # Name-only probe (delegated fragment FDs pass the downloader name):
+        # the UI-configured path is stamped on `cls.exe` by
+        # `configure_ydl_params` before any download runs.
+        exe = cls.exe
+        return exe if isinstance(exe, str) and Path(exe).is_file() else False
 
     @classmethod
     def supports(cls, info_dict: dict[str, Any]) -> bool:
@@ -138,8 +138,8 @@ class Aria2NextFD(ExternalFD):
         """Accept every manifest so HlsFD delegates VOD fragment downloads."""
         return True
 
-    def _context(self) -> tuple["Task | None", AppSettings, Aria2NextDaemon]:
-        task: "Task | None" = self.params.get("_dax_task")
+    def _context(self) -> tuple[Task | None, AppSettings, Aria2NextDaemon]:
+        task: Task | None = self.params.get("_dax_task")
         settings: AppSettings = self.params.get("_dax_settings") or AppSettings()
         daemon: Aria2NextDaemon = self.params.get("_dax_aria2_daemon") or get_daemon()
         return task, settings, daemon
@@ -230,9 +230,16 @@ class Aria2NextFD(ExternalFD):
         for _ in range(3):
             if task is not None and task.cancel.is_set():
                 raise DownloadCancelled("aborted by user")
-            ok, err = self._download_http_single(
-                rpc, abs_tmp, tmpfilename, url, info_dict, task, s
-            )
+            try:
+                ok, err = self._download_http_single(
+                    rpc, abs_tmp, tmpfilename, url, info_dict, task, s
+                )
+            except DownloadCancelled:
+                raise
+            except Exception as e:
+                # A dropped RPC socket is a leg failure like any other —
+                # it must reach the native fallback, not abort the download.
+                ok, err = False, str(e)
             if ok:
                 break
         if not ok:
@@ -246,9 +253,7 @@ class Aria2NextFD(ExternalFD):
             except DownloadCancelled:
                 raise
             except Exception as e:
-                self.report_error(
-                    f"aria2-next download failed: {err}; native fetch: {e}"
-                )
+                self.report_error(f"aria2-next download failed: {err}; native fetch: {e}")
                 return 1
         return 0
 
@@ -259,7 +264,7 @@ class Aria2NextFD(ExternalFD):
         tmpfilename: str,
         url: str,
         info_dict: dict[str, Any],
-        task: "Task | None",
+        task: Task | None,
         s: AppSettings,
     ) -> tuple[bool, str]:
         leg_gid = derive_leg_gid(task.gid if task else "dax", os.path.basename(abs_tmp))
@@ -279,7 +284,12 @@ class Aria2NextFD(ExternalFD):
         ok, actual_path, err = self._monitor_gid(
             rpc, leg_gid, abs_tmp, tmpfilename, info_dict, task
         )
-        if ok and actual_path and os.path.abspath(actual_path) != abs_tmp and os.path.exists(actual_path):
+        if (
+            ok
+            and actual_path
+            and os.path.abspath(actual_path) != abs_tmp
+            and os.path.exists(actual_path)
+        ):
             shutil.move(actual_path, abs_tmp)
         return ok, err
 
@@ -290,7 +300,7 @@ class Aria2NextFD(ExternalFD):
         tmpfilename: str,
         info_dict: dict[str, Any],
         fragments: list[dict[str, Any]],
-        task: "Task | None",
+        task: Task | None,
         s: AppSettings,
     ) -> int:
         """Download segments in parallel batches via aria2-next HTTP tasks over
@@ -302,6 +312,42 @@ class Aria2NextFD(ExternalFD):
         concurrency = max(1, min(32, s.parallel_segments or s.aria2_split or 16))
         skip_unavailable = self.params.get("skip_unavailable_fragments", True)
         decrypt_fragment = self.decrypter(info_dict)
+        # Encrypted fragments decrypt inside the worker pool — a serial
+        # decrypt pass after the last byte arrives wastes the whole tail of
+        # the download on one core. The durable marker is the decrypted
+        # `.dec` file so a resume never double-decrypts.
+        needs_decrypt = any(
+            (f.get("decrypt_info") or {}).get("METHOD") == "AES-128" for f in fragments
+        )
+
+        def finalize(frag: dict[str, Any], raw_path: str) -> tuple[str, int]:
+            """Return the durable output (dec_path, size) for a finished frag."""
+            if not needs_decrypt:
+                return raw_path, os.path.getsize(raw_path)
+            dec_path = f"{raw_path}.dec"
+            if not (os.path.isfile(dec_path) and os.path.getsize(dec_path) > 0):
+                with open(raw_path, "rb") as f:
+                    plain = decrypt_fragment(frag, f.read())
+                tmp = f"{dec_path}.tmp"
+                with open(tmp, "wb") as f:
+                    f.write(plain)
+                os.replace(tmp, dec_path)
+                with contextlib.suppress(OSError):
+                    os.remove(raw_path)
+            return dec_path, os.path.getsize(dec_path)
+
+        completed_paths: dict[int, str] = {}
+        bytes_acc = 0
+        done_count = 0
+        # Live in-flight stats — each worker's monitor piggybacks its ~1s
+        # tellStatus into `inflight`; the reporter thread folds them into a
+        # steady aggregate so the UI updates even between completions.
+        stats_lock = threading.Lock()
+        emit_lock = threading.Lock()
+        inflight: dict[str, tuple[int, float]] = {}
+        snapshot = {"bytes": 0, "count": 0}
+        stop_report = threading.Event()
+        dest_filename = self.undo_temp_name(tmpfilename)
 
         def fetch_one(frag: dict[str, Any]) -> tuple[int, str, int]:
             if task is not None and task.cancel.is_set():
@@ -311,8 +357,15 @@ class Aria2NextFD(ExternalFD):
             # Partial bytes live at `frag_out + .inc` (incomplete-suffix below)
             # and aria2-next renames to `frag_out` only on completion, so a
             # non-empty file at the final name is definitionally finished.
-            if os.path.isfile(frag_out) and os.path.getsize(frag_out) > 0:
-                return idx, frag_out, os.path.getsize(frag_out)
+            # With AES-128 the finished artifact is the decrypted `.dec`.
+            done_path = f"{frag_out}.dec" if needs_decrypt else frag_out
+            if os.path.isfile(done_path) and os.path.getsize(done_path) > 0:
+                return idx, done_path, os.path.getsize(done_path)
+            if needs_decrypt and os.path.isfile(frag_out) and os.path.getsize(frag_out) > 0:
+                # Download finished but the worker died before decrypting —
+                # finish the crypto, not the network.
+                path, size = finalize(frag, frag_out)
+                return idx, path, size
 
             f_url = frag["url"]
             br = frag.get("byte_range") or {}
@@ -325,10 +378,9 @@ class Aria2NextFD(ExternalFD):
                 # "server ignores ranges", looping forever), so fetch it
                 # through yt-dlp's own HTTP stack — the same path yt-dlp's
                 # native fragment downloader uses.
-                self._fetch_ranged_fragment(
-                    f_url, start_b, end_b, frag_out, info_dict, task
-                )
-                return idx, frag_out, os.path.getsize(frag_out)
+                self._fetch_ranged_fragment(f_url, start_b, end_b, frag_out, info_dict, task)
+                path, size = finalize(frag, frag_out)
+                return idx, path, size
 
             fgid = derive_leg_gid(
                 task.gid if task else "dax",
@@ -375,15 +427,19 @@ class Aria2NextFD(ExternalFD):
             try:
                 for attempt in range(3):
                     if attempt > 0:
-                        try:
+                        with contextlib.suppress(OSError):
                             os.remove(f"{frag_out}.inc")
-                        except OSError:
-                            pass
                     try:
                         self._submit_or_resume(rpc, fgid, [f_url], opts)
                         ok, actual_path, err = self._monitor_gid(
-                            rpc, fgid, frag_out, frag_out, info_dict, task,
-                            emit_progress=False, status_sink=sink,
+                            rpc,
+                            fgid,
+                            frag_out,
+                            frag_out,
+                            info_dict,
+                            task,
+                            emit_progress=False,
+                            status_sink=sink,
                         )
                     except DownloadCancelled:
                         raise
@@ -398,20 +454,23 @@ class Aria2NextFD(ExternalFD):
                     # aria2-next's plain-curl fingerprint — fetch through
                     # yt-dlp's impersonated stack instead.
                     try:
-                        self._fetch_ranged_fragment(
-                            f_url, 0, 0, frag_out, info_dict, task
-                        )
+                        self._fetch_ranged_fragment(f_url, 0, 0, frag_out, info_dict, task)
                     except DownloadCancelled:
                         raise
                     except Exception as native_err:
                         raise RuntimeError(
                             f"{err or f'fragment {idx} failed'}; native fetch: {native_err}"
-                        )
-                    return idx, frag_out, os.path.getsize(frag_out)
-                if actual_path and os.path.exists(actual_path) and os.path.abspath(actual_path) != os.path.abspath(frag_out):
+                        ) from native_err
+                    path, size = finalize(frag, frag_out)
+                    return idx, path, size
+                if (
+                    actual_path
+                    and os.path.exists(actual_path)
+                    and os.path.abspath(actual_path) != os.path.abspath(frag_out)
+                ):
                     shutil.move(actual_path, frag_out)
-                size = os.path.getsize(frag_out) if os.path.isfile(frag_out) else 0
-                return idx, frag_out, size
+                path, size = finalize(frag, frag_out)
+                return idx, path, size
             finally:
                 with stats_lock:
                     inflight.pop(fgid, None)
@@ -421,19 +480,6 @@ class Aria2NextFD(ExternalFD):
                 if task is not None:
                     with task.lock:
                         task.aria2_gids.discard(fgid)
-
-        completed_paths: dict[int, str] = {}
-        bytes_acc = 0
-        done_count = 0
-        # Live in-flight stats — each worker's monitor piggybacks its ~1s
-        # tellStatus into `inflight`; the reporter thread folds them into a
-        # steady aggregate so the UI updates even between completions.
-        stats_lock = threading.Lock()
-        emit_lock = threading.Lock()
-        inflight: dict[str, tuple[int, float]] = {}
-        snapshot = {"bytes": 0, "count": 0}
-        stop_report = threading.Event()
-        dest_filename = self.undo_temp_name(tmpfilename)
 
         def emit_progress() -> None:
             with stats_lock:
@@ -455,9 +501,7 @@ class Aria2NextFD(ExternalFD):
                 "elapsed": elapsed,
             }
             if cnt > 0 and b > 0:
-                payload["total_bytes_estimate"] = max(
-                    downloaded, int((b / cnt) * total_frags)
-                )
+                payload["total_bytes_estimate"] = max(downloaded, int((b / cnt) * total_frags))
             with emit_lock:
                 self._hook_progress(payload, info_dict)
 
@@ -517,9 +561,9 @@ class Aria2NextFD(ExternalFD):
                     if skip_unavailable and idx > 0:
                         continue
                     return 1
+                # Workers already decrypted AES-128 fragments — concat only.
                 with open(fpath, "rb") as src:
-                    data = src.read()
-                dest.write(decrypt_fragment(frag, data))
+                    shutil.copyfileobj(src, dest, 1 << 20)
         shutil.rmtree(frag_dir, ignore_errors=True)
         return 0
 
@@ -530,7 +574,7 @@ class Aria2NextFD(ExternalFD):
         end: int,
         frag_out: str,
         info_dict: dict[str, Any],
-        task: "Task | None",
+        task: Task | None,
     ) -> None:
         """Fetch via yt-dlp's own HTTP stack (cookies, impersonation, proxy
         ride along), atomically replacing `frag_out` on success. end <= start
@@ -551,18 +595,22 @@ class Aria2NextFD(ExternalFD):
                 raise DownloadCancelled("aborted by user")
             try:
                 tmp = f"{frag_out}.tmp"
-                with self.ydl.urlopen(Request(url, headers=headers, extensions=ext)) as resp:
-                    with open(tmp, "wb") as f:
-                        while chunk := resp.read(1 << 20):
-                            if task is not None and task.cancel.is_set():
-                                raise DownloadCancelled("aborted by user")
-                            f.write(chunk)
+                with (
+                    self.ydl.urlopen(Request(url, headers=headers, extensions=ext)) as resp,
+                    open(tmp, "wb") as f,
+                ):
+                    while chunk := resp.read(1 << 20):
+                        if task is not None and task.cancel.is_set():
+                            raise DownloadCancelled("aborted by user")
+                        f.write(chunk)
                 os.replace(tmp, frag_out)
                 return
             except DownloadCancelled:
                 raise
             except Exception as e:
                 last_err = e
+                with contextlib.suppress(OSError):
+                    os.remove(tmp)
         raise RuntimeError(f"native fetch failed: {last_err}")
 
     def _submit_or_resume(
@@ -604,10 +652,10 @@ class Aria2NextFD(ExternalFD):
         abs_tmp: str,
         tmpfilename: str,
         info_dict: dict[str, Any],
-        task: "Task | None",
+        task: Task | None,
         *,
         emit_progress: bool = True,
-        status_sink: Any = None,
+        status_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> tuple[bool, str, str]:
         """Monitor `gid` via WebSocket notifications + status snapshots until completion."""
         ev, unsub = rpc.subscribe_gid(gid)
@@ -624,7 +672,9 @@ class Aria2NextFD(ExternalFD):
                     status_sink(st)
                 aria_status = str(st.get("status") or "")
                 files = st.get("files") if isinstance(st.get("files"), list) else []
-                actual_path = str((files[0].get("path") if files and isinstance(files[0], dict) else "") or "")
+                actual_path = str(
+                    (files[0].get("path") if files and isinstance(files[0], dict) else "") or ""
+                )
 
                 if emit_progress and aria_status in ("active", "waiting"):
                     payload: dict[str, Any] = {
@@ -641,10 +691,8 @@ class Aria2NextFD(ExternalFD):
                     self._hook_progress(payload, info_dict)
 
                 if aria_status == "complete":
-                    try:
+                    with contextlib.suppress(Aria2RpcError):
                         rpc.remove_download_result(gid)
-                    except Aria2RpcError:
-                        pass
                     return True, actual_path or abs_tmp, ""
 
                 if aria_status == "error":
@@ -652,10 +700,8 @@ class Aria2NextFD(ExternalFD):
                         str(st.get("errorMessage") or "")
                         or f"aria2-next error (code {st.get('errorCode') or '1'})"
                     )
-                    try:
+                    with contextlib.suppress(Aria2RpcError):
                         rpc.remove_download_result(gid)
-                    except Aria2RpcError:
-                        pass
                     return False, actual_path, err_msg
 
                 if aria_status == "removed":
@@ -668,10 +714,8 @@ class Aria2NextFD(ExternalFD):
                             user_paused = task.cancel.is_set() or task.status == "paused"
                     if user_paused:
                         raise DownloadCancelled("paused by user")
-                    try:
+                    with contextlib.suppress(Aria2RpcError):
                         rpc.unpause(gid)
-                    except Aria2RpcError:
-                        pass
 
                 # Terminal notifications wake the wait; the timeout only
                 # bounds how often we re-check cancel + status.
@@ -681,17 +725,15 @@ class Aria2NextFD(ExternalFD):
             unsub()
 
     @staticmethod
-    def _abort_gid_on_cancel(rpc: Aria2RpcClient, gid: str, task: "Task") -> None:
+    def _abort_gid_on_cancel(rpc: Aria2RpcClient, gid: str, task: Task) -> None:
         with task.lock:
             is_pause = task.status == "paused"
         try:
             if is_pause:
                 rpc.pause(gid, force=True)
             else:
-                try:
+                with contextlib.suppress(Aria2RpcError):
                     rpc.remove(gid, force=True)
-                except Aria2RpcError:
-                    pass
                 rpc.remove_download_result(gid)
         except Exception:
             pass
@@ -701,7 +743,7 @@ def register_ytdlp_downloader() -> None:
     """Register `Aria2NextFD` into `yt_dlp.downloader.external` so yt-dlp
     resolves `external_downloader='aria2_next'` (and `aria2-next`) to our
     WebSocket RPC downloader class."""
-    setattr(ytdlp_external, "Aria2NextFD", Aria2NextFD)
+    ytdlp_external.Aria2NextFD = Aria2NextFD
     by_name = getattr(ytdlp_external, "_BY_NAME", None)
     if isinstance(by_name, dict):
         by_name["aria2_next"] = Aria2NextFD

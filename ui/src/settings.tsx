@@ -856,11 +856,11 @@ function EnginePane({
           )}
         </div>
         <Field
-          label="aria2-next binary path override"
+          label="aria2-next binary path"
           value={engine.aria2NextPath ?? ''}
           onChange={(v) => setF('aria2NextPath', v)}
-          placeholder={ytdlpInfo?.aria2_next_path || 'Auto-detected'}
-          hint="Standalone aria2-next executable, distinct from legacy aria2c."
+          placeholder="/path/to/aria2-next"
+          hint="Standalone aria2-next executable, distinct from legacy aria2c. Required for the aria2-next engine — there is no auto-detection."
           mono
         />
         <div className="grid grid-cols-2 gap-4">

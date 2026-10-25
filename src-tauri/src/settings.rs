@@ -10,7 +10,9 @@ pub struct BackendInfo {
 }
 
 fn db_path() -> PathBuf {
+    // Same base Python's Path.home() uses: HOME on Unix, USERPROFILE on Windows.
     std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .map(|h| PathBuf::from(h).join("Library/Application Support/dax/dax.db"))
         .unwrap_or_else(|| PathBuf::from("dax.db"))
 }

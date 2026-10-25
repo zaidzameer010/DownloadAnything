@@ -24,7 +24,7 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     env:
-      ARIA2_VERSION: 3.0.8
+      ARIA2_VERSION: 3.0.9
 
     steps:
       - name: Checkout repository
@@ -46,14 +46,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release download "v${ARIA2_VERSION}" -R AnInsomniacy/aria2-next --pattern "aria2-next-${ARIA2_VERSION}-windows-x86_64.exe" --clobber
 
+      # beforeBuildCommand runs `bun run backend:bundle`: uv sync, dax_rs
+      # built against the venv Python, then the venv + uv CPython + dax
+      # package staged into src-tauri/resources for the bundle.
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-
-      - name: Install backend environment
-        working-directory: src-py
-        run: uv sync
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -91,7 +90,7 @@ jobs:
           releaseBody: 'DownloadAnything Release'
           releaseDraft: true
           prerelease: false
-          # Root package.json has no CLI dep; the script routes to ui/node_modules/.bin/tauri
+          # Root package.json has no CLI dep; the script runs the UI's tauri.js
           tauriScript: 'bun run tauri'
           # NSIS -setup.exe is the conventional updater artifact over MSI
           updaterJsonPreferNsis: true

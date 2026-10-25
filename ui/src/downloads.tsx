@@ -1,7 +1,7 @@
 import { Fragment, useState } from 'react'
 import { Chip, Disclosure, ProgressBar } from '@heroui/react'
 import type { DownloadInfo, PlaylistTaskItem } from './types'
-import { fmtBytes, fmtEta, isDone, taskName } from './fmt'
+import { fmtBytes, fmtDuration, isDone, taskEta, taskName, taskProgress } from './fmt'
 import {
   ArrowDownToLine,
   ArrowRotateLeft,
@@ -143,18 +143,14 @@ function DlRow({
   act: (gid: string, action: string) => void
 }) {
   const name = taskName(d)
+  const q = d.dax?.quality
+  const quality = q?.audioOnly ? 'audio' : q?.height ? `${q.height}p` : ''
   const frags = d.fragments
   const total = Number(d.totalLength ?? 0)
   const done = Number(d.completedLength ?? 0)
-  const progress = frags
-    ? frags.total > 0
-      ? frags.done / frags.total
-      : null
-    : total > 0
-      ? done / total
-      : null
+  const progress = taskProgress(d)
   const speed = Number(d.downloadSpeed ?? 0)
-  const eta = frags ? null : fmtEta(done, total, speed)
+  const eta = taskEta(d)
   const isComplete = isDone(d)
   const isPaused = d.status === 'paused'
   const isError = d.status === 'error' || !!d.errorMessage
@@ -177,8 +173,8 @@ function DlRow({
       t: `${plDone}/${plItems.length} items`,
       w: String(plItems.length).length * 2 + 8,
     })
-  }
-  if (frags) {
+    if (done > 0) stats.push({ t: fmtBytes(done), w: 7 })
+  } else if (frags) {
     if (frags.total > 0)
       stats.push({
         t: `${frags.done}/${frags.total} segments`,
@@ -197,8 +193,8 @@ function DlRow({
     } else if (done > 0) {
       stats.push({ t: fmtBytes(done), w: 7 })
     }
-    if (eta) stats.push({ t: `ETA ${eta}`, w: 11 })
   }
+  if (eta) stats.push({ t: `ETA ${eta}`, w: 11 })
   if (bt) {
     if (bt.state === 'downloadingMetadata') stats.push({ t: 'Fetching metadata' })
     else if (bt.state === 'checking') stats.push({ t: 'Checking data' })
@@ -253,10 +249,15 @@ function DlRow({
           <div className="flex min-w-0 items-center gap-2.5">
             <p
               className="min-w-0 flex-1 truncate text-[13.5px] font-medium leading-5 tracking-[-0.01em] text-foreground"
-              title={d.files?.[0]?.path || d.gid}
+              title={d.files?.[0]?.path || d.dax?.title || d.gid}
             >
               {name}
             </p>
+            {quality && (
+              <span className="shrink-0 rounded bg-surface-secondary px-1.5 py-px font-mono text-[10.5px] tabular-nums text-muted">
+                {quality}
+              </span>
+            )}
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
             {stats.length > 0 && (
@@ -421,7 +422,9 @@ function PlaylistItemList({
           it.status === 'error' ? (
             <span className="text-(--state-error-fg)">{it.error || 'failed'}</span>
           ) : it.status === 'complete' ? (
-            <span>{fmtBytes(it.total || it.downloaded)}</span>
+            it.total || it.downloaded ? (
+              <span>{fmtBytes(it.total || it.downloaded)}</span>
+            ) : null
           ) : it.status === 'active' ? (
             pct != null ? (
               <span>{pct.toFixed(0)}%</span>
@@ -444,6 +447,11 @@ function PlaylistItemList({
             <span className="min-w-0 flex-1 truncate text-xs text-foreground">
               {it.title || it.url || `Item ${it.index}`}
             </span>
+            {it.duration_secs ? (
+              <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-(--muted-subtle)">
+                {fmtDuration(it.duration_secs)}
+              </span>
+            ) : null}
             <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-muted">
               {tail}
             </span>

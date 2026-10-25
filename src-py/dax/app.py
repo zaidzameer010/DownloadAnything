@@ -17,14 +17,16 @@ itself stays token-guarded.
 import asyncio
 import base64
 import hmac
-import msgspec
+import inspect
+import mimetypes
 import sqlite3
-import structlog
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Iterable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
+import msgspec
+import structlog
 from litestar import Litestar, Request, Response, WebSocket, get
 from litestar.datastructures import State
 from litestar.di import Provide
@@ -35,9 +37,9 @@ from litestar.response import File
 from . import aria2_next, downloads, extract
 from .db import TaskDb
 from .downloads import Registry
-from .log import init_log, clean_text
+from .log import clean_text, init_log
 from .models import DownloadReq, ExtractOptions
-from .settings import AppSettings, DATA_DIR, resolve_ffmpeg
+from .settings import DATA_DIR, AppSettings, resolve_ffmpeg
 
 log = structlog.get_logger(__name__)
 
@@ -81,6 +83,7 @@ def _spawn(shared: Shared, coro: Coroutine[Any, Any, Any]) -> None:
 
 # ---- shared logic -----------------------------------------------------------
 
+
 async def _apply_settings(shared: Shared, data: dict[str, Any]) -> str | None:
     """Persist settings. `data` is the full settings object the UI sends —
     unmentioned fields reset to defaults by design."""
@@ -109,23 +112,24 @@ async def _regenerate(shared: Shared) -> tuple[AppSettings | None, str | None]:
 
 # ---- websocket RPC + push --------------------------------------------------
 
-async def _send_text(
-    shared: Shared, sockets: Iterable[WebSocket], body: bytes
-) -> None:
+
+async def _send_text(shared: Shared, sockets: Iterable[WebSocket], body: bytes) -> None:
     """Send pre-encoded bytes to each socket; a dead socket is evicted early
     (its disconnect handler would drop it anyway)."""
+
     async def one(ws: WebSocket) -> None:
         try:
             await ws.send_text(body)
-        except Exception:
+        except Exception as e:
+            # A dead socket must not fail the broadcast for everyone else;
+            # the disconnect handler would evict it on the next tick.
+            log.debug("websocket send failed", error=str(e))
             shared.ws_clients.discard(ws)
 
     await asyncio.gather(*(one(ws) for ws in list(sockets)))
 
 
-async def _send_msg(
-    shared: Shared, sockets: Iterable[WebSocket], msg: dict[str, Any]
-) -> None:
+async def _send_msg(shared: Shared, sockets: Iterable[WebSocket], msg: dict[str, Any]) -> None:
     """Encode once, then fan out — send_json would re-serialize per socket."""
     await _send_text(shared, sockets, msgspec.json.encode(msg))
 
@@ -134,9 +138,7 @@ async def _broadcast(shared: Shared, msg: dict[str, Any]) -> None:
     await _send_msg(shared, shared.ws_clients, msg)
 
 
-async def _push_state(
-    shared: Shared, sockets: list[WebSocket], *, force: bool = False
-) -> Any:
+async def _push_state(shared: Shared, sockets: list[WebSocket], *, force: bool = False) -> Any:
     """Gather snapshot + engine status once, push to `sockets`. Payloads
     identical to the last broadcast are skipped — the idle tick otherwise
     resends the whole registry every second. `force` sends to a specific
@@ -169,9 +171,7 @@ async def _ws_accept_guard(socket: WebSocket) -> None:
     still let the listener run and accept() after close."""
     shared = socket.scope["app"].state.shared
     token = (socket.query_params or {}).get("token", "")
-    if not hmac.compare_digest(
-        str(token).encode(), shared.settings().api_token.encode()
-    ):
+    if not hmac.compare_digest(str(token).encode(), shared.settings().api_token.encode()):
         raise WebSocketDisconnect(detail="bad token", code=4401)
     await socket.accept()
     shared.ws_clients.add(socket)
@@ -198,8 +198,7 @@ async def _state_broadcast_loop(shared: Shared) -> None:
                     has_active = True
                 stat = snap.get("stat")
                 if isinstance(stat, dict) and (
-                    int(stat.get("numActive") or 0) > 0
-                    or int(stat.get("downloadSpeed") or 0) > 0
+                    int(stat.get("numActive") or 0) > 0 or int(stat.get("downloadSpeed") or 0) > 0
                 ):
                     has_active = True
         except Exception:
@@ -211,18 +210,16 @@ async def _state_broadcast_loop(shared: Shared) -> None:
 
 # ---- method dispatch ---------------------------------------------------------
 
+
 async def _m_extract(shared: Shared, p: dict[str, Any]) -> Any:
     urls = p.get("urls") or []
     # A bare string would be iterated char-by-char downstream.
-    if (
-        not isinstance(urls, list)
-        or not urls
-        or not all(isinstance(u, str) for u in urls)
-    ):
+    if not isinstance(urls, list) or not urls or not all(isinstance(u, str) for u in urls):
         raise ValueError("no urls")
     s = shared.settings()
     merged = s.to_dax_options()
-    for k, v in msgspec.to_builtins(msgspec.convert(p.get("options") or {}, ExtractOptions)).items():
+    incoming = msgspec.to_builtins(msgspec.convert(p.get("options") or {}, ExtractOptions))
+    for k, v in incoming.items():
         if v is not None and v != [] and v != {}:
             merged[k] = v
     opts = msgspec.convert(merged, ExtractOptions)
@@ -256,8 +253,10 @@ def _engine_status_dict(s: AppSettings) -> dict[str, Any]:
 
     try:
         from . import dax_rs  # noqa: F401
+
         rust = True
-    except Exception:
+    except Exception as e:
+        log.debug("rust extractor unavailable", error=str(e))
         rust = False
     features = ["python-ytdlp"]
     if rust:
@@ -268,7 +267,7 @@ def _engine_status_dict(s: AppSettings) -> dict[str, Any]:
         features.append("aria2-next")
     ver = f"yt-dlp {yt_dlp.version.__version__}"
     if s.downloader_engine == "aria2_next" and aria2_bin:
-        a2_ver = daemon._version_info.get("version")
+        a2_ver = daemon.version
         ver = f"{ver} · aria2-next {a2_ver}" if a2_ver else f"{ver} · aria2-next"
     return {
         "running": True,
@@ -284,9 +283,7 @@ async def _m_engine_status(shared: Shared, p: dict[str, Any]) -> Any:
 
 
 async def _m_control(shared: Shared, p: dict[str, Any]) -> Any:
-    r, e = await downloads.control_task(
-        shared, p.get("gid") or "", p.get("action") or ""
-    )
+    r, e = await downloads.control_task(shared, p.get("gid") or "", p.get("action") or "")
     if e is not None:
         raise RuntimeError(e)
     _spawn(shared, _broadcast_state(shared))
@@ -325,16 +322,19 @@ async def _m_push(shared: Shared, p: dict[str, Any]) -> Any:
         contexts=len(p.get("contexts") or []),
         intercepted=(p.get("download") or {}).get("name") or None,
     )
-    await _broadcast(shared, {
-        "type": "dax-push",
-        "payload": {
-            "url": url,
-            "referer": p.get("referer"),
-            "title": p.get("title"),
-            "contexts": p.get("contexts") or [],
-            "download": p.get("download"),
+    await _broadcast(
+        shared,
+        {
+            "type": "dax-push",
+            "payload": {
+                "url": url,
+                "referer": p.get("referer"),
+                "title": p.get("title"),
+                "contexts": p.get("contexts") or [],
+                "download": p.get("download"),
+            },
         },
-    })
+    )
     return {"ok": True}
 
 
@@ -451,13 +451,15 @@ async def _ws_handler(socket: WebSocket, data: Any) -> dict[str, Any]:
         return {"id": None, "error": "bad frame"}
     rid, method = data.get("id"), data.get("method")
     params = data.get("params") or {}
+    if not isinstance(params, dict):
+        return {"id": rid, "error": "params must be an object"}
     fn = _WS_METHODS.get(method or "")
     if fn is None:
         return {"id": rid, "error": f"unknown method {method!r}"}
     shared = socket.scope["app"].state.shared
     try:
         result = fn(shared, params)
-        if asyncio.iscoroutine(result):
+        if inspect.isawaitable(result):
             result = await result
         return {"id": rid, "result": result}
     except Exception as e:
@@ -474,10 +476,14 @@ ws = websocket_listener(
 
 # ---- static UI -------------------------------------------------------------
 
+
 def _resolve_ui_target(path: str) -> Path:
     """Join under UI_DIST and refuse escapes. resolve() normalizes "..";
-    is_relative_to (not a str prefix) keeps a ui/dist2 sibling outside."""
-    t = (UI_DIST / path).resolve()
+    is_relative_to (not a str prefix) keeps a ui/dist2 sibling outside.
+    The catch-all arrives with a leading slash — joining it as-is would make
+    pathlib treat the request as absolute and every asset would fall back to
+    index.html."""
+    t = (UI_DIST / path.lstrip("/")).resolve()
     if not t.is_relative_to(UI_DIST_RESOLVED):
         return UI_DIST / "index.html"
     return t
@@ -497,16 +503,12 @@ def _read_index(path: Path) -> str:
 
 
 @get(["/", "/{path:path}"], include_in_schema=False)
-async def static_ui(
-    shared: Shared, request: Request, path: str = ""
-) -> Response | File:
+async def static_ui(shared: Shared, request: Request, path: str = "") -> Response | File:
     # Litestar hands the catch-all its leading slash: path is "/api/…".
     if path.lstrip("/").startswith(("api", "ws")):
         raise NotFoundException()
     if not UI_DIST.is_dir():
-        return Response(
-            "dax backend running — ui/dist not built", media_type="text/plain"
-        )
+        return Response("dax backend running — ui/dist not built", media_type="text/plain")
     target = _resolve_ui_target(path) if path else UI_DIST / "index.html"
     if not target.is_file():
         target = UI_DIST / "index.html"  # SPA fallback
@@ -533,10 +535,16 @@ async def static_ui(
             media_type="text/html",
             headers={"cache-control": "no-store"},
         )
-    return File(path=target)
+    # File derives the type from `filename` only; without it every bundle
+    # lands as application/octet-stream and module scripts are refused.
+    return File(
+        path=target,
+        media_type=mimetypes.guess_type(target.name)[0] or "application/octet-stream",
+    )
 
 
 # ---- lifecycle ---------------------------------------------------------------
+
 
 def _pause_restored_torrents(shared: Shared) -> None:
     """aria2-next restores its session (torrents come back active) while the
@@ -550,8 +558,9 @@ def _pause_restored_torrents(shared: Shared) -> None:
             continue
         try:
             daemon.rpc.pause(t.gid)
-        except Exception:
-            pass  # not in the session (complete/purged) — nothing to pause
+        except Exception as e:
+            # Not in the session (complete/purged) — nothing to pause.
+            log.debug("torrent not paused", gid=t.gid, error=str(e))
 
 
 async def _on_startup(app: Litestar) -> None:
@@ -576,7 +585,10 @@ async def _on_shutdown(app: Litestar) -> None:
         await asyncio.to_thread(downloads._control_local, shared, None, "pauseAll")
     except Exception as e:
         log.warning("shutdown pause-all failed", error=str(e))
-    await asyncio.to_thread(aria2_next.get_daemon().shutdown)
+    try:
+        await asyncio.to_thread(aria2_next.get_daemon().shutdown)
+    finally:
+        await asyncio.to_thread(shared.db.close)
 
 
 def create_app() -> Litestar:

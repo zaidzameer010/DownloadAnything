@@ -1,5 +1,7 @@
-pub mod client;
-pub mod fetch;
+//! HTTP fetching: one shared client, retries, redirects and a response cap.
 
-pub use client::NetEngine;
+mod client;
+mod fetch;
+
+pub use client::Fetcher;
 pub use fetch::FetchResponse;

@@ -41,21 +41,25 @@ EXTERNAL_DOWNLOADER_MAP: dict[str, str] = {
 }
 
 
-def use_aria2_next(s: "AppSettings") -> bool:
+def use_aria2_next(s: AppSettings) -> bool:
     """True when aria2-next is selected as the downloader engine and available."""
     return s.downloader_engine == "aria2_next" and resolve_aria2_next(s) is not None
 
 
 def configure_ydl_params(
     params: dict[str, Any],
-    task: "Task",
-    s: "AppSettings",
+    task: Task,
+    s: AppSettings,
     daemon: Aria2NextDaemon | None = None,
 ) -> bool:
     """Wire Aria2NextFD into yt-dlp's download params when aria2-next is active."""
     if not use_aria2_next(s):
         return False
     register_ytdlp_downloader()
+    # yt-dlp probes `Aria2NextFD.available("aria2_next")` (name only) when
+    # routing delegated fragment downloads — stamp the configured binary so
+    # the probe resolves the same executable the daemon spawns.
+    Aria2NextFD.exe = resolve_aria2_next(s)
     active_daemon = daemon or get_daemon()
     params["external_downloader"] = dict(EXTERNAL_DOWNLOADER_MAP)
     params["_dax_task"] = task
@@ -64,7 +68,7 @@ def configure_ydl_params(
     return True
 
 
-def prepare_info_for_external(info: dict[str, Any], s: "AppSettings") -> None:
+def prepare_info_for_external(info: dict[str, Any], s: AppSettings) -> None:
     """Clear curl_cffi `impersonate` markers from resolved format dicts right
     before download (`when='before_dl'`) so yt-dlp's `_get_suitable_downloader`
     does not bypass `external_downloader` when `info_dict.get('impersonate')`
@@ -84,7 +88,7 @@ def prepare_info_for_external(info: dict[str, Any], s: "AppSettings") -> None:
 
 def control_task_rpc(
     daemon: Aria2NextDaemon,
-    task: "Task | None",
+    task: Task | None,
     action: str,
 ) -> None:
     """Execute task lifecycle controls against aria2-next over WebSocket RPC."""
@@ -96,7 +100,7 @@ def control_task_rpc(
             case "pauseAll" | "forcePauseAll":
                 rpc.pause_all(force=(action == "forcePauseAll"))
                 return
-            case "unpauseAll" | "resumeAll":
+            case "unpauseAll":
                 rpc.unpause_all()
                 return
             case "purge":
@@ -126,15 +130,7 @@ def control_task_rpc(
                     rpc.unpause(agid)
                 case "finishMedia":
                     rpc.finish_media(agid)
-                case (
-                    "remove"
-                    | "forceRemove"
-                    | "clearResult"
-                    | "delete"
-                    | "deleteFile"
-                    | "download"
-                    | "restart"
-                ):
+                case "remove" | "forceRemove" | "delete" | "download":
                     rpc.evict(agid)
                 case "retry":
                     try:
@@ -153,11 +149,11 @@ def control_task_rpc(
 
 
 __all__ = [
+    "EXTERNAL_DOWNLOADER_MAP",
     "Aria2NextDaemon",
     "Aria2NextFD",
     "Aria2RpcClient",
     "Aria2RpcError",
-    "EXTERNAL_DOWNLOADER_MAP",
     "configure_ydl_params",
     "control_task_rpc",
     "derive_leg_gid",

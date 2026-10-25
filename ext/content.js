@@ -333,9 +333,13 @@
       tooltip.textContent = 'Sending to dax…';
 
       // Prefer the element's own source when it is a plain fetchable file —
-      // blob:/mediasource srcs can't be re-fetched, so those fall back to
-      // the page URL and let the backend pick from sniffed streams.
-      const src = el.currentSrc || el.src || '';
+      // blob:/mediasource srcs can't be re-fetched, so those fall back to a
+      // direct <source> child, then the page URL (sniffed streams).
+      const src =
+        el.currentSrc ||
+        el.src ||
+        el.querySelector?.('source[src^="http"]')?.src ||
+        '';
       const targetUrl = /^https?:\/\//i.test(src) ? src : location.href;
 
       try {

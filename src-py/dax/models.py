@@ -16,11 +16,18 @@ class HeaderPair(Struct, rename="camel"):
 class ContextHeaders(Struct, rename="camel"):
     """Per-origin headers (cookies etc.) replayed on matching-host requests.
     `title` is the page title on the tab the request was sniffed from — it
-    names fallback-path items when no extractor metadata exists."""
+    names fallback-path items when no extractor metadata exists. `kind`,
+    `mime`, `label` and `height` are the extension's capture classification:
+    they let the sniffed fallback keep extensionless streams and show the
+    resolution encoded in the URL."""
 
     url: str = ""
     title: str | None = None
     headers: list[HeaderPair] = field(default_factory=list)
+    kind: str | None = None
+    mime: str | None = None
+    label: str | None = None
+    height: int | None = None
 
 
 class ExtractOptions(Struct, rename="camel"):
@@ -92,6 +99,10 @@ class DownloadReq(Struct, rename="camel"):
 
     url: str = ""
     created_at: int | None = None
+    # The extracted item's own metadata — shown in the task row/details
+    # (the output filename alone loses the original title and runtime).
+    title: str | None = None
+    duration_secs: float | None = None
     filename_hint: str | None = None
     # Verbatim output name, ext included — intercepted browser downloads keep
     # the name Chrome resolved (never appended to like filename_hint is).

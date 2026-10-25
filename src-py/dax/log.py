@@ -9,9 +9,9 @@ foreign_pre_chain.
 """
 
 import logging
-from logging.handlers import RotatingFileHandler
 import os
 import re
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +21,7 @@ import structlog
 LOG_MAX_BYTES = 5_000_000
 
 
-def _json_serializer(d: dict, **kw: Any) -> str:
+def _json_serializer(d: dict[str, Any], **kw: Any) -> str:
     # default=str (overrides structlog's raising fallback): bare exception
     # objects in fields (error=e) serialize instead of dropping the record;
     # ProcessorFormatter needs str back, not orjson's bytes.
@@ -37,7 +37,7 @@ def clean_text(s: str) -> str:
     return _ANSI_RE.sub("", s)
 
 
-_SHARED_PRE: list = [
+_SHARED_PRE: list[Any] = [
     structlog.contextvars.merge_contextvars,
     structlog.stdlib.add_log_level,
     structlog.stdlib.add_logger_name,
@@ -47,7 +47,7 @@ _SHARED_PRE: list = [
 ]
 
 # stdlib records (third-party libs, uvicorn) enter the chain mid-way.
-_FOREIGN_PRE: list = [
+_FOREIGN_PRE: list[Any] = [
     structlog.stdlib.add_log_level,
     structlog.stdlib.add_logger_name,
     structlog.stdlib.ExtraAdder(),
@@ -65,8 +65,10 @@ def is_debug_enabled() -> bool:
 
 def init_log(log_path: Path | None) -> None:
     """Colored console at env-or-info level; JSON-lines file at debug."""
-    level = logging.DEBUG if is_debug_enabled() else getattr(
-        logging, os.environ.get("DAX_LOG", "INFO").upper(), logging.INFO
+    level = (
+        logging.DEBUG
+        if is_debug_enabled()
+        else getattr(logging, os.environ.get("DAX_LOG", "INFO").upper(), logging.INFO)
     )
 
     structlog.configure(
@@ -98,9 +100,7 @@ def init_log(log_path: Path | None) -> None:
 
     # websockets DEBUG dumps every wire frame — uvicorn's ws protocol logs
     # each frame, so INFO+ here unless an explicit debug level is requested.
-    logging.getLogger("websockets").setLevel(
-        level if level <= logging.DEBUG else logging.WARNING
-    )
+    logging.getLogger("websockets").setLevel(level if level <= logging.DEBUG else logging.WARNING)
 
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,15 +117,13 @@ def init_log(log_path: Path | None) -> None:
                     foreign_pre_chain=_FOREIGN_PRE,
                     processors=[
                         structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-                        structlog.processors.JSONRenderer(
-                            serializer=_json_serializer
-                        ),
+                        structlog.processors.JSONRenderer(serializer=_json_serializer),
                     ],
                 )
             )
             root.addHandler(fh)
         except OSError as e:
-            print(f"dax: cannot open log file {log_path}: {e}")
+            logging.getLogger(__name__).warning("cannot open log file %s: %s", log_path, e)
 
     if "RUST_LOG" not in os.environ:
         if is_debug_enabled():
@@ -136,6 +134,9 @@ def init_log(log_path: Path | None) -> None:
 
     try:
         from . import dax_rs
+
         dax_rs.init_logging(os.environ["RUST_LOG"])
-    except Exception:
-        pass
+    except Exception as e:
+        # The Rust bridge is optional (built by scripts/bundle-backend.ts); a
+        # missing or stale extension must not break logging setup.
+        logging.getLogger(__name__).debug("dax_rs logging bridge unavailable", error=e)

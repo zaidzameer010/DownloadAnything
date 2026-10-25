@@ -7,6 +7,17 @@ const DEFAULT_CONFIG = {
   apiToken: '',
 };
 
+const BADGE_OK = '#10b981';
+const BADGE_ERR = '#ef4444';
+const BADGE_BUSY = '#f59e0b';
+
+/** Set (or clear) the per-tab action badge. */
+function setBadge(tabId, text, color) {
+  if (tabId == null || tabId < 0) return;
+  chrome.action.setBadgeText({ text, tabId }).catch(() => {});
+  if (color) chrome.action.setBadgeBackgroundColor({ color, tabId }).catch(() => {});
+}
+
 let cachedConfig = null;
 
 async function getConfig() {
@@ -176,8 +187,45 @@ async function rpc(method, params = {}) {
 }
 
 // ---- Media Sniffing & Stream Capture ----
-const CAPTURE_MAX = 12;
+const CAPTURE_MAX = 32;
 const HEADER_ALLOW = /^(?:cookie|referer|user-agent|accept-language|authorization|x-)/;
+const MEDIA_EXT_RE =
+  /^(?:mp4|webm|mkv|mov|m4v|ts|mp3|m4a|opus|wav|flac|aac)$/;
+const RETIRED_EXT = new Set([
+  'ogg', 'oga', 'avi', '3gp', 'wmv', 'flv', 'mpg', 'mpeg', 'wma', 'aiff', 'm2ts', 'alac',
+]);
+const SEGMENT_PREFIX_TS_RE = /^(?:seg|segment|chunk|init|frag|part|range|piece)/;
+const SEGMENT_PREFIX_RE = /^(?:seg|segment|chunk|init|frag)/;
+
+function urlParts(url) {
+  try {
+    const u = new URL(url, 'http://localhost');
+    const path = u.pathname;
+    const base = path.split('/').filter(Boolean).pop() || '';
+    const dot = base.lastIndexOf('.');
+    return {
+      path,
+      stem: (dot > 0 ? base.slice(0, dot) : base).toLowerCase(),
+      ext: dot > 0 ? base.slice(dot + 1).toLowerCase() : '',
+      query: u.search.toLowerCase().replace(/^\?/, ''),
+    };
+  } catch {
+    return { path: '', stem: '', ext: '', query: '' };
+  }
+}
+
+const MASTER_STEMS = ['master', 'manifest', 'multivariant', 'multi', 'playlist'];
+function isMasterPlaylist(stem, query) {
+  return MASTER_STEMS.some((t) => stem.includes(t)) || /(?:^|&)multi=/.test(query);
+}
+
+// Resolution encoded in the URL stem (`…-720p.mp4`, `…_1080p_av1.mp4`).
+function heightFromUrl(url) {
+  const { stem } = urlParts(url);
+  const m = stem.match(/(?:^|[^0-9])(\d{3,4})p(?:[^0-9]|$)/);
+  const h = m ? Number(m[1]) : 0;
+  return h >= 144 && h <= 4320 ? h : 0;
+}
 
 function filterHeaders(raw) {
   return raw
@@ -254,40 +302,35 @@ function queuePersist() {
 }
 
 function mediaKindOf(url, mime) {
-  const lowerUrl = url.toLowerCase();
-  const path = (new URL(url, 'http://localhost')).pathname.toLowerCase();
+  mime = (mime || '').toLowerCase();
+  const { stem, ext, query } = urlParts(url);
+  if (RETIRED_EXT.has(ext)) return null;
 
-  if (/\.m3u8(?:[?#]|$)/.test(lowerUrl) || /mpegurl/i.test(mime)) {
-    const isMaster = lowerUrl.includes('master');
-    return { kind: isMaster ? 'hls-master' : 'hls', manifest: true, label: isMaster ? 'HLS Master' : 'HLS Stream' };
+  if (ext === 'm3u8' || ext === 'm3u' || /mpegurl/i.test(mime)) {
+    const master = isMasterPlaylist(stem, query);
+    return { kind: master ? 'hls-master' : 'hls', manifest: true, label: master ? 'HLS Master' : 'HLS Stream' };
   }
-  if (/\.mpd(?:[?#]|$)/.test(lowerUrl) || /dash\+xml/i.test(mime)) {
+  if (ext === 'mpd' || /dash\+xml/i.test(mime)) {
     return { kind: 'dash', manifest: true, label: 'DASH Manifest' };
   }
   if (/^(?:video|audio)\//i.test(mime) && !mime.includes('mp2t')) {
-    const ext = path.split('.').pop() || 'media';
-    return { kind: 'file', manifest: false, label: ext.toUpperCase() };
+    return { kind: 'file', manifest: false, label: (ext || 'media').toUpperCase() };
   }
-  if (/\.(?:mp4|webm|mkv|mov|m4v|flv|mp3|m4a|ogg|opus|wav|flac|aac)(?:[/?#]|$)/.test(path)) {
-    const ext = path.split('.').pop() || 'media';
+  if (MEDIA_EXT_RE.test(ext)) {
     return { kind: 'file', manifest: false, label: ext.toUpperCase() };
   }
   return null;
 }
 
 function isSegment(url) {
-  try {
-    const path = new URL(url).pathname;
-    const base = path.split('/').filter(Boolean).pop() ?? '';
-    const dot = base.lastIndexOf('.');
-    if (dot < 0) return false;
-    const ext = base.slice(dot + 1).toLowerCase();
-    if (ext === 'm3u8' || ext === 'mpd') return false;
-    const stem = base.slice(0, dot).toLowerCase();
-    return /^(?:seg|segment|chunk|init|frag|part|range|piece)/.test(stem) || /^\d+$/.test(stem);
-  } catch {
-    return false;
-  }
+  const { stem, ext } = urlParts(url);
+  if (!ext || ext === 'm3u8' || ext === 'm3u' || ext === 'mpd') return false;
+  if (/^\d+$/.test(stem)) return true;
+  // "part" is a segment prefix only for transport-stream chunks — a real
+  // file named `part1.mp4` must stay capturable.
+  const prefixes =
+    ext === 'ts' || ext === 'm4s' ? SEGMENT_PREFIX_TS_RE : SEGMENT_PREFIX_RE;
+  return prefixes.test(stem);
 }
 
 function mimeOf(rawHeaders) {
@@ -304,12 +347,7 @@ function mimeOf(rawHeaders) {
 async function updateBadge(tabId) {
   if (tabId <= 0) return;
   const count = (captured.get(tabId) ?? []).length;
-  if (count > 0) {
-    chrome.action.setBadgeText({ text: String(count), tabId }).catch(() => {});
-    chrome.action.setBadgeBackgroundColor({ color: '#10b981', tabId }).catch(() => {});
-  } else {
-    chrome.action.setBadgeText({ text: '', tabId }).catch(() => {});
-  }
+  setBadge(tabId, count > 0 ? String(count) : '', count > 0 ? BADGE_OK : undefined);
 }
 
 async function rememberMedia(tabId, url, headers, mime) {
@@ -325,6 +363,7 @@ async function rememberMedia(tabId, url, headers, mime) {
     if (headers.length) existing.headers = headers;
     if (match.kind) existing.kind = match.kind;
     if (match.label) existing.label = match.label;
+    if (!existing.height) existing.height = heightFromUrl(url);
   } else {
     list.push({
       url,
@@ -334,6 +373,7 @@ async function rememberMedia(tabId, url, headers, mime) {
       kind: match.kind,
       label: match.label,
       mime: mime || '',
+      height: heightFromUrl(url),
     });
   }
 
@@ -363,6 +403,8 @@ async function captureContexts(tabId, title = '') {
     headers: m.headers,
     kind: m.kind,
     label: m.label,
+    mime: m.mime || '',
+    ...(m.height ? { height: m.height } : {}),
     // Page title of the tab the request was sniffed on — names the
     // extension-fallback item when no extractor metadata exists.
     ...(title ? { title } : {}),
@@ -559,19 +601,13 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       url: targetUrl,
       referer: pageUrl,
       title,
-      contexts: contexts.slice(0, 8),
+      contexts: contexts.slice(0, 16),
     });
-    if (tabId) {
-      chrome.action.setBadgeText({ text: '✓', tabId }).catch(() => {});
-      chrome.action.setBadgeBackgroundColor({ color: '#10b981', tabId }).catch(() => {});
-      setTimeout(() => updateBadge(tabId).catch(() => {}), 2000);
-    }
+    setBadge(tabId, '✓', BADGE_OK);
+    setTimeout(() => updateBadge(tabId).catch(() => {}), 2000);
   } catch (err) {
-    if (tabId) {
-      chrome.action.setBadgeText({ text: '!', tabId }).catch(() => {});
-      chrome.action.setBadgeBackgroundColor({ color: '#ef4444', tabId }).catch(() => {});
-      setTimeout(() => updateBadge(tabId).catch(() => {}), 3000);
-    }
+    setBadge(tabId, '!', BADGE_ERR);
+    setTimeout(() => updateBadge(tabId).catch(() => {}), 3000);
   }
 });
 
@@ -593,33 +629,24 @@ chrome.action.onClicked.addListener(async (tab) => {
 
   const contexts = tabId ? await captureContexts(tabId, title) : [];
 
-  if (tabId) {
-    chrome.action.setBadgeText({ text: '…', tabId }).catch(() => {});
-    chrome.action.setBadgeBackgroundColor({ color: '#f59e0b', tabId }).catch(() => {});
-  }
+  setBadge(tabId, '…', BADGE_BUSY);
 
   try {
     await rpc('push', {
       url: pageUrl,
       referer: pageUrl,
       title,
-      contexts: contexts.slice(0, 8),
+      contexts: contexts.slice(0, 16),
     });
-    if (tabId) {
-      chrome.action.setBadgeText({ text: '✓', tabId }).catch(() => {});
-      chrome.action.setBadgeBackgroundColor({ color: '#10b981', tabId }).catch(() => {});
-      setTimeout(() => updateBadge(tabId).catch(() => {}), 2000);
-    }
+    setBadge(tabId, '✓', BADGE_OK);
+    setTimeout(() => updateBadge(tabId).catch(() => {}), 2000);
   } catch (err) {
     const isBadToken = String(err?.message || err).toLowerCase().includes('token');
     if (isBadToken) {
       chrome.runtime.openOptionsPage();
     }
-    if (tabId) {
-      chrome.action.setBadgeText({ text: '!', tabId }).catch(() => {});
-      chrome.action.setBadgeBackgroundColor({ color: '#ef4444', tabId }).catch(() => {});
-      setTimeout(() => updateBadge(tabId).catch(() => {}), 3000);
-    }
+    setBadge(tabId, '!', BADGE_ERR);
+    setTimeout(() => updateBadge(tabId).catch(() => {}), 3000);
   }
 });
 
@@ -633,9 +660,7 @@ async function handlePush({ pageUrl, referer, title, tabId: explicitTabId }, sen
     (tabId != null ? await domTitle(tabId) : '') || title || sender?.tab?.title || '';
   const contexts = tabId != null ? await captureContexts(tabId, resolvedTitle) : [];
   const flash = (text, color) => {
-    if (tabId == null || tabId < 0) return;
-    chrome.action.setBadgeText({ text, tabId }).catch(() => {});
-    chrome.action.setBadgeBackgroundColor({ color, tabId }).catch(() => {});
+    setBadge(tabId, text, color);
     setTimeout(() => updateBadge(tabId).catch(() => {}), 2000);
   };
   try {
@@ -643,7 +668,7 @@ async function handlePush({ pageUrl, referer, title, tabId: explicitTabId }, sen
       url: pageUrl,
       referer: referer || sender?.tab?.url || pageUrl,
       title: resolvedTitle,
-      contexts: contexts.slice(0, 8),
+      contexts: contexts.slice(0, 16),
     });
     // Magnet clicks and overlay buttons push through here — flash the tab
     // badge so the user sees the URI landed even without a dialog focus.

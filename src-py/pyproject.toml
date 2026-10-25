@@ -16,3 +16,34 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "C4", "PIE", "RUF"]
+ignore = [
+    # En/em dashes and arrows are deliberate in comments and docstrings.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dax"]
+
+[tool.ruff.lint.per-file-ignores]
+# The contract suite is a single long-lived script with deliberate local
+# imports and fixture lambdas; style is enforced on the package, not here.
+"test_contract.py" = [
+    "E401",
+    "E501",
+    "E741",
+    "E731",
+    "I001",
+    "RUF005",
+    "RUF012",
+    "SIM105",
+    "UP037",
+]

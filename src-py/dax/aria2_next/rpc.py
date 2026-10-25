@@ -9,6 +9,7 @@ lifecycle notifications (`aria2.onDownloadStart`, `aria2.onDownloadPause`,
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import threading
 import time
@@ -57,7 +58,7 @@ def format_rpc_options(options: dict[str, Any] | None) -> dict[str, Any]:
 
 
 class _PendingCall:
-    __slots__ = ("event", "result", "error")
+    __slots__ = ("error", "event", "result")
 
     def __init__(self) -> None:
         self.event = threading.Event()
@@ -127,7 +128,9 @@ class Aria2RpcClient:
                 self.ws_url,
                 open_timeout=min(self.timeout, 5.0),
                 close_timeout=2.0,
-                max_size=16 * 1024 * 1024,
+                # tellStatus/inspectTorrent on a large torrent returns a
+                # file entry per member — tens of thousands is realistic.
+                max_size=64 * 1024 * 1024,
                 compression=None,
             )
             self._ws = ws
@@ -143,10 +146,7 @@ class Aria2RpcClient:
         try:
             while True:
                 raw = ws.recv()
-                if isinstance(raw, str):
-                    raw_bytes = raw.encode("utf-8")
-                else:
-                    raw_bytes = bytes(raw)
+                raw_bytes = raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
                 try:
                     msg = msgspec.json.decode(raw_bytes)
                 except msgspec.DecodeError:
@@ -157,23 +157,18 @@ class Aria2RpcClient:
                     self._handle_response(msg)
                 elif "method" in msg:
                     self._handle_notification(msg)
-        except (WebSocketException, OSError, EOFError) as e:
-            should_fail = False
-            with self._conn_lock:
-                if self._ws is ws:
-                    self._ws = None
-                    should_fail = True
-            if should_fail:
-                self._fail_all_pending(ConnectionError(f"aria2-next WebSocket closed: {e}"))
         except Exception as e:
-            log.debug("aria2-next ws reader exited", error=str(e))
+            transport = isinstance(e, (WebSocketException, OSError, EOFError))
+            if not transport:
+                log.debug("aria2-next ws reader exited", error=str(e))
             should_fail = False
             with self._conn_lock:
                 if self._ws is ws:
                     self._ws = None
                     should_fail = True
             if should_fail:
-                self._fail_all_pending(e)
+                err = ConnectionError(f"aria2-next WebSocket closed: {e}") if transport else e
+                self._fail_all_pending(err)
         finally:
             with self._conn_lock:
                 if self._ws is ws:
@@ -228,10 +223,8 @@ class Aria2RpcClient:
             ws = self._ws
             self._ws = None
         if ws is not None:
-            try:
+            with contextlib.suppress(Exception):
                 ws.close()
-            except Exception:
-                pass
         self._fail_all_pending(ConnectionError("aria2-next RPC disconnected"))
 
     def _auth_params(self, params: list[Any] | None) -> list[Any]:
@@ -284,7 +277,9 @@ class Aria2RpcClient:
             if slot.error is not None:
                 if isinstance(slot.error, Aria2RpcError):
                     raise Aria2RpcError(slot.error.code, slot.error.rpc_message, method)
-                if attempt == 0 and isinstance(slot.error, (ConnectionError, OSError, WebSocketException)):
+                if attempt == 0 and isinstance(
+                    slot.error, (ConnectionError, OSError, WebSocketException)
+                ):
                     last_err = slot.error
                     continue
                 raise slot.error
@@ -370,17 +365,13 @@ class Aria2RpcClient:
         Without the retry the gid stays occupied and a re-add fails. Gids
         absent from the session bail fast — stale fragment ids would
         otherwise burn the full retry budget each."""
-        try:
+        with contextlib.suppress(Aria2RpcError):
             self.remove(gid, force=True)
-        except Aria2RpcError:
-            pass
         try:
             self.tell_status(gid, ["status"])
         except Aria2RpcError:
-            try:
+            with contextlib.suppress(Aria2RpcError):
                 self.remove_download_result(gid)
-            except Aria2RpcError:
-                pass
             return
         for _ in range(10):
             try:

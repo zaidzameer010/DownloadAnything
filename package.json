@@ -2,9 +2,10 @@
   "name": "dax",
   "private": true,
   "scripts": {
-    "tauri": "ui/node_modules/.bin/tauri",
-    "dev": "ui/node_modules/.bin/tauri dev",
-    "build": "ui/node_modules/.bin/tauri build",
+    "tauri": "bun ui/node_modules/@tauri-apps/cli/tauri.js",
+    "dev": "bun ui/node_modules/@tauri-apps/cli/tauri.js dev",
+    "build": "bun ui/node_modules/@tauri-apps/cli/tauri.js build",
+    "backend:bundle": "bun scripts/bundle-backend.ts",
     "ui:dev": "bun --cwd ui dev",
     "ui:build": "bun --cwd ui build"
   },
