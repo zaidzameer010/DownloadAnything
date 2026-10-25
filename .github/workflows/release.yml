@@ -58,7 +58,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install UI dependencies
-        run: bun --cwd ui install
+        run: bun install --cwd ui
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
