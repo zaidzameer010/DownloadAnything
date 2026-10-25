@@ -119,7 +119,9 @@ if (!isWindows) {
   })()
   const stagedPython = join(resources, 'venv', 'bin', 'python')
   rmSync(stagedPython, { force: true })
-  cpSync(join(resources, 'python', 'bin', pythonName), stagedPython)
+  // Resolve through uv's real install — the staged copy may have dropped
+  // python3.x itself if it was an absolute symlink on the build machine.
+  cpSync(realpathSync(join(home, pythonName)), stagedPython)
   chmodSync(stagedPython, 0o755)
 }
 
