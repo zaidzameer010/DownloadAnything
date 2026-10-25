@@ -1,6 +1,4 @@
 /target
-crates/dax-core/target
-/src
 src-py/dax-core/target
 /aria2-next-*
 /cookies.txt
@@ -10,3 +8,7 @@ src-py/.venv/
 __pycache__/
 src-py/dax/dax_rs.so
 .env
+src-tauri/binaries/
+src-tauri/resources/backend/
+src-tauri/resources/venv/
+src-tauri/resources/python/
