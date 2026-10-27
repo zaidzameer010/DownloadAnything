@@ -9,5 +9,6 @@ src-py/downloadanything/downloadanything_rs.so
 .env
 src-tauri/binaries/
 src-tauri/resources/backend/
+src-tauri/resources/extension/
 src-tauri/resources/venv/
 src-tauri/resources/python/
