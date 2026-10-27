@@ -1,4 +1,4 @@
-// dax extension settings — token + port pairing with the desktop engine.
+// DownloadAnything extension settings — token + port pairing with the desktop engine.
 
 const $ = (id) => document.getElementById(id);
 
@@ -10,6 +10,8 @@ const portInput = $('port');
 const btnSave = $('btn-save');
 const btnToggleToken = $('btn-toggle-token');
 const btnPasteToken = $('btn-paste-token');
+
+$('version-tag').textContent = `v${chrome.runtime.getManifest().version}`;
 
 function setStatus(state, label, detail = '') {
   statusBadge.className = `status-badge${state ? ` ${state}` : ''}`;
@@ -26,7 +28,7 @@ async function checkConnection() {
       const version = res.data?.engine?.version || 'yt-dlp';
       setStatus('connected', 'Connected', `${version} running${latency ? ` · ${latency}` : ''}`);
     } else {
-      const err = res?.error || 'Unreachable — is dax running?';
+      const err = res?.error || 'Unreachable — is DownloadAnything running?';
       setStatus('error', err.toLowerCase().includes('token') ? 'Bad Token' : 'Offline', err);
     }
   } catch (e) {
@@ -55,7 +57,7 @@ async function load() {
   tokenInput.value = (c.apiToken || '').trim();
   portInput.value = Number(c.apiPort) || 16801;
   if (tokenInput.value) checkConnection();
-  else setStatus('', 'No Token', 'Paste the token from dax → Options → Engine');
+  else setStatus('', 'No Token', 'Paste the token from DownloadAnything → Options → Engine');
 }
 
 btnToggleToken.addEventListener('click', (e) => {

@@ -18,6 +18,7 @@ export interface PushPayload {
   url: string
   referer?: string
   title?: string
+  thumbnail?: string
   contexts?: RequestContext[]
   download?: ChromeDownloadMeta
 }
@@ -42,7 +43,7 @@ declare global {
       }
     }
     /** Injected by the backend's static index.html serving. */
-    __DAX_TOKEN__?: string
+    __DOWNLOADANYTHING_TOKEN__?: string
   }
 }
 
@@ -51,9 +52,9 @@ declare global {
 // Inside the Tauri webview invoke() needs no credentials. Everywhere else the
 // backend's /ws carries everything on a single socket:
 //   request  {"id":n,"method":…,"params":{…}} → {"id":n,"result"|"error":…}
-//   server push {"type":"dax-push","payload":{…}}
+//   server push {"type":"downloadanything-push","payload":{…}}
 // The bearer token rides the query string — injected into index.html
-// (__DAX_TOKEN__) or stored in localStorage.daxToken (paste once, like the
+// (__DOWNLOADANYTHING_TOKEN__) or stored in localStorage.downloadanythingToken (paste once, like the
 // extension options page).
 
 function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -65,12 +66,12 @@ function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T>
 }
 
 function token(): string {
-  return window.__DAX_TOKEN__ ?? localStorage.getItem('daxToken') ?? ''
+  return window.__DOWNLOADANYTHING_TOKEN__ ?? localStorage.getItem('downloadanythingToken') ?? ''
 }
 
 /** Bearer token for dev/manual contexts — paste once, persists in localStorage. */
 function setApiToken(t: string) {
-  localStorage.setItem('daxToken', t)
+  localStorage.setItem('downloadanythingToken', t)
 }
 
 // Vite dev pairing: open /?token=<api token> once — stores it like the
@@ -92,7 +93,7 @@ function wsUrl(): string {
   // Injected token (backend-served page): same origin, token in the query.
   // Stored token (paired dev/file/Tauri webview): loopback API directly.
   // No token (vite dev): same origin — the dev proxy injects it.
-  const host = window.__DAX_TOKEN__
+  const host = window.__DOWNLOADANYTHING_TOKEN__
     ? location.host
     : t
       ? `127.0.0.1:${wsPort}`
@@ -101,6 +102,18 @@ function wsUrl(): string {
   const proto = isLoopback ? 'ws' : (location.protocol === 'https:' ? 'wss' : 'ws')
   const q = t ? `?token=${encodeURIComponent(t)}` : ''
   return `${proto}://${host}/ws${q}`
+}
+
+/** Thumbnail proxy URL — CDNs that hotlink-protect 403 the webview's own
+ *  Referer; the backend fetches with the page referer instead. */
+export function thumbUrl(url?: string | null, referer?: string | null): string {
+  if (!url || url.startsWith('data:')) return url ?? ''
+  const t = token()
+  if (!t) return url
+  const base = window.__DOWNLOADANYTHING_TOKEN__ ? '' : `http://127.0.0.1:${wsPort}`
+  const q = new URLSearchParams({ u: url, token: t })
+  if (referer) q.set('r', referer)
+  return `${base}/thumb?${q.toString()}`
 }
 
 interface Pending {
@@ -122,9 +135,9 @@ let lastEngine: EngineStatus | null = null
 
 let warnedNoToken = false
 
-// Inside the Tauri webview nothing injects __DAX_TOKEN__ (the page comes from
+// Inside the Tauri webview nothing injects __DOWNLOADANYTHING_TOKEN__ (the page comes from
 // frontendDist, not the server), so fetch token+port over IPC once —
-// backend_info reads the settings row in dax.db the backend owns.
+// backend_info reads the settings row in downloadanything.db the backend owns.
 let backendInfo: Promise<void> | null = null
 
 function ensureBackendInfo(): Promise<void> {
@@ -163,7 +176,7 @@ function wsConnect(): Promise<void> {
   if (!token() && !warnedNoToken && !inTauri()) {
     warnedNoToken = true
     console.error(
-      '[dax] no api token — open this page with ?token=<api token> once ' +
+      '[downloadanything] no api token — open this page with ?token=<api token> once ' +
         '(it persists to localStorage), or serve the UI from ' +
         `http://127.0.0.1:${wsPort}/ which injects it automatically`,
     )
@@ -184,7 +197,7 @@ function wsConnect(): Promise<void> {
       } catch {
         return
       }
-      if (msg.type === 'dax-push' && msg.payload) {
+      if (msg.type === 'downloadanything-push' && msg.payload) {
         pushListeners.forEach((cb) => cb(msg.payload as PushPayload))
         return
       }
@@ -225,7 +238,7 @@ function wsConnect(): Promise<void> {
       if (fatal && !warnedNoToken) {
         warnedNoToken = true
         console.error(
-          `[dax] websocket rejected (code ${ev.code}) — bad or missing ` +
+          `[downloadanything] websocket rejected (code ${ev.code}) — bad or missing ` +
             'api token; open this page with ?token=<api token> once',
         )
       }
@@ -270,7 +283,7 @@ async function rpc<T>(method: string, params?: Record<string, unknown>): Promise
   })
 }
 
-const inTauri = () => !!window.__TAURI__?.core?.invoke
+export const inTauri = () => !!window.__TAURI__?.core?.invoke
 
 export function extractMedia(
   urls: string[],
@@ -291,7 +304,7 @@ export async function regenerateTokens() {
   const s = await rpc<AppSettings>('regenerate_tokens')
   if (s.apiToken) {
     setApiToken(s.apiToken)
-    if (window.__DAX_TOKEN__) window.__DAX_TOKEN__ = s.apiToken
+    if (window.__DOWNLOADANYTHING_TOKEN__) window.__DOWNLOADANYTHING_TOKEN__ = s.apiToken
   }
   return s
 }
@@ -334,7 +347,7 @@ export function setTorrentFiles(gid: string, indices: number[]) {
   })
 }
 
-/** UI-side failures land in dax.log next to the backend's. Fire-and-forget. */
+/** UI-side failures land in downloadanything.log next to the backend's. Fire-and-forget. */
 export function logError(context: string, e: unknown) {
   console.error(`[${context}]`, e)
   const detail = e instanceof Error ? (e.stack || e.message) : String(e)
@@ -354,7 +367,7 @@ async function listen<T>(
   }
 }
 
-/** Extension → ws `push` method → "dax-push". */
+/** Extension → ws `push` method → "downloadanything-push". */
 export const onPush = (cb: (p: PushPayload) => void) => listen(pushListeners, cb)
 
 /** Live task-state snapshots broadcast by the backend. */
@@ -379,7 +392,7 @@ export async function focusWindow() {
   }
 }
 
-/** Payload of `dax-update-ready` — emitted by the Rust updater task after a
+/** Payload of `downloadanything-update-ready` — emitted by the Rust updater task after a
  *  newer release was downloaded and installed. */
 export interface UpdateReady {
   version: string
@@ -391,10 +404,47 @@ export interface UpdateReady {
 export function onUpdateReady(cb: (u: UpdateReady) => void): Promise<() => void> {
   const listen = window.__TAURI__?.event?.listen
   if (!listen) return Promise.resolve(() => {})
-  return listen<UpdateReady>('dax-update-ready', (e) => cb(e.payload))
+  return listen<UpdateReady>('downloadanything-update-ready', (e) => cb(e.payload))
 }
 
 /** Restarts the app to apply an installed update. */
 export function restartApp() {
   return tauriInvoke<void>('restart_app')
+}
+
+export interface BrowserInfo {
+  id: string
+  name: string
+  path: string
+  running: boolean
+}
+
+export interface ExtensionSetup {
+  path: string
+  browsers: BrowserInfo[]
+}
+
+export interface InstallOutcome {
+  sessionLoad: boolean
+  needsRestart: boolean
+}
+
+/** Bundled extension folder plus every Chromium-based browser found locally. */
+export function extensionSetup() {
+  return tauriInvoke<ExtensionSetup>('extension_setup')
+}
+
+/** Opens the browser's extensions page and reveals the bundled folder. */
+export function installExtension(id: string) {
+  return tauriInvoke<InstallOutcome>('install_extension', { id })
+}
+
+/** Quits the browser, then relaunches it with the extension loaded. */
+export function restartBrowserWithExtension(id: string) {
+  return tauriInvoke<InstallOutcome>('restart_browser_with_extension', { id })
+}
+
+/** Reveals the bundled extension folder in Finder/Explorer. */
+export function revealExtension() {
+  return tauriInvoke<void>('reveal_extension')
 }

@@ -1,5 +1,6 @@
-// Stages everything `tauri build` bundles for the Python backend:
-//   src-tauri/resources/backend  the `dax` package, including dax_rs.so
+// Stages everything `tauri build` bundles for the backend and browser extension:
+//   src-tauri/resources/backend  the `downloadanything` package, including downloadanything_rs.so
+//   src-tauri/resources/extension  the browser extension
 //   src-tauri/resources/venv     the uv venv, pyvenv.cfg relocated to `../python`
 //   src-tauri/resources/python   the uv-managed CPython install
 //   src-tauri/binaries/aria2-next-<triple>  the external binary Tauri renames
@@ -50,7 +51,9 @@ function run(
 }
 
 const skipCache = (src: string) =>
-  !src.split(/[\\/]/).includes('__pycache__') && !src.endsWith('.pyc')
+  !src.split(/[\\/]/).includes('__pycache__') &&
+  !src.endsWith('.pyc') &&
+  !src.endsWith('.DS_Store')
 
 // uv's install and the venv link python3 to the build machine's absolute
 // paths. They are unused (we launch venv/bin/python) and would either dangle
@@ -74,15 +77,23 @@ const venvPython = isWindows
   : join(venv, 'bin', 'python')
 if (!existsSync(venvPython)) throw new Error(`venv python missing: ${venvPython}`)
 
-// 2. dax_rs PyO3 extension, built against the interpreter it ships with
-run('cargo', ['build', '--release', '-p', 'dax_rs'], { env: { PYO3_PYTHON: venvPython } })
-const dylib = isWindows ? 'dax_rs.dll' : isMac ? 'libdax_rs.dylib' : 'libdax_rs.so'
-cpSync(join(root, 'target', 'release', dylib), join(srcPy, 'dax', isWindows ? 'dax_rs.pyd' : 'dax_rs.so'))
+// 2. downloadanything_rs PyO3 extension, built against the interpreter it ships with
+run('cargo', ['build', '--release', '-p', 'downloadanything_rs'], { env: { PYO3_PYTHON: venvPython } })
+const dylib = isWindows ? 'downloadanything_rs.dll' : isMac ? 'libdownloadanything_rs.dylib' : 'libdownloadanything_rs.so'
+const extPath = join(srcPy, 'downloadanything', isWindows ? 'downloadanything_rs.pyd' : 'downloadanything_rs.so')
+// Overwriting a signed dylib in place keeps its provenance xattr, and macOS
+// then kills every process that loads it ("Invalid Page"). Replace the file.
+rmSync(extPath, { force: true })
+cpSync(join(root, 'target', 'release', dylib), extPath)
 
 // 3. Stage the package, the venv, and the interpreter it was built from
 rmSync(resources, { recursive: true, force: true })
 mkdirSync(resources, { recursive: true })
-cpSync(join(srcPy, 'dax'), join(resources, 'backend', 'dax'), {
+cpSync(join(srcPy, 'downloadanything'), join(resources, 'backend', 'downloadanything'), {
+  recursive: true,
+  filter: skipCache,
+})
+cpSync(join(root, 'ext'), join(resources, 'extension'), {
   recursive: true,
   filter: skipCache,
 })

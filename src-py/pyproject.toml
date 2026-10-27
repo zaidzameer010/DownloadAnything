@@ -1,7 +1,7 @@
 [project]
-name = "dax-py"
+name = "downloadanything-py"
 version = "0.7.0"
-description = "dax backend — Python port (yt-dlp + vendored Rust extractor)"
+description = "DownloadAnything backend — Python port (yt-dlp + vendored Rust extractor)"
 requires-python = ">=3.14"
 dependencies = [
     "yt-dlp[default,curl-cffi]>=2026.8.19",
@@ -31,7 +31,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["dax"]
+known-first-party = ["downloadanything"]
 
 [tool.ruff.lint.per-file-ignores]
 # The contract suite is a single long-lived script with deliberate local

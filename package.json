@@ -1,5 +1,5 @@
 {
-  "name": "dax",
+  "name": "downloadanything",
   "private": true,
   "scripts": {
     "tauri": "bun ui/node_modules/@tauri-apps/cli/tauri.js",

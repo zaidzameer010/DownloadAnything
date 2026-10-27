@@ -1,5 +1,5 @@
-// dax extension service worker (MV3)
-// Handles RPC communication with dax backend, network stream sniffing,
+// DownloadAnything extension service worker (MV3)
+// Handles RPC communication with DownloadAnything backend, network stream sniffing,
 // context menus, and tab badge feedback.
 
 const DEFAULT_CONFIG = {
@@ -16,6 +16,12 @@ function setBadge(tabId, text, color) {
   if (tabId == null || tabId < 0) return;
   chrome.action.setBadgeText({ text, tabId }).catch(() => {});
   if (color) chrome.action.setBadgeBackgroundColor({ color, tabId }).catch(() => {});
+}
+
+/** Flash a result on the tab badge, then restore the capture count. */
+function flashBadge(tabId, text, color, delay = 2000) {
+  setBadge(tabId, text, color);
+  setTimeout(() => updateBadge(tabId).catch(() => {}), delay);
 }
 
 let cachedConfig = null;
@@ -94,7 +100,7 @@ async function getConnectedSocket() {
       if (settled) return;
       settled = true;
       try { ws.close(); } catch {}
-      reject(new Error('Connection timed out — is dax running?'));
+      reject(new Error('Connection timed out — is DownloadAnything running?'));
     }, 10_000);
 
     ws.onopen = () => {
@@ -132,7 +138,7 @@ async function getConnectedSocket() {
       if (!settled) {
         settled = true;
         clearTimeout(timeout);
-        reject(new Error(`Failed to connect to dax on port ${config.apiPort} — is dax running?`));
+        reject(new Error(`Failed to connect to DownloadAnything on port ${config.apiPort} — is DownloadAnything running?`));
       }
     };
 
@@ -188,7 +194,7 @@ async function rpc(method, params = {}) {
 
 // ---- Media Sniffing & Stream Capture ----
 const CAPTURE_MAX = 32;
-const HEADER_ALLOW = /^(?:cookie|referer|user-agent|accept-language|authorization|x-)/;
+const HEADER_ALLOW = /^(?:cookie|referer|user-agent|accept-language|x-)/;
 const MEDIA_EXT_RE =
   /^(?:mp4|webm|mkv|mov|m4v|ts|mp3|m4a|opus|wav|flac|aac)$/;
 const RETIRED_EXT = new Set([
@@ -225,6 +231,35 @@ function heightFromUrl(url) {
   const m = stem.match(/(?:^|[^0-9])(\d{3,4})p(?:[^0-9]|$)/);
   const h = m ? Number(m[1]) : 0;
   return h >= 144 && h <= 4320 ? h : 0;
+}
+
+// Height from a player label (`720p`, `1080p60`).
+function heightFromLabel(label) {
+  const m = /^(\d{3,4})p/i.exec(label || '');
+  const h = m ? Number(m[1]) : 0;
+  return h >= 144 && h <= 4320 ? h : 0;
+}
+
+// Dimension sanity for DOM-provided values — a `<source size>` may be bytes.
+function clampHeight(value) {
+  const h = Number(value) || 0;
+  return h >= 144 && h <= 4320 ? h : 0;
+}
+
+function clampWidth(value) {
+  const w = Number(value) || 0;
+  return w >= 16 && w <= 16384 ? w : 0;
+}
+
+// Codecs named by a mime type (`video/mp4; codecs="avc1.64001F, mp4a.40.2"`).
+function codecsFromMime(mime) {
+  const m = /codecs\s*=\s*"?([^";]+)/i.exec(mime || '');
+  if (!m) return '';
+  return m[1]
+    .split(',')
+    .map((codec) => codec.trim())
+    .filter((codec) => codec && !/^(?:none|unknown)$/i.test(codec))
+    .join(', ');
 }
 
 function filterHeaders(raw) {
@@ -391,7 +426,7 @@ function manifestTier(url) {
   }
 }
 
-async function captureContexts(tabId, title = '') {
+async function captureContexts(tabId) {
   await hydrate();
   const list = captured.get(tabId) ?? [];
   const manifests = list
@@ -405,18 +440,71 @@ async function captureContexts(tabId, title = '') {
     label: m.label,
     mime: m.mime || '',
     ...(m.height ? { height: m.height } : {}),
-    // Page title of the tab the request was sniffed on — names the
-    // extension-fallback item when no extractor metadata exists.
-    ...(title ? { title } : {}),
   }));
 }
 
-// Prefer the page's own semantic title asked of the content script
-// (og:title/h1/document.title with site chrome stripped). When no content
-// script can answer, the raw tab title is the last resort.
+// Merge the DOM source ladder into captured contexts — each <source> carries
+// its own resolution/mime codecs, which the request sniffer cannot see.
+function mergeSources(contexts, sources) {
+  for (const source of sources || []) {
+    const url = source?.url || '';
+    if (!/^https?:\/\//i.test(url)) continue;
+    const mime = source.mime || '';
+    const match = mediaKindOf(url, mime);
+    const height = clampHeight(source.height) || heightFromLabel(source.label) || heightFromUrl(url);
+    const width = clampWidth(source.width);
+    const codecs = codecsFromMime(mime);
+    const existing = contexts.find((context) => context.url === url);
+    if (existing) {
+      if (!existing.height && height) existing.height = height;
+      if (!existing.width && width) existing.width = width;
+      if (!existing.codecs && codecs) existing.codecs = codecs;
+      if (!existing.label && source.label) existing.label = source.label;
+      if (!existing.mime && mime) existing.mime = mime;
+      if (!existing.kind && match?.kind) existing.kind = match.kind;
+      continue;
+    }
+    contexts.push({
+      url,
+      headers: findUrlHeaders(url),
+      kind: match?.kind,
+      label: source.label || match?.label,
+      mime,
+      ...(height ? { height } : {}),
+      ...(width ? { width } : {}),
+      ...(codecs ? { codecs } : {}),
+    });
+  }
+  return contexts;
+}
+
+// Top-frame source ladders (toolbar/context-menu pushes).
+async function domSources(tabId) {
+  try {
+    const sources = await chrome.tabs.sendMessage(tabId, { type: 'downloadanything-dom-sources' });
+    return Array.isArray(sources) ? sources : [];
+  } catch {
+    return [];
+  }
+}
+
+// Fallback title asked of the content script (og:title/h1/document.title with
+// site chrome stripped). Rust's extracted page title always wins in DownloadAnything; this
+// is only the last resort when Rust found none. When no content script can
+// answer, the raw tab title is the last resort.
 async function domTitle(tabId, fallback = '') {
   try {
-    const t = await chrome.tabs.sendMessage(tabId, { type: 'dax-dom-title' });
+    const t = await chrome.tabs.sendMessage(tabId, { type: 'downloadanything-dom-title' });
+    return (typeof t === 'string' ? t.trim() : '') || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+// Top-frame poster, used only when the overlay's own frame had none.
+async function domThumbnail(tabId, fallback = '') {
+  try {
+    const t = await chrome.tabs.sendMessage(tabId, { type: 'downloadanything-dom-thumbnail' });
     return (typeof t === 'string' ? t.trim() : '') || fallback;
   } catch {
     return fallback;
@@ -471,7 +559,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 // (filename, mime, sizes, finalUrl after redirects, referrer, danger) is
 // resolved there and the file hasn't hit disk yet. We let Chrome keep its
 // filename (suggest() with no args), cancel the browser download, and push
-// the URL + all metadata to dax for probing instead.
+// the URL + all metadata to DownloadAnything for probing instead.
 const interceptedIds = new Set(); // download ids we cancelled — erased on interrupted
 
 const baseName = (p) => (p || '').split(/[\\/]/).pop() || '';
@@ -539,7 +627,7 @@ async function handleIntercept(item) {
       },
     });
   } catch {
-    // dax unreachable — hand the download back to Chrome rather than
+    // DownloadAnything unreachable — hand the download back to Chrome rather than
     // silently dropping what the user asked for.
     interceptedIds.delete(item.id);
     chrome.downloads
@@ -560,20 +648,20 @@ chrome.downloads.onChanged.addListener((delta) => {
 function updateContextMenus() {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
-      id: 'dax-download-page',
-      title: 'Send page to dax',
+      id: 'downloadanything-download-page',
+      title: 'Send page to DownloadAnything',
       contexts: ['page'],
     });
 
     chrome.contextMenus.create({
-      id: 'dax-download-link',
-      title: 'Download link with dax',
+      id: 'downloadanything-download-link',
+      title: 'Download link with DownloadAnything',
       contexts: ['link'],
     });
 
     chrome.contextMenus.create({
-      id: 'dax-download-media',
-      title: 'Download media with dax',
+      id: 'downloadanything-download-media',
+      title: 'Download media with DownloadAnything',
       contexts: ['video', 'audio', 'image'],
     });
   });
@@ -587,12 +675,14 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const tabId = tab?.id;
   const pageUrl = tab?.url || info.pageUrl || '';
   const title = tabId != null ? await domTitle(tabId, tab?.title) : (tab?.title || '');
-  const contexts = tabId ? await captureContexts(tabId, title) : [];
+  const thumbnail = tabId != null ? await domThumbnail(tabId) : '';
+  const contexts =
+    tabId != null ? mergeSources(await captureContexts(tabId), await domSources(tabId)) : [];
 
   let targetUrl = pageUrl;
-  if (info.menuItemId === 'dax-download-link' && info.linkUrl) {
+  if (info.menuItemId === 'downloadanything-download-link' && info.linkUrl) {
     targetUrl = info.linkUrl;
-  } else if (info.menuItemId === 'dax-download-media' && (info.srcUrl || info.linkUrl)) {
+  } else if (info.menuItemId === 'downloadanything-download-media' && (info.srcUrl || info.linkUrl)) {
     targetUrl = info.srcUrl || info.linkUrl;
   }
 
@@ -601,13 +691,12 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       url: targetUrl,
       referer: pageUrl,
       title,
+      thumbnail,
       contexts: contexts.slice(0, 16),
     });
-    setBadge(tabId, '✓', BADGE_OK);
-    setTimeout(() => updateBadge(tabId).catch(() => {}), 2000);
+    flashBadge(tabId, '✓', BADGE_OK);
   } catch (err) {
-    setBadge(tabId, '!', BADGE_ERR);
-    setTimeout(() => updateBadge(tabId).catch(() => {}), 3000);
+    flashBadge(tabId, '!', BADGE_ERR, 3000);
   }
 });
 
@@ -622,12 +711,14 @@ chrome.action.onClicked.addListener(async (tab) => {
   const tabId = tab?.id;
   const pageUrl = tab?.url || '';
   const title = tabId != null ? await domTitle(tabId, tab?.title) : (tab?.title || '');
+  const thumbnail = tabId != null ? await domThumbnail(tabId) : '';
   if (!pageUrl || pageUrl.startsWith('chrome://')) {
     chrome.runtime.openOptionsPage();
     return;
   }
 
-  const contexts = tabId ? await captureContexts(tabId, title) : [];
+  const contexts =
+    tabId != null ? mergeSources(await captureContexts(tabId), await domSources(tabId)) : [];
 
   setBadge(tabId, '…', BADGE_BUSY);
 
@@ -636,46 +727,62 @@ chrome.action.onClicked.addListener(async (tab) => {
       url: pageUrl,
       referer: pageUrl,
       title,
+      thumbnail,
       contexts: contexts.slice(0, 16),
     });
-    setBadge(tabId, '✓', BADGE_OK);
-    setTimeout(() => updateBadge(tabId).catch(() => {}), 2000);
+    flashBadge(tabId, '✓', BADGE_OK);
   } catch (err) {
     const isBadToken = String(err?.message || err).toLowerCase().includes('token');
     if (isBadToken) {
       chrome.runtime.openOptionsPage();
     }
-    setBadge(tabId, '!', BADGE_ERR);
-    setTimeout(() => updateBadge(tabId).catch(() => {}), 3000);
+    flashBadge(tabId, '!', BADGE_ERR, 3000);
   }
 });
 
 // ---- Message Dispatcher ----
-async function handlePush({ pageUrl, referer, title, tabId: explicitTabId }, sender) {
+async function handlePush(
+  { pageUrl, mediaUrl, referer, title, thumbnail, sources, tabId: explicitTabId },
+  sender
+) {
   const tabId = explicitTabId ?? sender?.tab?.id;
+  const tabUrl = sender?.tab?.url || '';
+  // The embed player is the media/thumbnail target; the top page is only
+  // the referer (and the title source, resolved below).
+  const subframe = sender?.frameId != null && sender.frameId !== 0;
+  const targetReferer =
+    subframe && tabUrl ? tabUrl : (referer || tabUrl || pageUrl);
   // Overlay pushes from embed iframes carry that frame's title (often junk
   // like "c") — the top frame's title is what the user sees, so it wins;
   // the passed title is only a fallback when no top frame answers.
   const resolvedTitle =
     (tabId != null ? await domTitle(tabId) : '') || title || sender?.tab?.title || '';
-  const contexts = tabId != null ? await captureContexts(tabId, resolvedTitle) : [];
-  const flash = (text, color) => {
-    setBadge(tabId, text, color);
-    setTimeout(() => updateBadge(tabId).catch(() => {}), 2000);
-  };
+  // Prefer the overlay frame's own poster (the embed player), then the top
+  // frame's page image.
+  const resolvedThumbnail =
+    thumbnail || (tabId != null ? await domThumbnail(tabId) : '') || '';
+  const contexts = mergeSources(tabId != null ? await captureContexts(tabId) : [], sources);
+  if (
+    mediaUrl &&
+    /^https?:\/\//i.test(mediaUrl) &&
+    !contexts.some((context) => context.url === mediaUrl)
+  ) {
+    contexts.unshift({ url: mediaUrl, headers: findUrlHeaders(mediaUrl) });
+  }
   try {
     const res = await rpc('push', {
       url: pageUrl,
-      referer: referer || sender?.tab?.url || pageUrl,
+      referer: targetReferer,
       title: resolvedTitle,
+      thumbnail: resolvedThumbnail,
       contexts: contexts.slice(0, 16),
     });
     // Magnet clicks and overlay buttons push through here — flash the tab
     // badge so the user sees the URI landed even without a dialog focus.
-    flash('✓', '#10b981');
+    flashBadge(tabId, '✓', BADGE_OK);
     return res;
   } catch (e) {
-    flash('!', '#ef4444');
+    flashBadge(tabId, '!', BADGE_ERR);
     throw e;
   }
 }

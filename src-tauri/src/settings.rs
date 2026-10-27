@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 const DEFAULT_API_PORT: u16 = 16801;
 
 /// The webview's ws credentials. The Python backend owns the `settings`
-/// row in dax.db — read it live so token rotations land without restart.
+/// row in downloadanything.db — read it live so token rotations land without restart.
 pub struct BackendInfo {
     pub token: String,
     pub port: u16,
@@ -13,8 +13,16 @@ fn db_path() -> PathBuf {
     // Same base Python's Path.home() uses: HOME on Unix, USERPROFILE on Windows.
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|h| PathBuf::from(h).join("Library/Application Support/dax/dax.db"))
-        .unwrap_or_else(|| PathBuf::from("dax.db"))
+        .map(|h| {
+            PathBuf::from(h)
+                .join("Library/Application Support/DownloadAnything/downloadanything.db")
+        })
+        .unwrap_or_else(|| PathBuf::from("downloadanything.db"))
+}
+
+/// downloadanything.log next to downloadanything.db — the file mirror both backends append to.
+pub fn log_path() -> PathBuf {
+    db_path().with_file_name("downloadanything.log")
 }
 
 /// Read the settings row. None until the backend has written it (first
@@ -24,7 +32,12 @@ fn read_backend_info(path: &Path) -> Option<BackendInfo> {
     conn.query_row(
         "SELECT api_token, api_port FROM settings WHERE id = 1",
         [],
-        |r| Ok(BackendInfo { token: r.get(0)?, port: r.get(1)? }),
+        |r| {
+            Ok(BackendInfo {
+                token: r.get(0)?,
+                port: r.get(1)?,
+            })
+        },
     )
     .ok()
 }
@@ -43,14 +56,14 @@ mod tests {
 
     #[test]
     fn test_backend_info_defaults_without_db() {
-        assert!(read_backend_info(Path::new("/nonexistent/dax.db")).is_none());
+        assert!(read_backend_info(Path::new("/nonexistent/downloadanything.db")).is_none());
     }
 
     #[test]
     fn test_backend_info_reads_settings_row() {
-        let dir = std::env::temp_dir().join(format!("dax-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("downloadanything-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("dax.db");
+        let path = dir.join("downloadanything.db");
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute(
             "CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK (id = 1), \

@@ -5,6 +5,17 @@ export function isDone(d: DownloadInfo): boolean {
   return d.status === 'complete' || d.status === 'seeding'
 }
 
+/** A task that is running or about to run — the Active filter's set. */
+export function isActive(d: DownloadInfo): boolean {
+  return (
+    d.status === 'active' ||
+    d.status === 'downloading' ||
+    d.status === 'waiting' ||
+    d.status === 'postprocessing' ||
+    d.status === 'selecting'
+  )
+}
+
 /** The merged task list — `removed` entries are ghosts the engine keeps
  *  reporting until purge; hide them everywhere. */
 export function tasksFor(snap: DownloadsSnapshot): DownloadInfo[] {
@@ -20,9 +31,9 @@ export function taskName(d: DownloadInfo): string {
     d.bittorrent?.name ||
     d.playlist?.title ||
     base ||
-    d.dax?.title ||
-    d.dax?.filename ||
-    d.dax?.filenameHint ||
+    d.downloadanything?.title ||
+    d.downloadanything?.filename ||
+    d.downloadanything?.filenameHint ||
     d.gid
   )
 }

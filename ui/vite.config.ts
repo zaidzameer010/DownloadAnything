@@ -9,13 +9,13 @@ import { join } from 'node:path'
 // Dev-mode WS pairing: the app talks to the backend over a single /ws socket.
 // On the backend's own origin the token is injected into index.html; in vite
 // dev the page has no token, so the proxy appends it server-side — read from
-// the settings row in dax.db the backend owns. The token never reaches the
+// the settings row in downloadanything.db the backend owns. The token never reaches the
 // page, and no manual pairing step is needed.
 function apiSettings(): { apiToken: string; apiPort: number } {
   try {
     const db = join(
       homedir(),
-      'Library/Application Support/dax/dax.db',
+      'Library/Application Support/DownloadAnything/downloadanything.db',
     )
     const raw = execSync(
       `sqlite3 -readonly "${db}" "SELECT api_token, api_port FROM settings WHERE id=1"`,

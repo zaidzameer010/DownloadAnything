@@ -1,12 +1,11 @@
 /target
-src-py/dax-core/target
 /aria2-next-*
 /cookies.txt
 .DS_Store
 tracklist.txt
 src-py/.venv/
 __pycache__/
-src-py/dax/dax_rs.so
+src-py/downloadanything/downloadanything_rs.so
 .env
 src-tauri/binaries/
 src-tauri/resources/backend/

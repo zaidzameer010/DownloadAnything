@@ -15,13 +15,19 @@ import {
 } from '@heroui/react'
 import {
   engineStatus,
+  extensionSetup,
   getAppSettings,
   getYtDlpInfo,
+  inTauri,
+  installExtension,
   logError,
   regenerateTokens,
+  restartBrowserWithExtension,
+  revealExtension,
   saveAppSettings,
 } from './tauri'
 import type { AppSettings, Category, EngineStatus, YtDlpInfo } from './types'
+import type { BrowserInfo, ExtensionSetup } from './tauri'
 import { errMsg } from './fmt'
 import {
   ArrowDownToLine,
@@ -34,6 +40,7 @@ import {
   Globe,
   Magnet,
   Plus,
+  Puzzle,
   Xmark,
 } from '@gravity-ui/icons'
 import { IconBtn } from './icon-btn'
@@ -44,6 +51,7 @@ type SettingsTab =
   | 'torrents'
   | 'media'
   | 'output'
+  | 'extension'
   | 'engine'
 
 const TABS: { id: SettingsTab; label: string; desc: string; icon: React.ReactNode }[] = [
@@ -76,6 +84,12 @@ const TABS: { id: SettingsTab; label: string; desc: string; icon: React.ReactNod
     label: 'Output',
     desc: 'Named output folders',
     icon: <FolderOpen width={15} height={15} />,
+  },
+  {
+    id: 'extension',
+    label: 'Extension',
+    desc: 'Browser integration',
+    icon: <Puzzle width={15} height={15} />,
   },
   {
     id: 'engine',
@@ -336,6 +350,56 @@ function StatusLine({
   )
 }
 
+/** Destructive action behind a confirmation dialog — both confirmations on
+ *  this page share one shape. */
+function ConfirmDialog({
+  trigger,
+  heading,
+  body,
+  confirm,
+  onConfirm,
+}: {
+  trigger: string
+  heading: string
+  body: string
+  confirm: string
+  onConfirm: () => void
+}) {
+  return (
+    <AlertDialog>
+      <Button
+        variant="secondary"
+        size="sm"
+        className="press-tactile h-8.5 px-3 text-xs font-medium"
+      >
+        {trigger}
+      </Button>
+      <AlertDialog.Backdrop>
+        <AlertDialog.Container>
+          <AlertDialog.Dialog className="sm:max-w-100">
+            <AlertDialog.CloseTrigger />
+            <AlertDialog.Header>
+              <AlertDialog.Icon status="warning" />
+              <AlertDialog.Heading>{heading}</AlertDialog.Heading>
+            </AlertDialog.Header>
+            <AlertDialog.Body>
+              <p>{body}</p>
+            </AlertDialog.Body>
+            <AlertDialog.Footer>
+              <Button slot="close" variant="secondary" size="sm">
+                Cancel
+              </Button>
+              <Button slot="close" variant="danger" size="sm" onPress={onConfirm}>
+                {confirm}
+              </Button>
+            </AlertDialog.Footer>
+          </AlertDialog.Dialog>
+        </AlertDialog.Container>
+      </AlertDialog.Backdrop>
+    </AlertDialog>
+  )
+}
+
 export function SettingsPage({ onBack }: { onBack: () => void }) {
   const [tab, setTab] = useState<SettingsTab>('extraction')
   const [engine, setEngine] = useState<AppSettings | null>(null)
@@ -414,46 +478,18 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
         )}
 
         <div className="ms-auto flex items-center gap-2">
-          <AlertDialog>
-            <Button variant="secondary" size="sm" className="press-tactile h-8.5 px-3 text-xs font-medium">
-              Reset to defaults
-            </Button>
-            <AlertDialog.Backdrop>
-              <AlertDialog.Container>
-                <AlertDialog.Dialog className="sm:max-w-100">
-                  <AlertDialog.CloseTrigger />
-                  <AlertDialog.Header>
-                    <AlertDialog.Icon status="warning" />
-                    <AlertDialog.Heading>Reset all settings?</AlertDialog.Heading>
-                  </AlertDialog.Header>
-                  <AlertDialog.Body>
-                    <p>
-                      Every field returns to its default. Nothing is written until
-                      you press Save; leave this page to keep the current values.
-                    </p>
-                  </AlertDialog.Body>
-                  <AlertDialog.Footer>
-                    <Button slot="close" variant="secondary" size="sm">
-                      Cancel
-                    </Button>
-                    <Button
-                      slot="close"
-                      variant="danger"
-                      size="sm"
-                      onPress={() =>
-                        setEngine((prev) => ({
-                          ...DEFAULT_SETTINGS,
-                          apiToken: prev?.apiToken ?? '',
-                        }))
-                      }
-                    >
-                      Reset defaults
-                    </Button>
-                  </AlertDialog.Footer>
-                </AlertDialog.Dialog>
-              </AlertDialog.Container>
-            </AlertDialog.Backdrop>
-          </AlertDialog>
+          <ConfirmDialog
+            trigger="Reset to defaults"
+            heading="Reset all settings?"
+            body="Every field returns to its default. Nothing is written until you press Save; leave this page to keep the current values."
+            confirm="Reset defaults"
+            onConfirm={() =>
+              setEngine((prev) => ({
+                ...DEFAULT_SETTINGS,
+                apiToken: prev?.apiToken ?? '',
+              }))
+            }
+          />
           <Button
             size="sm"
             variant="primary"
@@ -534,6 +570,9 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
             </Tabs.Panel>
             <Tabs.Panel id="output" className="ms-0 p-0 outline-none">
               <OutputPane engine={engine} setF={setF} />
+            </Tabs.Panel>
+            <Tabs.Panel id="extension" className="ms-0 p-0 outline-none">
+              <ExtensionPane />
             </Tabs.Panel>
             <Tabs.Panel id="engine" className="ms-0 p-0 outline-none">
               <EnginePane
@@ -802,38 +841,15 @@ function EnginePane({
             >
               {tokenCopied ? <Check width={14} height={14} /> : <Copy width={14} height={14} />}
             </IconBtn>
-            <AlertDialog>
-              <Button size="sm" variant="secondary" className="press-tactile h-8.5 px-3 text-xs font-medium">
-                Regenerate
-              </Button>
-              <AlertDialog.Backdrop>
-                <AlertDialog.Container>
-                  <AlertDialog.Dialog className="sm:max-w-100">
-                    <AlertDialog.CloseTrigger />
-                    <AlertDialog.Header>
-                      <AlertDialog.Icon status="warning" />
-                      <AlertDialog.Heading>Regenerate tokens?</AlertDialog.Heading>
-                    </AlertDialog.Header>
-                    <AlertDialog.Body>
-                      <p>
-                        The extension paired with this app stops working until you paste the new
-                        token into its options page.
-                      </p>
-                    </AlertDialog.Body>
-                    <AlertDialog.Footer>
-                      <Button slot="close" variant="secondary" size="sm">
-                        Cancel
-                      </Button>
-                      <Button slot="close" variant="danger" size="sm" onPress={regen}>
-                        Regenerate
-                      </Button>
-                    </AlertDialog.Footer>
-                  </AlertDialog.Dialog>
-                </AlertDialog.Container>
-              </AlertDialog.Backdrop>
-            </AlertDialog>
+            <ConfirmDialog
+              trigger="Regenerate"
+              heading="Regenerate tokens?"
+              body="The extension paired with this app stops working until you paste the new token into its options page."
+              confirm="Regenerate"
+              onConfirm={regen}
+            />
           </div>
-          <Description>Paste into the dax extension's options page.</Description>
+          <Description>Paste into the DownloadAnything extension's options page.</Description>
         </div>
       </Section>
 
@@ -1262,6 +1278,228 @@ function OutputPane({
   return (
     <div className="flex flex-col gap-8">
       <CategoriesSection engine={engine} setF={setF} />
+    </div>
+  )
+}
+
+function ExtensionPane() {
+  const [setup, setSetup] = useState<ExtensionSetup | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [installing, setInstalling] = useState<string | null>(null)
+  const [installed, setInstalled] = useState<{
+    browser: BrowserInfo
+    sessionLoad: boolean
+  } | null>(null)
+  const [pendingRestart, setPendingRestart] = useState<BrowserInfo | null>(null)
+  const [restarting, setRestarting] = useState(false)
+  const [pathCopied, setPathCopied] = useState(false)
+
+  useEffect(() => {
+    if (!inTauri()) {
+      setError('Open the desktop app to install the browser extension.')
+      return
+    }
+    extensionSetup()
+      .then(setSetup)
+      .catch((e) => {
+        logError('extension setup', e)
+        setError(errMsg(e))
+      })
+  }, [])
+
+  const install = async (browser: BrowserInfo) => {
+    setInstalling(browser.id)
+    if (setup) {
+      navigator.clipboard
+        .writeText(setup.path)
+        .then(() => {
+          setPathCopied(true)
+          setTimeout(() => setPathCopied(false), 1400)
+        })
+        .catch(() => {})
+    }
+    try {
+      const outcome = await installExtension(browser.id)
+      if (outcome.needsRestart) {
+        setPendingRestart(browser)
+        setInstalled(null)
+      } else {
+        setPendingRestart(null)
+        setInstalled({ browser, sessionLoad: outcome.sessionLoad })
+      }
+    } catch (e) {
+      logError('extension install', e)
+      toast.danger('Could not open the install page', { description: errMsg(e) })
+    }
+    setInstalling(null)
+  }
+
+  const restart = async () => {
+    if (!pendingRestart) return
+    setRestarting(true)
+    try {
+      const outcome = await restartBrowserWithExtension(pendingRestart.id)
+      setInstalled({ browser: pendingRestart, sessionLoad: outcome.sessionLoad })
+      setPendingRestart(null)
+    } catch (e) {
+      logError('extension restart', e)
+      toast.danger(`Could not restart ${pendingRestart.name}`, { description: errMsg(e) })
+    }
+    setRestarting(false)
+  }
+
+  const copyPath = () => {
+    if (!setup) return
+    navigator.clipboard.writeText(setup.path)
+    setPathCopied(true)
+    setTimeout(() => setPathCopied(false), 1400)
+  }
+
+  return (
+    <div className="flex flex-col gap-8">
+      <Section
+        title="Browser extension"
+        description="Send pages and media from your browser to DownloadAnything."
+      >
+        <div className="flex flex-col gap-3 rounded-lg bg-surface px-3.5 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs font-medium text-(--foreground-secondary)">
+              Bundled extension
+            </span>
+            {setup ? (
+              <StatusLine>Ready</StatusLine>
+            ) : error ? (
+              <StatusLine tone="danger">Unavailable</StatusLine>
+            ) : (
+              <StatusLine tone="warning">Loading</StatusLine>
+            )}
+          </div>
+          {setup && (
+            <div className="flex items-center gap-2">
+              <code className="flex h-9 min-w-0 flex-1 items-center truncate rounded-lg bg-surface-secondary px-3 font-mono text-xs text-(--foreground-secondary)">
+                {setup.path}
+              </code>
+              <IconBtn
+                size="md"
+                variant="secondary"
+                label={pathCopied ? 'Copied' : 'Copy extension path'}
+                onPress={copyPath}
+                className={pathCopied ? 'text-success' : ''}
+              >
+                {pathCopied ? <Check width={14} height={14} /> : <Copy width={14} height={14} />}
+              </IconBtn>
+              <IconBtn
+                size="md"
+                variant="secondary"
+                label="Show extension folder"
+                onPress={() => {
+                  revealExtension().catch((e) => {
+                    logError('extension reveal', e)
+                    toast.danger('Could not open the folder', { description: errMsg(e) })
+                  })
+                }}
+              >
+                <FolderOpen width={14} height={14} />
+              </IconBtn>
+            </div>
+          )}
+          {error && <p className="text-xs text-danger">{error}</p>}
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <Label>Installed browsers</Label>
+          {setup?.browsers.length ? (
+            <div className="flex flex-col divide-y divide-separator rounded-lg bg-surface px-4">
+              {setup.browsers.map((browser) => (
+                <div key={browser.id} className="flex items-center justify-between gap-3 py-3">
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <Globe width={15} height={15} className="shrink-0 text-muted" />
+                    <span className="truncate text-xs font-medium text-foreground">
+                      {browser.name}
+                    </span>
+                    {browser.running && (
+                      <span className="rounded-md bg-warning-soft px-1.5 py-0.5 font-mono text-[10px] text-warning-soft-foreground">
+                        Running
+                      </span>
+                    )}
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="press-tactile h-8.5 px-3 text-xs font-medium"
+                    isDisabled={!!installing}
+                    onPress={() => install(browser)}
+                  >
+                    {installing === browser.id ? 'Opening…' : 'Install'}
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-muted">
+              {setup ? 'No Chromium-based browsers found.' : 'Looking for browsers…'}
+            </p>
+          )}
+        </div>
+
+        {pendingRestart && (
+          <div className="rounded-lg border border-separator bg-surface px-4 py-3.5">
+            <p className="text-xs font-semibold text-foreground">
+              {pendingRestart.name} is running
+            </p>
+            <p className="mt-1 text-[11px] leading-relaxed text-muted">
+              Restart it to load the extension. Open tabs are usually restored, but unsaved
+              work may be lost.
+            </p>
+            <div className="mt-3 flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="primary"
+                className="press-tactile h-8.5 px-3 text-xs font-medium"
+                isDisabled={restarting}
+                onPress={restart}
+              >
+                {restarting ? 'Restarting…' : `Restart ${pendingRestart.name}`}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="press-tactile h-8.5 px-3 text-xs font-medium"
+                isDisabled={restarting}
+                onPress={() => setPendingRestart(null)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {installed && (
+          <div className="rounded-lg border border-separator bg-surface px-4 py-3.5">
+            <p className="text-xs font-semibold text-foreground">
+              {installed.sessionLoad
+                ? `Opened in ${installed.browser.name}`
+                : `Finish in ${installed.browser.name}`}
+            </p>
+            <ol className="mt-2 list-decimal space-y-1 ps-4 text-xs leading-relaxed text-muted">
+              <li>Turn on Developer mode.</li>
+              <li>Click Load unpacked.</li>
+              <li>Select the extension folder shown above (its path is on your clipboard).</li>
+            </ol>
+            <p className="mt-2 text-[11px] leading-relaxed text-muted">
+              {installed.sessionLoad
+                ? `The app passed the extension to ${installed.browser.name} for this session. If the browser was already running, it ignored it — quit and try again. Complete the steps above to keep the extension after restarting.`
+                : 'Chrome blocks silent installs of unpacked extensions, so this final selection has to happen in the browser. The folder is already open in your file manager.'}
+            </p>
+          </div>
+        )}
+
+        <Description>
+          Works with Chrome, Chrome Beta, Chrome Canary, Chromium, Brave, Edge, Vivaldi, and
+          Opera. After loading, open the extension's options and paste the token from Engine
+          &amp; RPC.
+        </Description>
+      </Section>
     </div>
   )
 }

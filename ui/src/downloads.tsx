@@ -143,7 +143,7 @@ function DlRow({
   act: (gid: string, action: string) => void
 }) {
   const name = taskName(d)
-  const q = d.dax?.quality
+  const q = d.downloadanything?.quality
   const quality = q?.audioOnly ? 'audio' : q?.height ? `${q.height}p` : ''
   const frags = d.fragments
   const total = Number(d.totalLength ?? 0)
@@ -207,7 +207,7 @@ function DlRow({
 
   const [thumbFailed, setThumbFailed] = useState(false)
   const [plOpen, setPlOpen] = useState(false)
-  const showThumb = !!d.dax?.thumbnail && !thumbFailed
+  const showThumb = !!d.downloadanything?.thumbnail && !thumbFailed
 
   return (
     <li className="rise-in group relative -mx-2 flex flex-col gap-2 rounded-lg px-2 py-3 transition-colors duration-150 hover:bg-(--state-hover-bg) focus-within:bg-(--state-hover-bg)">
@@ -233,7 +233,7 @@ function DlRow({
         <div className="relative flex h-9.5 w-14 shrink-0 items-center justify-center overflow-hidden rounded-md bg-surface-secondary text-muted transition-colors group-hover:bg-surface-tertiary group-focus-within:bg-surface-tertiary">
           {showThumb ? (
             <img
-              src={d.dax!.thumbnail}
+              src={d.downloadanything!.thumbnail}
               alt=""
               className="absolute inset-0 size-full object-cover"
               loading="lazy"
@@ -249,7 +249,7 @@ function DlRow({
           <div className="flex min-w-0 items-center gap-2.5">
             <p
               className="min-w-0 flex-1 truncate text-[13.5px] font-medium leading-5 tracking-[-0.01em] text-foreground"
-              title={d.files?.[0]?.path || d.dax?.title || d.gid}
+              title={d.files?.[0]?.path || d.downloadanything?.title || d.gid}
             >
               {name}
             </p>

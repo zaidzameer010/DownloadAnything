@@ -359,7 +359,7 @@ wheels = [
 ]
 
 [[package]]
-name = "dax-py"
+name = "downloadanything-py"
 version = "0.7.0"
 source = { virtual = "." }
 dependencies = [

@@ -1,5 +1,5 @@
 // The UI's single media/file classification — mirrors the backend taxonomy
-// (src-py/dax/filter.py) for the path the UI owns itself: Chrome-intercepted
+// (src-py/downloadanything/filter.py) for the path the UI owns itself: Chrome-intercepted
 // downloads. Which bucket a req routes to (hls/dash/file), whether
 // postprocessing applies, and the words + icon the intercept sheet shows.
 // Extraction results arrive already filtered and ranked by the backend —

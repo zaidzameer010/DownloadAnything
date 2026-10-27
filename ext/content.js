@@ -1,6 +1,6 @@
-// dax content script — intelligent in-player download overlay
+// DownloadAnything content script — intelligent in-player download overlay
 // Detects web video and audio players, injecting a sleek, non-obtrusive
-// download trigger that links directly to the dax desktop backend.
+// download trigger that links directly to the DownloadAnything desktop backend.
 
 (() => {
   const ICON_DOWNLOAD = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13"/><path d="m6.5 10.5 5.5 5.5 5.5-5.5"/><path d="M4 21h16"/></svg>`;
@@ -11,6 +11,8 @@
   const MIN_W = 140;
   const MIN_H = 80;
 
+  // Fallback title only: DownloadAnything prefers the title its Rust extractor found on
+  // the page; this runs when Rust found none (JS-rendered/SPA pages).
   // The page's own semantic title names the media: og/twitter → h1 → the
   // longest text node that is a substring of document.title → document.title.
   // Whatever wins gets trailing site chrome stripped (" - Beeg",
@@ -43,16 +45,127 @@
     return raw;
   }
 
-  // Background asks the top frame for the DOM title (context-menu/toolbar
-  // pushes have no sender frame to read it from).
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg?.type === 'dax-dom-title' && window.top === window) {
-      sendResponse(pageTitle());
+  // Player poster/preview for the embed frame — the page og:image often
+  // describes site chrome, while the player's own poster is the cover art.
+  function pageThumbnail() {
+    const abs = (u) => {
+      try {
+        return new URL(u, location.href).href;
+      } catch {
+        return '';
+      }
+    };
+    const junk = /(?:^|[\/_.-])(logo|favicon|avatar|blank|spacer|pixel|placeholder)(?:[\/_.-]|$)/i;
+    const pick = (u) => {
+      const v = abs(u);
+      return v && !junk.test(v) ? v : '';
+    };
+    const attrs = [
+      'poster',
+      'data-poster',
+      'data-thumb',
+      'data-thumbnail',
+      'data-preview',
+      'data-preview-url',
+      'data-poster-url',
+      'data-image',
+      'data-cover',
+      'data-splash',
+    ];
+    const roots = document.querySelectorAll(
+      'video, [class*="player"], [class*="poster"], [class*="preview"], [class*="thumb"], [class*="video"]'
+    );
+    for (const el of roots) {
+      for (const a of attrs) {
+        const v = el.getAttribute?.(a);
+        if (v && pick(v)) return pick(v);
+      }
+      const bg = getComputedStyle(el).backgroundImage;
+      const m = bg && bg.match(/url\(["']?([^"')]+)["']?\)/);
+      if (m && pick(m[1])) return pick(m[1]);
     }
-  });
+    for (const img of document.querySelectorAll('img')) {
+      const cls = `${img.className} ${img.id} ${img.alt}`.toLowerCase();
+      if (/(poster|preview|thumb|cover|splash)/.test(cls)) {
+        const v = pick(img.currentSrc || img.src);
+        if (v) return v;
+      }
+    }
+    const meta = document.querySelector(
+      'meta[property="og:image"], meta[property="og:image:secure_url"], meta[name="twitter:image"]'
+    );
+    return meta?.content ? pick(meta.content) : '';
+  }
 
   const tracked = new Map(); // el -> { host, io, hideTimer, mouseOver }
   const scanned = new WeakSet(); // roots already walked — prevents O(n²) rescans
+
+  // Every resolution/codec a player advertises for one media element. The
+  // network sniffer only sees the stream the player actually requested; the
+  // <source> ladder names the rest, with the mime codecs on each entry.
+  function mediaSources(el) {
+    const abs = (u) => {
+      try {
+        return new URL(u, location.href).href;
+      } catch {
+        return '';
+      }
+    };
+    const out = new Map();
+    const add = (node, src) => {
+      const url = abs(src || '');
+      if (!/^https?:\/\//i.test(url) || out.has(url)) return;
+      const attr = (name) => node.getAttribute?.(name) || '';
+      const rawHeight =
+        Number(attr('height') || attr('data-height') || attr('size') || attr('data-size')) || 0;
+      const height = rawHeight >= 144 && rawHeight <= 4320 ? rawHeight : 0;
+      const rawWidth = Number(attr('width') || attr('data-width')) || 0;
+      const width = rawWidth >= 16 && rawWidth <= 16384 ? rawWidth : 0;
+      out.set(url, {
+        url,
+        mime: attr('type'),
+        label: attr('label') || attr('res') || attr('data-res') || attr('data-quality'),
+        height,
+        width,
+      });
+    };
+    el.querySelectorAll?.('source').forEach((source) => {
+      add(source, source.src || source.getAttribute('src') || source.getAttribute('data-src'));
+    });
+    add(el, el.currentSrc || el.getAttribute('src') || el.getAttribute('data-src'));
+    return [...out.values()];
+  }
+
+  // All media ladders on the top document — toolbar/context-menu pushes have
+  // no single overlay element to read from. `tracked` adds media inside
+  // shadow roots, which a plain document query cannot reach.
+  function pageMediaSources() {
+    const out = [];
+    const seen = new Set();
+    const elements = new Set([...document.querySelectorAll('video, audio'), ...tracked.keys()]);
+    for (const el of elements) {
+      for (const source of mediaSources(el)) {
+        if (seen.has(source.url)) continue;
+        seen.add(source.url);
+        out.push(source);
+      }
+    }
+    return out.slice(0, 32);
+  }
+
+  // Background asks the top frame for the DOM title (context-menu/toolbar
+  // pushes have no sender frame to read it from).
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.type === 'downloadanything-dom-title' && window.top === window) {
+      sendResponse(pageTitle());
+    }
+    if (msg?.type === 'downloadanything-dom-thumbnail' && window.top === window) {
+      sendResponse(pageThumbnail());
+    }
+    if (msg?.type === 'downloadanything-dom-sources' && window.top === window) {
+      sendResponse(pageMediaSources());
+    }
+  });
 
   // Composed-tree parent: climbs out of open shadow roots so clipping and
   // hit-tests work for media inside shadow-DOM players.
@@ -124,7 +237,7 @@
     for (let tries = 0; tries < 2; tries++) {
       const hit = document.elementFromPoint(x + BTN_SIZE / 2, y + BTN_SIZE / 2);
       if (!hit || hit === el || hit === host || hit.contains(el)) return { show: true, y };
-      if (hit.closest?.('[data-dax-overlay]')) return { show: true, y };
+      if (hit.closest?.('[data-downloadanything-overlay]')) return { show: true, y };
       if (hit.matches?.('video, audio, iframe')) return { show: false, y };
 
       let chrome = null;
@@ -215,7 +328,7 @@
           font-family: "Geist Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
         }
 
-        .dax-btn-wrapper {
+        .downloadanything-btn-wrapper {
           position: relative;
           display: flex;
           align-items: center;
@@ -259,7 +372,7 @@
           cursor: wait;
           border-color: oklch(0.70 0.10 240 / 0.7);
           color: oklch(0.70 0.10 240);
-          animation: dax-pulse 0.9s ease-in-out infinite alternate;
+          animation: downloadanything-pulse 0.9s ease-in-out infinite alternate;
         }
 
         button.ok {
@@ -295,25 +408,25 @@
           box-shadow: 0 8px 24px -8px rgb(0 0 0 / 0.5);
         }
 
-        .dax-btn-wrapper:hover .tooltip {
+        .downloadanything-btn-wrapper:hover .tooltip {
           opacity: 1;
           transform: translateX(0);
         }
 
-        @keyframes dax-pulse {
+        @keyframes downloadanything-pulse {
           0% { opacity: 0.6; }
           100% { opacity: 1; }
         }
       </style>
-      <div class="dax-btn-wrapper">
-        <span class="tooltip">Download with dax</span>
-        <button title="Send media to dax">${ICON_DOWNLOAD}</button>
+      <div class="downloadanything-btn-wrapper">
+        <span class="tooltip">Download with DownloadAnything</span>
+        <button title="Send media to DownloadAnything">${ICON_DOWNLOAD}</button>
       </div>
     `;
 
     // Inline styles beat both the shadow :host rule and any page CSS that
     // might target this div — the host lives in the main document's tree.
-    host.setAttribute('data-dax-overlay', '');
+    host.setAttribute('data-downloadanything-overlay', '');
     host.style.cssText = 'position:fixed;z-index:2147483647;display:none;';
     const btn = shadow.querySelector('button');
     const tooltip = shadow.querySelector('.tooltip');
@@ -321,7 +434,7 @@
     const resetBtn = () => {
       btn.className = '';
       btn.innerHTML = ICON_DOWNLOAD;
-      tooltip.textContent = 'Download with dax';
+      tooltip.textContent = 'Download with DownloadAnything';
     };
 
     btn.addEventListener('click', async (e) => {
@@ -330,35 +443,40 @@
 
       if (btn.classList.contains('busy')) return;
       btn.classList.add('busy');
-      tooltip.textContent = 'Sending to dax…';
+      tooltip.textContent = 'Sending to DownloadAnything…';
 
       // Prefer the element's own source when it is a plain fetchable file —
-      // blob:/mediasource srcs can't be re-fetched, so those fall back to a
-      // direct <source> child, then the page URL (sniffed streams).
+      // blob:/mediasource srcs can't be re-fetched. The page/embed URL stays
+      // the extraction target; the direct media URL rides as a context so
+      // title/thumbnail still come from the page.
       const src =
         el.currentSrc ||
         el.src ||
+        el.getAttribute?.('data-src') ||
         el.querySelector?.('source[src^="http"]')?.src ||
         '';
-      const targetUrl = /^https?:\/\//i.test(src) ? src : location.href;
+      const mediaUrl = /^https?:\/\//i.test(src) ? src : '';
 
       try {
         const res = await chrome.runtime.sendMessage({
           type: 'push',
-          pageUrl: targetUrl,
+          pageUrl: location.href,
+          mediaUrl,
           referer: location.href,
           title: pageTitle(),
+          thumbnail: pageThumbnail(),
+          sources: mediaSources(el),
         });
 
         btn.classList.remove('busy');
         if (res?.ok) {
           btn.innerHTML = ICON_CHECK;
           btn.classList.add('ok');
-          tooltip.textContent = 'Sent to dax!';
+          tooltip.textContent = 'Sent to DownloadAnything!';
         } else {
           btn.innerHTML = ICON_ALERT;
           btn.classList.add('err');
-          tooltip.textContent = res?.error || 'Failed — is dax running?';
+          tooltip.textContent = res?.error || 'Failed — is DownloadAnything running?';
         }
         setTimeout(resetBtn, 2200);
       } catch {
@@ -441,7 +559,7 @@
   function scan(root) {
     if (!root || scanned.has(root)) return;
     if (root.nodeType !== 1 && root.nodeType !== 9 && root.nodeType !== 11) return;
-    if (root.nodeType === 1 && root.hasAttribute('data-dax-overlay')) return;
+    if (root.nodeType === 1 && root.hasAttribute('data-downloadanything-overlay')) return;
     scanned.add(root);
     if (root.matches?.('video, audio')) track(root);
     if (root.shadowRoot) watchShadow(root.shadowRoot);
@@ -490,7 +608,7 @@
   );
 
   // Magnet links are not downloads Chrome can hand over — catch the click
-  // and push the URI so dax adds it as a torrent.
+  // and push the URI so DownloadAnything adds it as a torrent.
   document.addEventListener(
     'click',
     (e) => {

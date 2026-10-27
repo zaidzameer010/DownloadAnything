@@ -77,11 +77,11 @@ export function TaskInfoDrawer({
   const speed = Number(item?.downloadSpeed ?? 0)
   const eta = item ? taskEta(item) : null
   const bt = item?.bittorrent
-  const url = item?.dax?.url || ''
+  const url = item?.downloadanything?.url || ''
   const path = item?.files?.[0]?.path
   const fraction = item ? taskProgress(item) : null
   const progress = fraction != null ? Math.min(100, fraction * 100) : null
-  const q = item?.dax?.quality
+  const q = item?.downloadanything?.quality
   const quality = q
     ? [
         q.audioOnly ? 'audio only' : q.height ? `${q.height}p` : '',
@@ -120,9 +120,9 @@ export function TaskInfoDrawer({
             )}
           </Drawer.Header>
           <Drawer.Body className="flex flex-col gap-4">
-            {item?.dax?.thumbnail && (
+            {item?.downloadanything?.thumbnail && (
               <img
-                src={item.dax.thumbnail}
+                src={item.downloadanything.thumbnail}
                 alt=""
                 className="h-32 w-full shrink-0 rounded-xl object-cover"
                 onError={(e) => {
@@ -166,12 +166,12 @@ export function TaskInfoDrawer({
               <Tabs.Panel id="details" className="mt-0 flex flex-col gap-4 p-0 outline-none">
                 <InfoSection title="Overview">
                   <InfoRow label="Status" value={item?.status} />
-                  <InfoRow label="Title" value={item?.dax?.title} mono={false} />
+                  <InfoRow label="Title" value={item?.downloadanything?.title} mono={false} />
                   <InfoRow
                     label="Duration"
                     value={
-                      item?.dax?.durationSecs
-                        ? fmtDuration(item.dax.durationSecs)
+                      item?.downloadanything?.durationSecs
+                        ? fmtDuration(item.downloadanything.durationSecs)
                         : undefined
                     }
                   />
@@ -224,20 +224,20 @@ export function TaskInfoDrawer({
                 </InfoSection>
 
                 {(url ||
-                  item?.dax?.pageUrl ||
-                  item?.dax?.referer ||
-                  item?.dax?.media ||
-                  item?.dax?.reprId ||
+                  item?.downloadanything?.pageUrl ||
+                  item?.downloadanything?.referer ||
+                  item?.downloadanything?.media ||
+                  item?.downloadanything?.reprId ||
                   quality ||
-                  item?.dax?.filenameHint) && (
+                  item?.downloadanything?.filenameHint) && (
                   <InfoSection title="Source">
                     <InfoRow label="URL" value={url || undefined} />
-                    <InfoRow label="Page" value={item?.dax?.pageUrl} />
-                    <InfoRow label="Referer" value={item?.dax?.referer} />
-                    <InfoRow label="Media" value={item?.dax?.media} />
-                    <InfoRow label="Format" value={item?.dax?.reprId} />
+                    <InfoRow label="Page" value={item?.downloadanything?.pageUrl} />
+                    <InfoRow label="Referer" value={item?.downloadanything?.referer} />
+                    <InfoRow label="Media" value={item?.downloadanything?.media} />
+                    <InfoRow label="Format" value={item?.downloadanything?.reprId} />
                     <InfoRow label="Quality" value={quality} mono={false} />
-                    <InfoRow label="Name hint" value={item?.dax?.filenameHint} />
+                    <InfoRow label="Name hint" value={item?.downloadanything?.filenameHint} />
                   </InfoSection>
                 )}
               </Tabs.Panel>

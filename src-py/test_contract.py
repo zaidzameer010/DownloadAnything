@@ -3,7 +3,7 @@ backend's unit suite pinned (settings, task db, download params, control
 verbs) plus the port-specific layers: request camelize, extract-chain
 routing, aria2-next ws-rpc, torrent lifecycle.
 
-Run: cd src-py && HOME=/tmp/dax-test-home .venv/bin/python test_contract.py
+Run: cd src-py && HOME=/tmp/downloadanything-test-home .venv/bin/python test_contract.py
 (HOME is isolated — the suite never touches real app data.)
 """
 
@@ -17,18 +17,18 @@ from pathlib import Path
 
 import orjson
 
-# Isolate app data before anything imports dax.settings.
-_TMP = Path(tempfile.mkdtemp(prefix="dax-test-"))
+# Isolate app data before anything imports downloadanything.settings.
+_TMP = Path(tempfile.mkdtemp(prefix="downloadanything-test-"))
 os.environ["HOME"] = str(_TMP)
 
-from dax import db as db_mod  # noqa: E402
-from dax import downloads as dl  # noqa: E402
-from dax import extract as ex  # noqa: E402
-from dax import filter as filt  # noqa: E402
-from dax import settings as st  # noqa: E402
-from dax.aria2_next import torrent as tr  # noqa: E402
-from dax.models import DownloadReq  # noqa: E402
-from dax.settings import AppSettings, out_dir  # noqa: E402
+from downloadanything import db as db_mod  # noqa: E402
+from downloadanything import downloads as dl  # noqa: E402
+from downloadanything import extract as ex  # noqa: E402
+from downloadanything import filter as filt  # noqa: E402
+from downloadanything import settings as st  # noqa: E402
+from downloadanything.aria2_next import torrent as tr  # noqa: E402
+from downloadanything.models import DownloadReq  # noqa: E402
+from downloadanything.settings import AppSettings, out_dir  # noqa: E402
 
 # Point DATA_DIR (computed from HOME at import) at the temp root.
 st.DATA_DIR = _TMP / "appdata"
@@ -163,7 +163,7 @@ def test_extract_params_impersonate_and_accept_language():
     assert params["impersonate"] is not None, "TLS impersonation — anti-bot CDNs 403 python TLS"
     assert params["http_headers"]["Accept-Language"] == ex.DEFAULT_ACCEPT_LANG
     # A captured Accept-Language overrides the default.
-    from dax.models import ContextHeaders, HeaderPair
+    from downloadanything.models import ContextHeaders, HeaderPair
     params2, _ = ex._ydl_params(
         ex.ExtractOptions(contexts=[ContextHeaders(
             url="https://x", headers=[HeaderPair(name="Accept-Language", value="de-DE,de;q=0.9")])]),
@@ -191,8 +191,8 @@ def test_download_req_contexts_reach_cookie_seeds():
     assert seeds == [("cdn.x", "sess=abc")]
 
 
-def test_to_dax_options_extraction_chain():
-    o = _settings().to_dax_options()
+def test_to_downloadanything_options_extraction_chain():
+    o = _settings().to_downloadanything_options()
     assert o["timeoutSecs"] == 30
     assert o["retries"] == 3
     assert o["extractorEngine"] == "auto"
@@ -202,7 +202,7 @@ def test_to_dax_options_extraction_chain():
     assert "mediaFormat" not in o and "parallelSegments" not in o
     assert "speedProfile" not in o and "extraOptions" not in o
     s = _settings(cookies_browser="chrome", cookies_file="/tmp/c.txt")
-    o2 = s.to_dax_options()
+    o2 = s.to_downloadanything_options()
     assert o2["cookiesBrowser"] == "chrome"
     assert o2["cookiesFile"] == "/tmp/c.txt"
 
@@ -220,7 +220,7 @@ def test_out_dir_category_and_falls_back():
 def test_check_name_conflict_disk_and_tasks():
     """Collision = same resolved dir + same stem (hints) or exact file
     (verbatim names); other tasks' pending names count too."""
-    from dax import app
+    from downloadanything import app
 
     vids = _TMP / "vids"
     docs = _TMP / "docs"
@@ -277,7 +277,7 @@ def test_task_db_lifecycle():
     assert info["gid"] == "g1"
     assert info["status"] == "complete"
     assert info["files"][0]["path"] == "/downloads/v.mp4"
-    assert info["dax"]["thumbnail"] == "t.jpg"
+    assert info["downloadanything"]["thumbnail"] == "t.jpg"
     assert r["url"] == "https://example.com/v.mp4"
 
     assert db.purge_finished() == 1
@@ -413,7 +413,7 @@ def test_filter_role_taxonomy():
     assert filt.junk("https://x/preview/clip.mp4") == "preview"
     assert filt.junk("https://x/trailers/t.mp4") == "trailer"
     assert filt.junk("https://x/road.mp4") is None
-    # you-porn watch page: related-video *_fb.mp4 fallbacks and imgproxy
+    # Video-site watch page: related-video *_fb.mp4 fallbacks and imgproxy
     # transform strips (vts:/rs:fit:/ex:/bg: segments) are junk, not media.
     assert filt.junk(
         "https://ev-ph.x/videos/202001/23/278791461/360P_360K_278791461_fb.mp4"
@@ -427,9 +427,9 @@ def test_filter_role_taxonomy():
 
 
 def test_filter_container_of_script_path():
-    """KVS serves media from a script path with the real name in the query —
+    """Script-path media servers put the real name in the query —
     remote_control.php?file=…_1440p.mp4 is a progressive mp4, not a page."""
-    u = "https://st43.pimpbunny.com/remote_control.php?file=abc_1440p.mp4&acctoken=x"
+    u = "https://st43.example.com/remote_control.php?file=abc_1440p.mp4&acctoken=x"
     assert filt.container_of(u) == "mp4"
     assert filt.role(u) == "progressive"
     assert filt.container_of("https://x/watch/123") is None
@@ -443,7 +443,7 @@ def test_filter_kind_of_manifest_query_case_insensitive():
     `?FORMAT=M3U8` context is skipped as a non-media progressive URL."""
     assert filt.kind_of("https://cdn.x/v?FORMAT=M3U8") == "hls"
     assert filt.kind_of("https://cdn.x/v?TYPE=MPD") == "dash"
-    from dax.models import ContextHeaders
+    from downloadanything.models import ContextHeaders
     opts = ex.ExtractOptions(contexts=[
         ContextHeaders(url="https://cdn.x/v?FORMAT=M3U8", headers=[])])
     items = ex._sniffed_extract(opts, "https://x/page")
@@ -534,7 +534,7 @@ def test_filter_rank_formats():
 
 
 def test_sniffed_extract_fallback():
-    from dax.models import ContextHeaders
+    from downloadanything.models import ContextHeaders
     opts = ex.ExtractOptions(
         referer="https://example.com/watch",
         contexts=[
@@ -545,15 +545,59 @@ def test_sniffed_extract_fallback():
     items = ex._sniffed_extract(opts, "https://example.com/watch")
     assert items and len(items) == 1
     assert len(items[0]["formats"]) == 2
-    # dax.filter orders: progressive file before the bare variant playlist.
+    # downloadanything.filter orders: progressive file before the bare variant playlist.
     assert items[0]["formats"][0]["kind"] == "progressive"
     assert items[0]["formats"][1]["kind"] == "hls"
+
+
+def test_sniffed_extract_carries_resolution_and_codecs():
+    """The extension's source-ladder metadata (width/height/label/codecs)
+    rides each sniffed row — the UI lists every rendition with its codec."""
+    from downloadanything.models import ContextHeaders
+    opts = ex.ExtractOptions(
+        referer="https://example.com/watch",
+        contexts=[
+            ContextHeaders(url="https://cdn.example.com/720.mp4", headers=[],
+                           height=720, width=1280, label="720p",
+                           codecs="avc1.64001F, mp4a.40.2"),
+            ContextHeaders(url="https://cdn.example.com/1080.mp4", headers=[],
+                           height=1080, width=1920, codecs="hvc1.1.6.L93"),
+        ],
+    )
+    items = ex._sniffed_extract(opts, "https://example.com/watch")
+    rows = {f["quality"]["height"]: f for f in items[0]["formats"]}
+    assert rows[720]["quality"]["width"] == 1280
+    assert rows[720]["quality"]["label"] == "720p"
+    assert rows[720]["codecs"] == "avc1.64001F, mp4a.40.2"
+    assert rows[1080]["quality"]["width"] == 1920
+    assert rows[1080]["codecs"] == "hvc1.1.6.L93"
+
+
+def test_parse_hls_master_lists_every_rendition():
+    """A master playlist names each rendition's resolution, bandwidth and
+    codecs — parsed without yt-dlp so a failed probe still lists the ladder."""
+    text = """#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2"
+1080/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2500000,AVERAGE-BANDWIDTH=2000000,RESOLUTION=1280x720,CODECS="avc1.64001F,mp4a.40.2"
+https://cdn.x/720/index.m3u8
+"""
+    rows = ex._parse_hls_master(text, "https://cdn.x/master.m3u8?t=a")
+    assert [row["quality"]["height"] for row in rows] == [1080, 720]
+    assert rows[0]["quality"]["width"] == 1920
+    assert rows[0]["quality"]["bandwidth"] == 5000000
+    assert rows[0]["codecs"] == "avc1.640028, mp4a.40.2"
+    assert rows[0]["url"] == "https://cdn.x/1080/index.m3u8"
+    assert rows[1]["quality"]["bandwidth"] == 2500000
+    assert rows[1]["url"] == "https://cdn.x/720/index.m3u8"
+    assert all(row["manifest_url"] == "https://cdn.x/master.m3u8?t=a" for row in rows)
+    assert ex._parse_hls_master("#EXTM3U\n#EXTINF:4,\nseg.ts", "https://cdn.x/i.m3u8") == []
 
 
 def test_sniffed_extract_carries_context_title():
     """The captured tab title rides each context — it names the sniffed
     fallback item (display row + filenameHint downstream)."""
-    from dax.models import ContextHeaders
+    from downloadanything.models import ContextHeaders
     opts = ex.ExtractOptions(
         referer="https://example.com/watch",
         contexts=[
@@ -566,10 +610,74 @@ def test_sniffed_extract_carries_context_title():
     assert items and items[0]["title"] == "Clip Page"
 
 
+def test_sniffed_extract_prefers_rust_page_metadata():
+    """Rust's page title/thumbnail win over the extension title; the
+    extension title is only the last resort when Rust found neither."""
+    from downloadanything.models import ContextHeaders
+    opts = ex.ExtractOptions(
+        referer="https://example.com/watch",
+        title="Tab Title",
+        contexts=[ContextHeaders(url="https://cdn.example.com/v.mp4", headers=[])],
+    )
+    items = ex._sniffed_extract(
+        opts,
+        "https://example.com/watch",
+        {"title": "Rust Title", "thumbnail": "https://cdn.example.com/poster.jpg",
+         "duration_secs": 42.0},
+    )
+    assert items and items[0]["title"] == "Rust Title"
+    assert items[0]["thumbnail"] == "https://cdn.example.com/poster.jpg"
+    assert items[0]["duration_secs"] == 42.0
+    # No Rust metadata → the single top-level extension title is the fallback.
+    items = ex._sniffed_extract(opts, "https://example.com/watch")
+    assert items and items[0]["title"] == "Tab Title"
+
+
+def test_sniffed_extract_prefers_captured_referer():
+    """The browser's captured request referer is authoritative for a
+    sniffed stream; opts.referer is only the fallback (the push may now be
+    the top page while the stream came from an embed iframe)."""
+    from downloadanything.models import ContextHeaders, HeaderPair
+    opts = ex.ExtractOptions(
+        referer="https://tv.site/page",
+        contexts=[ContextHeaders(
+            url="https://cdn.x/v.mp4",
+            headers=[HeaderPair(name="referer", value="https://embed.site/player")],
+        )],
+    )
+    items = ex._sniffed_extract(opts, "https://tv.site/page")
+    assert items[0]["formats"][0]["headers"]["referer"] == "https://embed.site/player"
+
+
+def test_sniffed_extract_prefers_live_title_for_shell_source():
+    """A shell <title> is low-confidence: the live top-frame title and the
+    embed player's poster win. A strong Rust source still wins."""
+    from downloadanything.models import ContextHeaders
+    opts = ex.ExtractOptions(
+        title="Real Title",
+        thumbnail="https://cdn.x/embed.jpg",
+        contexts=[ContextHeaders(url="https://cdn.x/v.mp4", headers=[])],
+    )
+    items = ex._sniffed_extract(
+        opts,
+        "https://embed.site/shell",
+        {"title": "Byse Frontend", "title_source": "document_title",
+         "thumbnail": "https://cdn.x/page.jpg"},
+    )
+    assert items[0]["title"] == "Real Title"
+    assert items[0]["thumbnail"] == "https://cdn.x/embed.jpg"
+    items = ex._sniffed_extract(
+        opts,
+        "https://embed.site/shell",
+        {"title": "Rust Title", "title_source": "meta"},
+    )
+    assert items[0]["title"] == "Rust Title"
+
+
 def test_probe_rust_items_context_title_is_last_resort():
     """Scraped and probed titles outrank the captured tab title — it only
     backfills rust/extension-path items that produced none."""
-    from dax.models import ContextHeaders
+    from downloadanything.models import ContextHeaders
     orig_ytdlp = ex._ytdlp_extract
     ex._ytdlp_extract = lambda o, u, **k: {"input": u, "items": []}
     try:
@@ -583,6 +691,69 @@ def test_probe_rust_items_context_title_is_last_resort():
         raw[0]["title"] = "Scraped"
         items = ex._probe_rust_items(opts, raw, "https://x/watch")
         assert items[0]["title"] == "Scraped"
+    finally:
+        ex._ytdlp_extract = orig_ytdlp
+
+
+def test_probe_rust_items_uses_page_metadata_as_fallback():
+    """A page-level Rust title/thumbnail fills items whose own metadata is
+    empty, before the extension title is considered."""
+    from downloadanything.models import ContextHeaders
+    orig_ytdlp = ex._ytdlp_extract
+    ex._ytdlp_extract = lambda o, u, **k: {"input": u, "items": []}
+    try:
+        opts = ex.ExtractOptions(contexts=[
+            ContextHeaders(url="https://cdn.x/v.mp4", headers=[], title="Tab Title")])
+        raw = [{"id": "page", "page_url": "https://x/watch",
+                "formats": [{"url": "https://cdn.x/v.mp4", "kind": "progressive"}]}]
+        items = ex._probe_rust_items(
+            opts, raw, "https://x/watch",
+            {"title": "Page Title", "thumbnail": "https://x/poster.jpg",
+             "duration_secs": 12.0})
+        assert items[0]["title"] == "Page Title"
+        assert items[0]["thumbnail"] == "https://x/poster.jpg"
+        assert items[0]["duration_secs"] == 12.0
+    finally:
+        ex._ytdlp_extract = orig_ytdlp
+
+
+def test_probe_rust_items_preserves_candidate_referer():
+    """Rust sets an iframe's own URL as the media referer; the probe must
+    use it and not overwrite it with the parent page URL."""
+    orig_ytdlp = ex._ytdlp_extract
+    seen: list[str | None] = []
+
+    def fake(o, u, **k):
+        seen.append(o.referer)
+        return {"input": u, "items": []}
+
+    ex._ytdlp_extract = fake
+    try:
+        raw = [{"id": "page", "page_url": "https://site.x/watch",
+                "formats": [{"url": "https://cdn.x/v.mp4", "kind": "progressive",
+                             "headers": {"referer": "https://site.x/embed"}}]}]
+        items = ex._probe_rust_items(ex.ExtractOptions(), raw, "https://site.x/watch")
+        assert seen == ["https://site.x/embed"], "the probe must use the iframe referer"
+        assert items[0]["formats"][0]["headers"]["referer"] == "https://site.x/embed"
+    finally:
+        ex._ytdlp_extract = orig_ytdlp
+
+
+def test_probe_rust_items_keeps_candidate_referer_on_success():
+    """A successful yt-dlp probe returns fresh format rows; the iframe
+    referer from the Rust candidate must still win over the parent page."""
+    orig_ytdlp = ex._ytdlp_extract
+    ex._ytdlp_extract = lambda o, u, **k: {
+        "input": u,
+        "items": [{"page_url": u, "formats": [
+            {"url": u, "kind": "progressive", "probed_size": 1, "codecs": "avc1"}]}],
+    }
+    try:
+        raw = [{"id": "page", "page_url": "https://site.x/watch",
+                "formats": [{"url": "https://cdn.x/v.mp4", "kind": "progressive",
+                             "headers": {"referer": "https://site.x/embed"}}]}]
+        items = ex._probe_rust_items(ex.ExtractOptions(), raw, "https://site.x/watch")
+        assert items[0]["formats"][0]["headers"]["referer"] == "https://site.x/embed"
     finally:
         ex._ytdlp_extract = orig_ytdlp
 
@@ -646,6 +817,15 @@ def test_extract_chain_rust_engine_skips_ytdlp():
         assert page["items"][0]["formats"][0]["url"] == "https://r/v.mp4"
     finally:
         ex._ytdlp_extract, ex._rust_extract = orig_ytdlp, orig_rust
+
+
+def test_ydl_params_bridge_ytdlp_output_to_the_log():
+    """yt-dlp prints through its logger hook, so its lines reach downloadanything.log;
+    noprogress keeps the per-chunk progress ticks out of it."""
+    from downloadanything.log import YDL_LOGGER
+    params, _ = ex._ydl_params(ex.ExtractOptions(), "https://x/v.mp4")
+    assert params["logger"] is YDL_LOGGER
+    assert params["noprogress"] is True
 
 
 def test_extract_chain_generic_off_skips_generic_page_pass():
@@ -759,9 +939,10 @@ def test_probe_rust_items_sends_extracted_urls_to_ytdlp():
 
 
 def test_probe_rust_items_probes_all_single_format_masters():
-    """A manifest resolving to one format is a per-quality master (you-porn)
-    — probing continues so every rendition lands in the format list. A
-    manifest resolving to a ladder still short-circuits the rest."""
+    """A manifest resolving to one format is a per-quality master (single-
+    rendition video site) — probing continues so every rendition lands in the
+    format list. A manifest resolving to a ladder still short-circuits the
+    rest."""
     probed_urls = []
     orig_ytdlp = ex._ytdlp_extract
 
@@ -838,6 +1019,68 @@ def test_probe_rust_items_backfills_candidate_metadata():
         ex._ytdlp_extract = orig_ytdlp
 
 
+def test_probe_rust_items_backfills_candidate_codecs():
+    """A page-declared codec survives a probe that reports none; a probed
+    codec is authoritative and is never overwritten."""
+    orig = ex._ytdlp_extract
+
+    def fake_ytdlp(opts, url, **kw):
+        codecs = "vp09.00.10.08" if "webm" in url else None
+        fmt = {"url": url, "kind": "progressive"}
+        if codecs:
+            fmt["codecs"] = codecs
+        return {"input": url, "items": [{"id": "v", "page_url": url, "formats": [fmt]}]}
+
+    ex._ytdlp_extract = fake_ytdlp
+    try:
+        raw_items = [{
+            "id": "page",
+            "page_url": "https://site.x/watch",
+            "formats": [
+                {"url": "https://site.x/v_720p.mp4", "kind": "progressive",
+                 "codecs": "avc1.64001F, mp4a.40.2", "quality": {"height": 720}},
+                {"url": "https://site.x/v_1080p.webm", "kind": "progressive",
+                 "codecs": "av01.0.05M.08", "quality": {"height": 1080}},
+            ],
+        }]
+        items = ex._probe_rust_items(ex.ExtractOptions(), raw_items, "https://site.x/watch")
+        by_url = {f["url"]: f for f in items[0]["formats"]}
+        assert by_url["https://site.x/v_720p.mp4"]["codecs"] == "avc1.64001F, mp4a.40.2"
+        assert by_url["https://site.x/v_1080p.webm"]["codecs"] == "vp09.00.10.08"
+    finally:
+        ex._ytdlp_extract = orig
+
+
+def test_probe_rust_items_falls_back_to_hls_master_ladder():
+    """A master whose probe yields no format is parsed directly — every
+    rendition lands with its resolution/codecs instead of one anonymous row."""
+    orig_ytdlp, orig_hls = ex._ytdlp_extract, ex._hls_master_rows
+    ex._ytdlp_extract = lambda opts, url, **kw: {"input": url, "items": []}
+    ex._hls_master_rows = lambda cand, opts: [
+        {"url": "https://cdn.x/1080.m3u8", "kind": "hls",
+         "manifest_url": cand["url"], "page_url": "https://cdn.x/1080.m3u8",
+         "quality": {"height": 1080, "width": 1920}, "codecs": "avc1.640028"},
+        {"url": "https://cdn.x/720.m3u8", "kind": "hls",
+         "manifest_url": cand["url"], "page_url": "https://cdn.x/720.m3u8",
+         "quality": {"height": 720, "width": 1280}, "codecs": "avc1.64001F"},
+    ]
+    try:
+        raw_items = [{
+            "id": "page",
+            "page_url": "https://site.x/watch",
+            "formats": [{"url": "https://cdn.x/master.m3u8", "kind": "hls"}],
+        }]
+        items = ex._probe_rust_items(ex.ExtractOptions(), raw_items, "https://site.x/watch")
+        rows = items[0]["formats"]
+        assert [f["quality"]["height"] for f in rows] == [1080, 720]
+        assert rows[0]["codecs"] == "avc1.640028"
+        assert all(f["manifest_url"] == "https://cdn.x/master.m3u8" for f in rows)
+        assert all(f["url"] != "https://cdn.x/master.m3u8" for f in rows), \
+            "the parsed ladder replaces the anonymous master fallback"
+    finally:
+        ex._ytdlp_extract, ex._hls_master_rows = orig_ytdlp, orig_hls
+
+
 def test_stat_missing_fills_progressive_rows_only():
     """Every shown row stats: HEAD+range fills size/codecs on progressive
     rows that lack them — hls rows and already-probed files are skipped."""
@@ -870,16 +1113,16 @@ def test_link_container_from_script_query():
 
 
 def test_sniffed_extract_accepts_remote_control_links():
-    """A captured KVS script URL is media — its real name rides the query."""
-    from dax.models import ContextHeaders
+    """A captured script-path media URL is media — its real name rides the query."""
+    from downloadanything.models import ContextHeaders
     opts = ex.ExtractOptions(
-        referer="https://pimpbunny.com/videos/x",
+        referer="https://example.com/videos/x",
         contexts=[ContextHeaders(
-            url="https://st43.pimpbunny.com/remote_control.php"
+            url="https://st43.example.com/remote_control.php"
                 "?file=a_720p.mp4&acctoken=x",
             headers=[])],
     )
-    items = ex._sniffed_extract(opts, "https://pimpbunny.com/videos/x")
+    items = ex._sniffed_extract(opts, "https://example.com/videos/x")
     assert items and items[0]["formats"][0]["container"] == "mp4"
 
 
@@ -925,7 +1168,7 @@ def test_probe_rust_items_keeps_per_row_probe_url():
 
 def test_extract_chain_sniffed_is_last_hop():
     """auto with both extractors empty → extension-sniffed links win."""
-    from dax.models import ContextHeaders
+    from downloadanything.models import ContextHeaders
     orig_ytdlp, orig_rust = ex._ytdlp_extract, ex._rust_extract
     ex._ytdlp_extract = lambda o, u, **k: {"input": u, "items": []}
     ex._rust_extract = lambda o, u: {"input": u, "items": []}
@@ -1560,7 +1803,7 @@ def test_snapshot_carries_task_metadata():
         "quality": {"height": 1080, "bandwidth": 4_200_000},
         "reprId": "137", "pageUrl": "https://x/page",
     })
-    d = t.snapshot_entry("/x")["dax"]
+    d = t.snapshot_entry("/x")["downloadanything"]
     assert d["title"] == "Original Title"
     assert d["durationSecs"] == 92.5
     assert d["quality"] == {"height": 1080, "bandwidth": 4_200_000}
@@ -2034,7 +2277,7 @@ def test_extract_chain_all_sources_missing_returns_error_page():
     the whole batch in run()'s page.get('playlist')."""
     orig_r, orig_s = ex._rust_extract, ex._sniffed_page
     ex._rust_extract = lambda o, u: None
-    ex._sniffed_page = lambda o, u: None
+    ex._sniffed_page = lambda o, u, *a: None
     ex._broken_ie.insert("broken.x", True)
     try:
         pages = asyncio.run(ex.extract(
@@ -2171,7 +2414,7 @@ def test_probe_info_cache_covers_download_urls():
     hit["id"] = "mutated"
     assert ex.cached_info(opts, "https://x/watch?v=1")["id"] == "vid1"
     # A different session must not reuse the extraction.
-    from dax.models import ContextHeaders, HeaderPair
+    from downloadanything.models import ContextHeaders, HeaderPair
     ctx_opts = ex.ExtractOptions(contexts=[ContextHeaders(
         url="https://x", headers=[HeaderPair(name="Cookie", value="s=1")])])
     assert ex.cached_info(ctx_opts, "https://x/watch?v=1") is None
@@ -2543,7 +2786,7 @@ def test_cached_replay_postprocess_error_skips_reextract():
 def test_download_req_opts_rebuild_matches_probe_sig():
     """The download-side rebuild must reproduce the probe's info sig —
     contexts ride the request; referer deliberately stays out."""
-    from dax.models import ContextHeaders, HeaderPair
+    from downloadanything.models import ContextHeaders, HeaderPair
     ctxs = [{"url": "https://x", "headers": [
         {"name": "Cookie", "value": "s=1"}]}]
     t = dl.Task("g", {"url": "https://x/watch", "contexts": ctxs,
@@ -2639,7 +2882,7 @@ def test_launch_gen_increments_under_lock():
 def test_apply_settings_types_and_live_concurrency():
     """save_app_settings path: bool-for-int is skipped (isinstance trap),
     valid entries apply, and the registry semaphore resizes live."""
-    from dax import app  # import runs create_app against the temp HOME
+    from downloadanything import app  # import runs create_app against the temp HOME
 
     d = _TMP / "appstate"
     d.mkdir(parents=True, exist_ok=True)
@@ -2666,7 +2909,7 @@ def test_ui_target_guard():
     keeps a hypothetical dist2 sibling out (a str-prefix check passed it).
     The catch-all path arrives with a leading slash; an absolute join would
     serve index.html for every asset."""
-    from dax import app
+    from downloadanything import app
 
     idx = app.UI_DIST / "index.html"
     assert app._resolve_ui_target("../dist2/secret.js") == idx
@@ -2683,7 +2926,7 @@ def test_ui_assets_get_a_real_media_type():
     bundle is served as octet-stream and browsers refuse the module script."""
     from litestar.response import File
 
-    from dax import app
+    from downloadanything import app
 
     tmp = _TMP / "uidist"
     (tmp / "assets").mkdir(parents=True, exist_ok=True)
@@ -2711,7 +2954,7 @@ class _FakeWs:
 def test_push_state_dedups_unchanged():
     """The broadcast loop must not resend identical state — snapshot and
     engine status go out per change (or per new client), not per tick."""
-    from dax import app
+    from downloadanything import app
 
     d = _TMP / "appstate2"
     d.mkdir(parents=True, exist_ok=True)
@@ -2752,7 +2995,7 @@ def test_tmp_sweep_keeps_db_tasks_outside_restore_window():
 
     d = _TMP / f"sweep-{next(_db_seq)}"
     d.mkdir(parents=True, exist_ok=True)
-    db = db_mod.TaskDb.open(d / "dax.db")
+    db = db_mod.TaskDb.open(d / "downloadanything.db")
     db.insert_task("oldpaused", {"url": "u"}, "paused", 0, 1)
     old_data = st.DATA_DIR
     st.DATA_DIR = d
@@ -2773,10 +3016,10 @@ def test_tmp_sweep_keeps_db_tasks_outside_restore_window():
 
 # ---- PyO3 bridge -------------------------------------------------------------
 
-def test_dax_rs_bridge_extract():
+def test_downloadanything_rs_bridge_extract():
     """The vendored Rust extractor carries per-URL errors, never throws."""
-    from dax import dax_rs
-    out = orjson.loads(dax_rs.extract("{}", ["data:text/html,<b>x</b>"]))
+    from downloadanything import downloadanything_rs
+    out = orjson.loads(downloadanything_rs.extract("{}", ["data:text/html,<b>x</b>"]))
     assert len(out) == 1
     assert out[0]["input"] == "data:text/html,<b>x</b>"
     assert out[0]["error_code"] == 1, "unsupported scheme → CODE_FAIL"
@@ -2787,9 +3030,9 @@ def test_rust_extract_forwards_cookie_context():
     """The Rust page fetch must carry the resolved session cookies — the
     same session yt-dlp gets — or cookie-gated pages 403 on one side only.
     The cookie rides `contexts` scoped to the page origin."""
-    from dax import dax_rs
+    from downloadanything import downloadanything_rs
     sent: dict = {}
-    orig_extract = dax_rs.extract
+    orig_extract = downloadanything_rs.extract
     orig_ck = ex._cookie_header_for_url
 
     def fake(opts_json, urls):
@@ -2797,12 +3040,12 @@ def test_rust_extract_forwards_cookie_context():
         return orjson.dumps([{"input": urls[0], "items": [],
                               "error": "HTTP 403"}]).decode()
 
-    dax_rs.extract = fake
+    downloadanything_rs.extract = fake
     ex._cookie_header_for_url = lambda o, u: ("https://x", "sess=1")
     try:
         page = ex._rust_extract(ex.ExtractOptions(), "https://x/watch")
     finally:
-        dax_rs.extract = orig_extract
+        downloadanything_rs.extract = orig_extract
         ex._cookie_header_for_url = orig_ck
     ctx = (sent.get("contexts") or [])[-1]
     assert ctx["url"] == "https://x"
@@ -2888,7 +3131,7 @@ def test_settings_additive_migration_preserves_values():
 # ---- aria2-next external downloader & WebSocket RPC --------------------------
 
 def test_aria2_next_settings_roundtrip_and_global_options():
-    from dax import aria2_next
+    from downloadanything import aria2_next
 
     d = _sdb()
     s = AppSettings(
@@ -2941,7 +3184,7 @@ def test_aria2_next_settings_roundtrip_and_global_options():
 def test_aria2_next_ytdlp_registration_and_protocol_routing():
     from yt_dlp.downloader import get_suitable_downloader
     from yt_dlp.downloader.external import Aria2cFD, get_external_downloader
-    from dax import aria2_next
+    from downloadanything import aria2_next
 
     aria2_next.register_ytdlp_downloader()
     ed = get_external_downloader("aria2_next")
@@ -3007,8 +3250,8 @@ def test_aria2_next_ytdlp_registration_and_protocol_routing():
 def test_aria2_next_delegated_fd_inherits_ydl_progress_hooks():
     """HlsFD/DashSegmentsFD never copy progress hooks to the delegated FD
     (yt-dlp TODO) — Aria2NextFD must adopt the ydl's hooks itself, once,
-    or dax's _progress_hook never fires and the UI stays 'waiting'."""
-    from dax import aria2_next
+    or DownloadAnything's _progress_hook never fires and the UI stays 'waiting'."""
+    from downloadanything import aria2_next
 
     db, _ = _db()
     task = dl.Task("aabbccddeeff0011", {"url": "https://example.com/v.m3u8"})
@@ -3025,7 +3268,7 @@ def test_aria2_next_delegated_fd_inherits_ydl_progress_hooks():
 def test_aria2_next_cli_version_caches_per_mtime():
     """`exe --version` is a subprocess — status polls cache it by binary
     mtime; a swapped binary re-probes automatically."""
-    from dax.aria2_next import daemon
+    from downloadanything.aria2_next import daemon
 
     cnt = _TMP / "cli-version-count"
     exe = _TMP / "fake-aria2-next"
@@ -3045,7 +3288,7 @@ def test_aria2_next_cli_version_caches_per_mtime():
 
 
 def test_aria2_next_leg_gid():
-    from dax import aria2_next
+    from downloadanything import aria2_next
 
     gid1 = aria2_next.derive_leg_gid("1122334455667788", "video.f137.mp4.part")
     gid2 = aria2_next.derive_leg_gid("1122334455667788", "video.f137.mp4.part")
@@ -3057,7 +3300,7 @@ def test_aria2_next_leg_gid():
 def test_aria2_next_direct_leg_falls_back_to_native():
     """aria2-next aborts a leg after its fixed 8s stall window; a direct
     download must finish through yt-dlp's own HTTP stack instead of failing."""
-    from dax import aria2_next
+    from downloadanything import aria2_next
 
     class _Daemon:
         def ensure_running(self, s):
@@ -3065,7 +3308,7 @@ def test_aria2_next_direct_leg_falls_back_to_native():
 
     calls: list[tuple] = []
     with dl.YoutubeDL({"quiet": True}) as ydl:
-        fd = aria2_next.Aria2NextFD(ydl, {"_dax_aria2_daemon": _Daemon()})
+        fd = aria2_next.Aria2NextFD(ydl, {"_downloadanything_aria2_daemon": _Daemon()})
         fd._download_http_single = lambda *a, **k: (False, "Connection stalled")
         fd._fetch_ranged_fragment = lambda *a, **k: calls.append(a)
         rc = fd._call_downloader(
@@ -3079,7 +3322,7 @@ def test_aria2_next_direct_leg_falls_back_to_native():
 def test_aria2_next_direct_leg_rpc_error_falls_back_to_native():
     """A dropped RPC socket raises instead of returning False; the leg must
     still reach yt-dlp's native fallback."""
-    from dax import aria2_next
+    from downloadanything import aria2_next
 
     class _Daemon:
         def ensure_running(self, s):
@@ -3087,7 +3330,7 @@ def test_aria2_next_direct_leg_rpc_error_falls_back_to_native():
 
     calls: list[tuple] = []
     with dl.YoutubeDL({"quiet": True}) as ydl:
-        fd = aria2_next.Aria2NextFD(ydl, {"_dax_aria2_daemon": _Daemon()})
+        fd = aria2_next.Aria2NextFD(ydl, {"_downloadanything_aria2_daemon": _Daemon()})
 
         def boom(*a, **k):
             raise ConnectionError("rpc reset")
@@ -3105,7 +3348,7 @@ def test_aria2_next_direct_leg_rpc_error_falls_back_to_native():
 def test_aria2_next_max_tries_is_a_stall_budget():
     """aria2's max-tries counts consecutive per-slot failures, not whole
     download retries; the yt-dlp retry count must not cap it at 3."""
-    from dax import aria2_next
+    from downloadanything import aria2_next
 
     with dl.YoutubeDL({"quiet": True}) as ydl:
         fd = aria2_next.Aria2NextFD(ydl, {})
@@ -3120,7 +3363,7 @@ def test_aria2_next_max_tries_is_a_stall_budget():
 def test_aria2_next_daemon_ws_rpc_and_e2e_download():
     import http.server
     import threading
-    from dax import aria2_next
+    from downloadanything import aria2_next
 
     aria2_exe = _aria2_path()
     if not aria2_exe:
@@ -3229,7 +3472,7 @@ def test_aria2_next_daemon_ws_rpc_and_e2e_download():
         task = dl.Task("abcdef0123456789", req_dict)
         db.insert_task(task.gid, req_dict, "waiting", len(payload), task.created_at)
         params = dl._ydl_dl_params(task, s_dl, db)
-        params["_dax_aria2_daemon"] = daemon
+        params["_downloadanything_aria2_daemon"] = daemon
 
         with dl.YoutubeDL(params) as ydl:
             ydl.add_post_processor(dl._ExpectPP(task, s_dl), when="before_dl")
@@ -3243,7 +3486,7 @@ def test_aria2_next_daemon_ws_rpc_and_e2e_download():
         # 2. End-to-end fragmented stream download via Aria2NextFD over WebSocket RPC
         frag_task = dl.Task("fedcba9876543210", {"url": f"http://127.0.0.1:{srv_port}/stream.mpd"})
         frag_params = dl._ydl_dl_params(frag_task, s_dl, db)
-        frag_params["_dax_aria2_daemon"] = daemon
+        frag_params["_downloadanything_aria2_daemon"] = daemon
         frag_out = out_folder / "fragments_assembled.bin"
         with dl.YoutubeDL(frag_params) as ydl:
             fd = aria2_next.Aria2NextFD(ydl, frag_params)
@@ -3441,7 +3684,7 @@ class _FakeRpc:
 
     def tell_status(self, gid, keys=None):
         if self.status is None:
-            from dax.aria2_next import Aria2RpcError
+            from downloadanything.aria2_next import Aria2RpcError
             raise Aria2RpcError(1, "GID not found", "aria2.tellStatus")
         return self.status
 
@@ -4254,7 +4497,7 @@ def test_ydl_dl_params_playlist_worker_spec_override():
 def test_check_name_conflict_playlist_skips():
     """Playlist adds name a folder — never a file conflict, even when the
     request also carries a filename hint."""
-    from dax.models import PlaylistReq, PlaylistItem
+    from downloadanything.models import PlaylistReq, PlaylistItem
     req = DownloadReq(
         url="https://youtube.com/playlist?list=PL1",
         filename_hint="anything",
@@ -4266,7 +4509,7 @@ def test_check_name_conflict_playlist_skips():
 def test_req_to_dict_playlist_camelizes():
     """The nested playlist payload rides req_json camelized — ie_key and
     duration_secs become ieKey/durationSecs on the wire and in the db."""
-    from dax.models import PlaylistReq, PlaylistItem
+    from downloadanything.models import PlaylistReq, PlaylistItem
     req = DownloadReq(
         url="https://youtube.com/playlist?list=PL1",
         playlist=PlaylistReq(
@@ -4327,7 +4570,7 @@ def test_rank_formats_dedupes_same_url_keeping_richest():
 def test_sniffed_extract_keeps_extensionless_streams():
     """The extension's kind/mime/height must survive into the fallback —
     an extensionless `/stream/abc` served as video/mp4 used to be dropped."""
-    from dax.models import ContextHeaders, ExtractOptions
+    from downloadanything.models import ContextHeaders, ExtractOptions
 
     opts = ExtractOptions(contexts=[
         ContextHeaders(
@@ -4355,7 +4598,7 @@ def test_context_headers_carry_capture_metadata():
     """The extension's capture fields ride the context struct (camelCase
     wire keys) instead of being ignored by msgspec."""
     import msgspec
-    from dax.models import ContextHeaders
+    from downloadanything.models import ContextHeaders
 
     c = msgspec.convert(
         {"url": "u", "kind": "file", "mime": "video/mp4",
@@ -4392,10 +4635,48 @@ def test_retired_media_extensions_are_rejected():
         assert filt.role(f"https://cdn.x/v.{ext}") is None, ext
 
 
+def test_thumbnail_proxy_fetches_with_referer():
+    """Hotlink-protected cover art needs the page referer; the proxy sends
+    it and refuses non-image responses."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from downloadanything import thumbs
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            ok = self.headers.get("Referer") == "https://page.site/"
+            body = b"\xff\xd8\xff\xe0" + b"x" * 32 if ok else b"no"
+            self.send_response(200 if ok else 403)
+            self.send_header("Content-Type", "image/jpeg" if ok else "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/p.jpg"
+    try:
+        body, content_type = thumbs.fetch_thumbnail(url, "https://page.site/")
+        assert content_type == "image/jpeg"
+        assert body.startswith(b"\xff\xd8\xff")
+        try:
+            thumbs.fetch_thumbnail(url, "")
+        except Exception:
+            pass
+        else:
+            raise AssertionError("a missing referer must fail")
+    finally:
+        server.shutdown()
+
+
 # ---- runner ------------------------------------------------------------------
 
 def main() -> None:
-    from dax import aria2_next
+    from downloadanything import aria2_next
 
     tests = [
         (n, f) for n, f in sorted(globals().items())

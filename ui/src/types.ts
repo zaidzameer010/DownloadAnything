@@ -1,4 +1,4 @@
-// Mirrors the backend's JSON output (src-py/dax-core/src/model.rs, src-py/dax/).
+// Mirrors the backend's JSON output (src-rs/src/model.rs, src-py/downloadanything/).
 // Only fields the UI actually reads are declared — extra wire keys are ignored.
 
 export type MediaKind = 'progressive' | 'hls' | 'dash' | 'audio'
@@ -77,6 +77,10 @@ export interface PageResult {
   /** Which extractor produced the result: yt-dlp | yt-dlp:generic | rust | extension. */
   extractor?: string
   items: MediaItem[]
+  /** Page-level metadata — survives even when no item was found (Rust). */
+  title?: string
+  thumbnail?: string
+  duration_secs?: number
   playlist?: PlaylistInfo
   error?: string
   error_code?: number
@@ -108,6 +112,10 @@ export interface ExtractOptions {
   /** Per-origin headers (cookies etc.) replayed on matching-host requests. */
   contexts?: RequestContext[]
   referer?: string
+  /** Extension fallback title — only used when the page extractors found none. */
+  title?: string
+  /** Live-DOM player poster — used when the page extractor found none. */
+  thumbnail?: string
 }
 
 // ---- downloads / engine settings ----
@@ -221,11 +229,13 @@ export interface RequestContext {
   title?: string
   headers: HeaderPair[]
   /** Extension capture classification — keeps extensionless streams and
-   *  carries the resolution encoded in the URL. */
+   *  carries the resolution/codecs encoded in the URL or source ladder. */
   kind?: string
   mime?: string
   label?: string
   height?: number
+  width?: number
+  codecs?: string
 }
 
 export interface DownloadReq {
@@ -391,7 +401,7 @@ export interface DownloadInfo {
     items: PlaylistTaskItem[]
   }
   /** Stored request fields merged in from the app task db. */
-  dax?: {
+  downloadanything?: {
     url?: string
     filenameHint?: string
     filename?: string

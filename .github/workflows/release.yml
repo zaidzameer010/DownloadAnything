@@ -46,13 +46,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release download "v${ARIA2_VERSION}" -R AnInsomniacy/aria2-next --pattern "aria2-next-${ARIA2_VERSION}-windows-x86_64.exe" --clobber
 
-      # beforeBuildCommand runs `bun run backend:bundle`: uv sync, dax_rs
-      # built against the venv Python, then the venv + uv CPython + dax
+      # beforeBuildCommand runs `bun run backend:bundle`: uv sync, downloadanything_rs
+      # built against the venv Python, then the venv + uv CPython + downloadanything
       # package staged into src-tauri/resources for the bundle.
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -63,11 +61,15 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # shared-key keeps the cache key stable across runs: the job always
+      # restores the previous run's cache, the cleanup step below deletes it,
+      # and rust-cache saves a fresh one under the same key post-job.
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           cache-all-crates: true
           prefix-key: "rust-cache-${{ matrix.platform }}"
+          shared-key: "release"
 
       # tauri.conf.json version is what the updater compares against — it must
       # equal the release tag or every launch reports a newer release forever.
@@ -102,7 +104,7 @@ jobs:
           PLATFORM="${{ matrix.platform }}"
           echo "Checking for previous caches to clean up for platform: $PLATFORM"
           CACHES_JSON=$(gh cache list --limit 100 --json id,key 2>/dev/null || echo "[]")
-          CACHE_IDS=$(echo "$CACHES_JSON" | jq -r --arg plat "$PLATFORM" '.[] | select(.key | contains($plat)) | .id')
+          CACHE_IDS=$(echo "$CACHES_JSON" | jq -r --arg plat "$PLATFORM" '.[] | select(.key | startswith("rust-cache-" + $plat)) | .id')
           if [ -n "$CACHE_IDS" ]; then
             for id in $CACHE_IDS; do
               echo "Deleting previous cache ID $id for platform $PLATFORM..."

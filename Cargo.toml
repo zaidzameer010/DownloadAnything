@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "src-py/dax-core",
+    "src-rs",
     "src-tauri",
 ]
 

@@ -29,6 +29,7 @@ import {
   onPush,
   onUpdateReady,
   restartApp,
+  thumbUrl,
   type PushPayload,
 } from './tauri'
 import { DownloadsView } from './downloads'
@@ -38,6 +39,7 @@ import {
   fmtBytes,
   fmtDuration,
   formatSelection,
+  isActive,
   isDone,
   isMagnet,
   isTorrentDownload,
@@ -176,6 +178,8 @@ export default function App() {
     extra?: {
       referer?: string
       contexts?: RequestContext[]
+      title?: string
+      thumbnail?: string
     },
   ) => {
     if (probingNow.has(input)) return
@@ -200,6 +204,8 @@ export default function App() {
     const opts: ExtractOptions = {
       ...(extra?.referer ? { referer: extra.referer } : {}),
       ...(extra?.contexts?.length ? { contexts: extra.contexts } : {}),
+      ...(extra?.title ? { title: extra.title } : {}),
+      ...(extra?.thumbnail ? { thumbnail: extra.thumbnail } : {}),
     }
     try {
       const [result] = await extractMedia([input], opts)
@@ -271,7 +277,12 @@ export default function App() {
       // Drop previous probes — keep only a still-running job for this exact
       // input so the dedupe in probe() leaves a visible card behind.
       setJobs((js) => js.filter((j) => j.input === p.url && j.state === 'running'))
-      probe(p.url, { referer: p.referer, contexts: p.contexts })
+      probe(p.url, {
+        referer: p.referer,
+        contexts: p.contexts,
+        title: p.title,
+        thumbnail: p.thumbnail,
+      })
     }).then((u) => {
       if (dead) u()
       else off = u
@@ -301,14 +312,7 @@ export default function App() {
 
   const counts = {
     all: tasks.length,
-    active: tasks.filter(
-      (d) =>
-        d.status === 'active' ||
-        d.status === 'downloading' ||
-        d.status === 'waiting' ||
-        d.status === 'postprocessing' ||
-        d.status === 'selecting',
-    ).length,
+    active: tasks.filter(isActive).length,
     completed: tasks.filter((d) => isDone(d)).length,
     paused: tasks.filter((d) => d.status === 'paused').length,
     failed: tasks.filter((d) => d.status === 'error' || !!d.errorMessage).length,
@@ -316,14 +320,7 @@ export default function App() {
 
   const matchesStatus = (d: DownloadInfo, f: StatusFilter) => {
     if (f === 'all') return true
-    if (f === 'active')
-      return (
-        d.status === 'active' ||
-        d.status === 'downloading' ||
-        d.status === 'waiting' ||
-        d.status === 'postprocessing' ||
-        d.status === 'selecting'
-      )
+    if (f === 'active') return isActive(d)
     if (f === 'completed') return isDone(d)
     if (f === 'paused') return d.status === 'paused'
     if (f === 'failed') return d.status === 'error' || !!d.errorMessage
@@ -336,7 +333,7 @@ export default function App() {
       (!q || taskName(d).toLowerCase().includes(q) || d.gid.includes(q)),
   )
   const sorted = [...filtered].sort(
-    (a, b) => (b.createdAt ?? b.dax?.createdAt ?? 0) - (a.createdAt ?? a.dax?.createdAt ?? 0),
+    (a, b) => (b.createdAt ?? b.downloadanything?.createdAt ?? 0) - (a.createdAt ?? a.downloadanything?.createdAt ?? 0),
   )
 
   // A magnet parked after its metadata arrived (status 'selecting') opens
@@ -388,14 +385,14 @@ export default function App() {
         </div>
       ) : (
         <main className="flex min-w-0 flex-1 flex-col">
-          <h1 className="sr-only">dax downloads</h1>
+          <h1 className="sr-only">DownloadAnything downloads</h1>
           <header className="flex h-14 shrink-0 items-center gap-3 border-b border-separator px-5">
             {/* Left: brand + engine telemetry */}
             <div className="flex min-w-0 items-center gap-3">
               <div className="flex shrink-0 items-center gap-2.5">
                 <LogoMark size={22} />
                 <span className="text-[15px] font-semibold tracking-[-0.02em] text-foreground">
-                  dax
+                  DownloadAnything
                 </span>
               </div>
               <span aria-hidden="true" className="h-4 w-px shrink-0 bg-separator" />
@@ -596,7 +593,7 @@ export default function App() {
                 <Alert.Content>
                   <Alert.Title>Update installed — v{updateReady.version}</Alert.Title>
                   <Alert.Description>
-                    Restart dax to finish updating. Active downloads keep running until then.
+                    Restart DownloadAnything to finish updating. Active downloads keep running until then.
                   </Alert.Description>
                 </Alert.Content>
                 <Button
@@ -1639,7 +1636,7 @@ function PlaylistPanel({
                 </span>
                 {e.thumbnail ? (
                   <img
-                    src={e.thumbnail}
+                    src={thumbUrl(e.thumbnail, playlist.url || job.input)}
                     alt=""
                     className="h-6 w-10 shrink-0 rounded-sm object-cover"
                     loading="lazy"
@@ -1722,7 +1719,7 @@ function ItemSection({
       <div className="flex gap-3 px-0.5 pb-3">
         {item.thumbnail ? (
           <img
-            src={item.thumbnail}
+            src={thumbUrl(item.thumbnail, item.page_url)}
             alt=""
             className="mt-0.5 h-10 w-16 shrink-0 rounded-md object-cover"
             loading="lazy"

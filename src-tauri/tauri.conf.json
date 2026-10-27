@@ -1,8 +1,8 @@
 {
   "$schema": "../ui/node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "dax",
+  "productName": "DownloadAnything",
   "version": "0.7.0",
-  "identifier": "dax",
+  "identifier": "downloadanything",
   "build": {
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:5173",
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "dax",
+        "title": "DownloadAnything",
         "width": 1080,
         "height": 800,
         "minWidth": 720,
@@ -35,6 +35,7 @@
     ],
     "resources": {
       "resources/backend/": "backend/",
+      "resources/extension/": "extension/",
       "resources/venv/": "venv/",
       "resources/python/": "python/"
     },

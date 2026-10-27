@@ -39,6 +39,14 @@ export const pickMany = (set: Set<number>, indices: number[], select: boolean) =
   return next
 }
 
+/** Copy `set` with one index flipped. */
+export const toggleIndex = (set: Set<number>, idx: number) => {
+  const next = new Set(set)
+  if (next.has(idx)) next.delete(idx)
+  else next.add(idx)
+  return next
+}
+
 /** Torrent files as a nested folder tree with checkboxes — shared by the
  *  probe card, the intercept modal and the picker dialog. Folder rows carry
  *  a select-all checkbox when onToggleDir is provided. */
@@ -222,13 +230,7 @@ export function TorrentJobCard({
     }
   }, [job.input, data])
 
-  const toggle = (idx: number) =>
-    setPicked((prev) => {
-      const next = new Set(prev)
-      if (next.has(idx)) next.delete(idx)
-      else next.add(idx)
-      return next
-    })
+  const toggle = (idx: number) => setPicked((prev) => toggleIndex(prev, idx))
 
   const toggleDir = (indices: number[], select: boolean) =>
     setPicked((prev) => pickMany(prev, indices, select))
@@ -358,13 +360,7 @@ export function TorrentPickerDialog({
     setPicked(new Set(files.map((f) => Number(f.index))))
   }, [files])
 
-  const toggle = (idx: number) =>
-    setPicked((prev) => {
-      const next = new Set(prev)
-      if (next.has(idx)) next.delete(idx)
-      else next.add(idx)
-      return next
-    })
+  const toggle = (idx: number) => setPicked((prev) => toggleIndex(prev, idx))
 
   const toggleDir = (indices: number[], select: boolean) =>
     setPicked((prev) => pickMany(prev, indices, select))
