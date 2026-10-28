@@ -61,13 +61,14 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # shared-key keeps the cache key stable across runs: the job always
-      # restores the previous run's cache, the cleanup step below deletes it,
-      # and rust-cache saves a fresh one under the same key post-job.
+      # Stable shared key: every run restores the previous cache. After a
+      # successful build the old cache is removed below, letting the post-step
+      # save the new one under the same key.
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           cache-all-crates: true
+          save-if: true
           prefix-key: "rust-cache-${{ matrix.platform }}"
           shared-key: "release"
 
@@ -98,11 +99,14 @@ jobs:
           updaterJsonPreferNsis: true
           args: --config '{"plugins":{"updater":{"pubkey":"${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}"}}}'
 
-      - name: Cleanup old caches for OS
-        shell: bash # Forces Bash on Windows so '|| true' doesn't cause a syntax error
+      # rust-cache saves the new cache in a post-step. Remove the previous
+      # cache here so the new one can be stored under the same stable key.
+      - name: Cleanup previous Rust cache
+        if: success()
+        shell: bash
         run: |
           PLATFORM="${{ matrix.platform }}"
-          echo "Checking for previous caches to clean up for platform: $PLATFORM"
+          echo "Removing previous caches for $PLATFORM"
           CACHES_JSON=$(gh cache list --limit 100 --json id,key 2>/dev/null || echo "[]")
           CACHE_IDS=$(echo "$CACHES_JSON" | jq -r --arg plat "$PLATFORM" '.[] | select(.key | startswith("rust-cache-" + $plat)) | .id')
           if [ -n "$CACHE_IDS" ]; then
