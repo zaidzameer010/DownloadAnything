@@ -69,8 +69,11 @@ function dropAbsoluteSymlinks(dir: string) {
   }
 }
 
-// 1. venv + the CPython version pinned by src-py/.python-version
-run('uv', ['sync'], { cwd: srcPy })
+// 1. venv on a uv-managed CPython pinned by src-py/.python-version —
+//    only-managed keeps uv from reusing a stray system interpreter.
+const pythonVersion = readFileSync(join(srcPy, '.python-version'), 'utf8').trim()
+run('uv', ['python', 'install', pythonVersion], { cwd: srcPy })
+run('uv', ['sync'], { cwd: srcPy, env: { UV_PYTHON_PREFERENCE: 'only-managed' } })
 const venv = join(srcPy, '.venv')
 const venvPython = isWindows
   ? join(venv, 'Scripts', 'python.exe')
