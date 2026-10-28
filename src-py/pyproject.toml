@@ -1,6 +1,6 @@
 [project]
 name = "downloadanything-py"
-version = "0.7.0"
+version = "0.7.5"
 description = "DownloadAnything backend — Python port (yt-dlp + vendored Rust extractor)"
 requires-python = ">=3.14"
 dependencies = [
