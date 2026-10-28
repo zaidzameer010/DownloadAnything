@@ -14,7 +14,6 @@ jobs:
   release:
     permissions:
       contents: write
-      actions: write
     strategy:
       fail-fast: false
       # Serial: both legs merge into the same latest.json — parallel uploads race.
@@ -61,9 +60,9 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Stable shared key: every run restores the previous cache. After a
-      # successful build the old cache is removed below, letting the post-step
-      # save the new one under the same key.
+      # Stable shared key: tag runs restore caches saved on the default branch
+      # (e.g. by workflow_dispatch); GitHub cache scoping makes tag-saved
+      # caches invisible to other tags, so no manual cache rotation is done.
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
@@ -98,24 +97,3 @@ jobs:
           # NSIS -setup.exe is the conventional updater artifact over MSI
           updaterJsonPreferNsis: true
           args: --config '{"plugins":{"updater":{"pubkey":"${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}"}}}'
-
-      # rust-cache saves the new cache in a post-step. Remove the previous
-      # cache here so the new one can be stored under the same stable key.
-      - name: Cleanup previous Rust cache
-        if: success()
-        shell: bash
-        run: |
-          PLATFORM="${{ matrix.platform }}"
-          echo "Removing previous caches for $PLATFORM"
-          CACHES_JSON=$(gh cache list --limit 100 --json id,key 2>/dev/null || echo "[]")
-          CACHE_IDS=$(echo "$CACHES_JSON" | jq -r --arg plat "$PLATFORM" '.[] | select(.key | startswith("rust-cache-" + $plat)) | .id')
-          if [ -n "$CACHE_IDS" ]; then
-            for id in $CACHE_IDS; do
-              echo "Deleting previous cache ID $id for platform $PLATFORM..."
-              gh cache delete "$id" || true
-            done
-          else
-            echo "No previous caches found for platform $PLATFORM."
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
