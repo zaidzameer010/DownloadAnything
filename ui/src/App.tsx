@@ -27,8 +27,11 @@ import {
   onDownloads,
   onEngine,
   onPush,
+  onTorrentFiles,
   onUpdateReady,
+  readTorrentFile,
   restartApp,
+  takePendingTorrents,
   thumbUrl,
   type PushPayload,
 } from './tauri'
@@ -115,6 +118,15 @@ const VISIBLE_FORMATS = 6
 
 let jobSeq = 0
 const probingNow = new Set<string>()
+
+/** btoa chokes on a spread over ~64KB — chunk it. */
+function bytesToB64(bytes: Uint8Array) {
+  let bin = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  }
+  return btoa(bin)
+}
 
 export default function App() {
   const [page, setPage] = useState<'downloads' | 'settings'>('downloads')
@@ -246,16 +258,37 @@ export default function App() {
     }
     try {
       const bytes = new Uint8Array(await file.arrayBuffer())
-      let bin = ''
-      for (let i = 0; i < bytes.length; i += 0x8000) {
-        bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
-      }
       setJobs([
-        { id: ++jobSeq, input: file.name, torrent: btoa(bin), state: 'torrent' as const },
+        { id: ++jobSeq, input: file.name, torrent: bytesToB64(bytes), state: 'torrent' as const },
       ])
       setProbeOpen(true)
     } catch (e) {
       toast.danger('Could not read torrent file', { description: errMsg(e) })
+    }
+  }
+
+  /** .torrent files the OS handed to the app (double-click, icon drop) —
+   *  same inspect card as a picked file, one job per path. */
+  const openTorrentPaths = async (paths: string[]) => {
+    if (!paths.length) return
+    focusWindow()
+    const next: Job[] = []
+    for (const p of paths) {
+      try {
+        const bytes = new Uint8Array(await readTorrentFile(p))
+        next.push({
+          id: ++jobSeq,
+          input: p.split(/[\\/]/).pop() || p,
+          torrent: bytesToB64(bytes),
+          state: 'torrent' as const,
+        })
+      } catch (e) {
+        toast.danger('Could not read torrent file', { description: errMsg(e) })
+      }
+    }
+    if (next.length) {
+      setJobs(next)
+      setProbeOpen(true)
     }
   }
 
@@ -283,6 +316,28 @@ export default function App() {
         title: p.title,
         thumbnail: p.thumbnail,
       })
+    }).then((u) => {
+      if (dead) u()
+      else off = u
+    })
+    return () => {
+      dead = true
+      off?.()
+    }
+  }, [])
+
+  // OS-opened .torrent files: drain anything queued before this listener
+  // existed (cold start), then subscribe for opens on the running app.
+  useEffect(() => {
+    let dead = false
+    let off: (() => void) | undefined
+    takePendingTorrents()
+      .then((paths) => {
+        if (!dead) openTorrentPaths(paths)
+      })
+      .catch(() => {})
+    onTorrentFiles((paths) => {
+      if (!dead) openTorrentPaths(paths)
     }).then((u) => {
       if (dead) u()
       else off = u
@@ -355,9 +410,9 @@ export default function App() {
 
   const hasActive = (snap?.active.length ?? 0) > 0 || (snap?.waiting.length ?? 0) > 0
   const hasPaused = snap?.stopped.some((d) => d.status === 'paused') ?? false
-  const hasStopped = snap?.stopped.some((d) => d.status !== 'removed') ?? false
+  const hasStopped = snap?.stopped.some((d) => d.status === 'complete') ?? false
   const dlSpeed = Number(snap?.stat?.downloadSpeed ?? 0)
-  const totalBytes = tasks.reduce(
+  const filteredBytes = sorted.reduce(
     (sum, d) => sum + (Number(d.totalLength) || Number(d.completedLength) || 0),
     0,
   )
@@ -366,13 +421,12 @@ export default function App() {
     id: StatusFilter
     label: string
     count: number
-    dotClass?: string
   }[] = [
     { id: 'all', label: 'All', count: counts.all },
-    { id: 'active', label: 'Active', count: counts.active, dotClass: 'bg-(--state-downloading)' },
-    { id: 'completed', label: 'Completed', count: counts.completed, dotClass: 'bg-(--state-complete)' },
-    { id: 'paused', label: 'Paused', count: counts.paused, dotClass: 'bg-(--state-paused)' },
-    { id: 'failed', label: 'Failed', count: counts.failed, dotClass: 'bg-(--state-error)' },
+    { id: 'active', label: 'Active', count: counts.active },
+    { id: 'completed', label: 'Completed', count: counts.completed },
+    { id: 'paused', label: 'Paused', count: counts.paused },
+    { id: 'failed', label: 'Failed', count: counts.failed },
   ]
 
   return (
@@ -386,87 +440,78 @@ export default function App() {
       ) : (
         <main className="flex min-w-0 flex-1 flex-col">
           <h1 className="sr-only">DownloadAnything downloads</h1>
-          <header className="flex h-14 shrink-0 items-center gap-3 border-b border-separator px-5">
+          <header className="chrome flex h-13 shrink-0 items-center px-6">
             {/* Left: brand + engine telemetry */}
-            <div className="flex min-w-0 items-center gap-3">
+            <div className="flex min-w-0 flex-1 items-center gap-4">
               <div className="flex shrink-0 items-center gap-2.5">
-                <LogoMark size={22} />
-                <span className="text-[15px] font-semibold tracking-[-0.02em] text-foreground">
+                <LogoMark size={19} />
+                <span className="text-title font-semibold tracking-[-0.02em] text-foreground">
                   DownloadAnything
                 </span>
               </div>
-              <span aria-hidden="true" className="h-4 w-px shrink-0 bg-separator" />
-              <div className="flex min-w-0 items-center gap-2.5">
+              <span
+                className="inline-flex min-w-0 items-center gap-2"
+                title={
+                  engine?.error ||
+                  (engine?.running
+                    ? `Engine active: ${engine.version ?? 'yt-dlp'}`
+                    : 'Engine stopped')
+                }
+              >
                 <span
-                  className="inline-flex min-w-0 items-center gap-1.5"
-                  title={
-                    engine?.error ||
-                    (engine?.running
-                      ? `Engine active: ${engine.version ?? 'yt-dlp'}`
-                      : 'Engine stopped')
-                  }
-                >
-                  <span
-                    className={`size-1.5 shrink-0 rounded-full transition-colors ${
-                      engine == null
-                        ? 'bg-muted'
-                        : engine.running
-                          ? 'bg-success'
-                          : 'bg-danger'
-                    }`}
-                  />
-                  <span className="truncate font-mono text-[11px] text-muted">
-                    {engine == null
-                      ? 'connecting…'
+                  className={`size-1.5 shrink-0 rounded-full transition-colors ${
+                    engine == null
+                      ? 'bg-(--state-queued)'
                       : engine.running
-                        ? (engine.version ?? 'ready')
-                        : 'offline'}
+                        ? 'bg-success'
+                        : 'bg-danger'
+                  }`}
+                />
+                <span className="hidden truncate text-meta text-muted min-[860px]:inline">
+                  {engine == null
+                    ? 'Connecting…'
+                    : engine.running
+                      ? 'Engine ready'
+                      : 'Engine offline'}
+                </span>
+              </span>
+
+              {dlSpeed > 0 && (
+                <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap font-mono text-meta tabular-nums text-(--info-soft-foreground)">
+                  <ArrowDownToLine
+                    width={11}
+                    height={11}
+                    className="shrink-0 text-(--info)"
+                  />
+                  <span className="inline-block w-[9ch] text-center">
+                    {fmtBytes(dlSpeed)}/s
                   </span>
                 </span>
-
-                {dlSpeed > 0 && (
-                  <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap font-mono text-[11px] tabular-nums text-(--info-soft-foreground)">
-                    <ArrowDownToLine
-                      width={11}
-                      height={11}
-                      className="shrink-0 text-(--info)"
-                    />
-                    <span className="inline-block w-[9ch] text-center">
-                      {fmtBytes(dlSpeed)}/s
-                    </span>
-                    <span className="meter" aria-hidden="true">
-                      <i />
-                      <i />
-                      <i />
-                      <i />
-                    </span>
-                  </span>
-                )}
-              </div>
+              )}
             </div>
 
             {/* Right: filter search, bulk controls, settings, primary action */}
-            <div className="ms-auto flex min-w-0 items-center gap-2.5">
+            <div className="flex shrink-0 items-center gap-2">
               {tasks.length > 0 && (
                 <SearchField
                   aria-label="Filter downloads"
                   value={query}
                   onChange={setQuery}
-                  className="w-60"
+                  className="w-52 lg:w-56"
                 >
-                  <SearchField.Group className="h-8.5 rounded-lg text-xs">
+                  <SearchField.Group className="rounded-lg">
                     <SearchField.SearchIcon />
                     <SearchField.Input
-                      className="w-full text-xs"
+                      className="w-full text-meta"
                       placeholder="Filter downloads…"
                     />
-                    <SearchField.ClearButton />
+                    <SearchField.ClearButton aria-label="Clear filter" />
                   </SearchField.Group>
                 </SearchField>
               )}
 
               {tasks.length > 0 && (
-                <div className="flex shrink-0 items-center gap-0.5">
+                <div className="hidden shrink-0 items-center gap-0.5 min-[900px]:flex">
                   <IconBtn
                     label="Pause all"
                     onPress={() => act('-', 'pauseAll')}
@@ -485,7 +530,7 @@ export default function App() {
                     label="Clear finished"
                     onPress={() => act('-', 'purge')}
                     isDisabled={!hasStopped}
-                    className="hover:bg-(--danger-soft) hover:text-(--state-error-fg)"
+                    danger
                   >
                     <TrashBin width={14} height={14} />
                   </IconBtn>
@@ -494,7 +539,6 @@ export default function App() {
 
               <IconBtn
                 size="md"
-                variant="secondary"
                 label="Settings"
                 onPress={() => setPage('settings')}
               >
@@ -504,7 +548,7 @@ export default function App() {
               <Button
                 variant="primary"
                 size="sm"
-                className="press-tactile h-8.5 shrink-0 gap-1.5 px-3.5 text-xs font-medium"
+                className="gap-1.5"
                 onPress={() => setExtractOpen(true)}
               >
                 <Plus width={14} height={14} />
@@ -513,69 +557,60 @@ export default function App() {
             </div>
           </header>
 
-          {/* Status Filter & Summary Bar */}
+          {/* Status filter & summary bar */}
           {tasks.length > 0 && (
-            <div className="border-b border-separator px-5 py-2">
-              <div className="mx-auto flex w-full max-w-7xl items-center justify-between gap-4">
-                <div
-                  role="tablist"
-                  aria-label="Filter by download status"
-                  className="inline-flex items-center gap-0.5"
-                >
-                  {filterTabs.map((t) => {
-                    const active = statusFilter === t.id
-                    return (
-                      <button
-                        key={t.id}
-                        type="button"
-                        role="tab"
-                        aria-selected={active}
-                        onClick={() => setStatusFilter(t.id)}
-                        className={`press-tactile inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium outline-none transition-colors ${
-                          active
-                            ? 'bg-surface-secondary text-foreground'
-                            : 'text-muted hover:text-foreground'
+            <div className="flex h-11 shrink-0 items-center justify-between gap-4 px-6">
+              <div
+                role="group"
+                aria-label="Filter by download status"
+                className="inline-flex items-center gap-0.5"
+              >
+                {filterTabs.map((t) => {
+                  const active = statusFilter === t.id
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => setStatusFilter(t.id)}
+                      className={`press-tactile inline-flex h-7 items-center rounded-md px-2.5 text-meta font-medium outline-none transition-colors focus-visible:ring-1 focus-visible:ring-focus ${
+                        active
+                          ? 'bg-(--state-selected-bg) text-foreground'
+                          : 'text-muted hover:bg-(--state-hover-bg) hover:text-foreground'
+                      }`}
+                    >
+                      <span>{t.label}</span>
+                      <span
+                        className={`ms-1.5 font-mono text-micro tabular-nums ${
+                          active ? 'text-foreground-secondary' : 'text-muted-subtle'
                         }`}
                       >
-                        {t.dotClass && t.count > 0 && (
-                          <span
-                            className={`size-1.5 rounded-full ${t.dotClass}`}
-                            aria-hidden="true"
-                          />
-                        )}
-                        <span>{t.label}</span>
-                        <span
-                          className={`font-mono text-[10.5px] tabular-nums ${
-                            active ? 'text-(--foreground-secondary)' : 'text-(--muted-subtle)'
-                          }`}
-                        >
-                          {t.count}
-                        </span>
-                      </button>
-                    )
-                  })}
-                </div>
-
-                <div className="flex items-center gap-3 font-mono text-[11px] tabular-nums text-muted">
-                  <span>
-                    {sorted.length} {sorted.length === 1 ? 'task' : 'tasks'}
-                  </span>
-                  {totalBytes > 0 && (
-                    <>
-                      <span aria-hidden="true" className="text-(--muted-subtle)">
-                        ·
+                        {t.count}
                       </span>
-                      <span>{fmtBytes(totalBytes)} total</span>
-                    </>
-                  )}
-                </div>
+                    </button>
+                  )
+                })}
+              </div>
+
+              <div className="flex items-center gap-2 font-mono text-meta tabular-nums text-muted">
+                <span>
+                  {sorted.length} {sorted.length === 1 ? 'task' : 'tasks'}
+                </span>
+                {filteredBytes > 0 && (
+                  <>
+                    <span aria-hidden="true" className="text-muted-subtle">
+                      ·
+                    </span>
+                    <span>{fmtBytes(filteredBytes)}</span>
+                  </>
+                )}
               </div>
             </div>
           )}
 
           {snap?.error && (
-            <div className="px-5 pt-4">
-              <Alert status="warning" className="mx-auto max-w-7xl">
+            <div className="px-6 pt-4">
+              <Alert status="warning">
                 <Alert.Indicator>
                   <TriangleExclamation />
                 </Alert.Indicator>
@@ -587,8 +622,8 @@ export default function App() {
           )}
 
           {updateReady && (
-            <div className="px-5 pt-4">
-              <Alert status="success" className="mx-auto max-w-7xl">
+            <div className="px-6 pt-4">
+              <Alert status="success">
                 <Alert.Indicator />
                 <Alert.Content>
                   <Alert.Title>Update installed — v{updateReady.version}</Alert.Title>
@@ -610,7 +645,7 @@ export default function App() {
           )}
 
           <ScrollShadow className="min-h-0 flex-1 overflow-y-auto">
-            <div className="mx-auto flex min-h-full w-full max-w-7xl flex-col px-5 pt-5 pb-20">
+            <div className="flex min-h-full flex-col px-6 pt-1 pb-16">
               {sorted.length === 0 ? (
                 <div className="m-auto w-full">
                   {snap === null ? (
@@ -621,13 +656,13 @@ export default function App() {
                     />
                   ) : snap.error && tasks.length === 0 ? (
                     <EmptyState
-                      icon={<TriangleExclamation width={22} height={22} />}
+                      icon={<TriangleExclamation width={20} height={20} />}
                       text="Engine unreachable"
                       hint={snap.error}
                     />
                   ) : (
                     <EmptyState
-                      icon={<Tray width={22} height={22} />}
+                      icon={<Tray width={20} height={20} />}
                       text={
                         query || statusFilter !== 'all'
                           ? 'No matching tasks'
@@ -650,7 +685,7 @@ export default function App() {
                           <Button
                             variant="secondary"
                             size="sm"
-                            className="press-tactile mt-1 h-8.5 gap-1.5 px-3.5 text-xs font-medium"
+                            className="mt-1"
                             onPress={() => {
                               setQuery('')
                               setStatusFilter('all')
@@ -662,7 +697,7 @@ export default function App() {
                           <Button
                             variant="primary"
                             size="sm"
-                            className="press-tactile mt-1 h-8.5 gap-1.5 px-4 text-xs font-medium"
+                            className="mt-1 gap-1.5"
                             onPress={() => setExtractOpen(true)}
                           >
                             <Plus width={14} height={14} />
@@ -785,19 +820,19 @@ function NameConflictModal({
   return (
     <Modal.Backdrop isOpen={!!conflicts} onOpenChange={(o) => !o && onAction('cancel')}>
       <Modal.Container>
-        <Modal.Dialog className="sm:max-w-105">
+        <Modal.Dialog className="sm:max-w-104">
           <Modal.CloseTrigger />
           <Modal.Header>
             <Modal.Heading>File already exists</Modal.Heading>
           </Modal.Header>
           <Modal.Body>
-            <p className="text-pretty text-[13px] leading-relaxed text-muted">
+            <p className="text-pretty text-body leading-relaxed text-muted">
               {names.length === 1
                 ? 'This name is already taken'
                 : `${names.length} names are already taken`}
               {dir ? ` in ${dir}` : ''}:
             </p>
-            <ul className="mt-2.5 flex max-h-32 flex-col gap-1 overflow-y-auto rounded-lg bg-surface-secondary p-2.5 font-mono text-xs text-(--foreground-secondary)">
+            <ul className="mt-3 flex max-h-32 flex-col gap-1 overflow-y-auto rounded-lg bg-surface-secondary p-2.5 font-mono text-meta text-foreground-secondary">
               {names.map((n) => (
                 <li key={n} className="truncate" title={n}>{n}</li>
               ))}
@@ -806,21 +841,18 @@ function NameConflictModal({
           <Modal.Footer className="justify-end gap-2">
             <Button
               slot="close" variant="secondary" size="sm"
-              className="press-tactile h-8.5 px-3.5 text-xs font-medium"
               onPress={() => onAction('cancel')}
             >
               Cancel
             </Button>
             <Button
               slot="close" variant="secondary" size="sm"
-              className="press-tactile h-8.5 px-3.5 text-xs font-medium"
               onPress={() => onAction('rename')}
             >
               Rename
             </Button>
             <Button
               slot="close" variant="danger" size="sm"
-              className="press-tactile h-8.5 px-3.5 text-xs font-medium"
               onPress={() => onAction('override')}
             >
               Replace
@@ -1038,22 +1070,22 @@ function InterceptModal({
               {dl && kind && (
                 <>
                   <div className="relative mt-1">
-                    <div className="flex size-15 items-center justify-center rounded-xl bg-surface-secondary text-muted">
-                      <kind.Icon width={28} height={28} />
+                    <div className="flex size-14 items-center justify-center rounded-xl bg-surface-secondary text-muted">
+                      <kind.Icon width={26} height={26} />
                     </div>
                     {dl.ext && (
-                      <span className="absolute -right-2 -bottom-1.5 rounded-md bg-surface-tertiary px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-foreground">
+                      <span className="absolute -right-2 -bottom-1.5 rounded-md bg-surface-tertiary px-1.5 py-0.5 font-mono text-micro font-semibold uppercase tracking-wide text-foreground">
                         {dl.ext}
                       </span>
                     )}
                   </div>
                   <div className="min-w-0">
-                    <p className="line-clamp-2 break-all text-[15px] font-semibold leading-snug tracking-[-0.01em] text-foreground">
+                    <p className="line-clamp-2 break-all text-title font-semibold leading-snug text-foreground">
                       {displayName || 'Unnamed file'}
                     </p>
-                    <p className="mt-1 font-mono text-xs text-muted">{meta.join(' · ')}</p>
+                    <p className="mt-1 font-mono text-meta text-muted">{meta.join(' · ')}</p>
                     {fromHost && fromHost !== host && (
-                      <p className="mt-0.5 text-[11px] text-muted">
+                      <p className="mt-0.5 text-micro text-muted-subtle">
                         via {fromHost}
                       </p>
                     )}
@@ -1069,7 +1101,7 @@ function InterceptModal({
                     </Alert>
                   )}
                   {torrent && !torrentErr && !preview && (
-                    <div className="flex items-center gap-2 text-xs text-muted">
+                    <div className="flex items-center gap-2 text-meta text-muted">
                       <Spinner size="sm" />
                       Reading torrent…
                     </div>
@@ -1097,7 +1129,7 @@ function InterceptModal({
                   )}
                   <Disclosure className="w-full">
                     <Disclosure.Heading>
-                      <Disclosure.Trigger className="press-tactile mx-auto flex h-7 items-center gap-1 rounded-md px-2.5 text-xs font-medium text-muted hover:text-foreground">
+                      <Disclosure.Trigger className="press-tactile mx-auto flex h-7 items-center gap-1 rounded-md px-2.5 text-meta font-medium text-muted outline-none hover:bg-(--state-hover-bg) hover:text-foreground">
                         Details
                         <Disclosure.Indicator />
                       </Disclosure.Trigger>
@@ -1106,9 +1138,9 @@ function InterceptModal({
                       <Disclosure.Body>
                         <div className="flex flex-col gap-1.5 rounded-lg bg-surface-secondary p-3 text-left">
                           {details.map(([k, v]) => (
-                            <div key={k} className="grid grid-cols-[72px_1fr] gap-3 text-xs">
+                            <div key={k} className="grid grid-cols-[72px_1fr] gap-3 text-meta">
                               <span className="text-muted">{k}</span>
-                              <span className="min-w-0 break-all font-mono text-(--foreground-secondary)">{v}</span>
+                              <span className="min-w-0 wrap-break-word font-mono text-foreground-secondary">{v}</span>
                             </div>
                           ))}
                         </div>
@@ -1124,7 +1156,7 @@ function InterceptModal({
                 slot="close"
                 variant="primary"
                 size="sm"
-                className="press-tactile h-8.5 flex-1 gap-2 px-4 text-xs font-medium"
+                className="flex-1 gap-2"
                 isDisabled={busy || (torrent && (!preview || picked.size === 0))}
                 onPress={() => void download()}
               >
@@ -1246,14 +1278,14 @@ function ProbeModal({
         <Modal.Container>
           <Modal.Dialog className="sm:max-w-176">
             <Modal.CloseTrigger />
-            <Modal.Header className="gap-1">
+            <Modal.Header className="gap-1.5">
               <Modal.Heading>
                 <span className="flex items-center gap-2.5">
                   {jobs.length > 0 && (
                     <span
-                      className={`size-2 rounded-full ${
+                      className={`size-1.5 rounded-full ${
                         probing
-                          ? 'bg-(--info) animate-pulse'
+                          ? 'bg-(--info)'
                           : allFailed
                             ? 'bg-danger'
                             : anyFailed
@@ -1274,19 +1306,19 @@ function ProbeModal({
                 </span>
               </Modal.Heading>
               {!probing && ready > 0 && (
-                <p className="text-pretty text-xs leading-relaxed text-muted">
+                <p className="text-pretty text-meta leading-relaxed text-muted">
                   The best available format is preselected for each item.
                 </p>
               )}
             </Modal.Header>
-            <Modal.Body className="flex max-h-[65vh] flex-col divide-y divide-separator overflow-y-auto">
+            <Modal.Body className="flex max-h-[65vh] flex-col gap-5 overflow-y-auto">
               {jobs.length === 0 && (
-                <p className="py-8 text-center text-sm text-muted">
+                <p className="py-8 text-center text-body text-muted">
                   Nothing to inspect yet.
                 </p>
               )}
               {jobs.map((job) => (
-                <div key={job.id} className="py-4 first:pt-0 last:pb-0">
+                <div key={job.id}>
                   <JobCard
                     job={job}
                     report={report(job)}
@@ -1305,7 +1337,7 @@ function ProbeModal({
                   slot="close"
                   variant="primary"
                   size="sm"
-                  className="press-tactile h-8.5 gap-2 px-4 text-xs font-medium"
+                  className="gap-2"
                   onPress={() => void downloadSelected()}
                 >
                   <ArrowDownToLine width={14} height={14} />
@@ -1335,21 +1367,21 @@ function EmptyState({
   action?: React.ReactNode
 }) {
   return (
-    <div className="mx-auto flex w-full max-w-md flex-col items-center justify-center gap-4 px-6 py-12 text-center">
-      <div className="flex size-11 items-center justify-center rounded-full bg-surface-secondary text-muted">
+    <div className="mx-auto flex w-full max-w-108 flex-col items-center justify-center gap-3.5 px-6 py-12 text-center">
+      <div className="flex size-10 items-center justify-center rounded-full bg-(--state-hover-bg) text-muted-subtle">
         {icon}
       </div>
       <div className="flex flex-col gap-1.5">
-        <h2 className="text-balance text-[16px] font-semibold tracking-[-0.02em] text-foreground">
+        <h2 className="text-balance text-display font-semibold text-foreground">
           {text}
         </h2>
-        <p className="text-pretty text-xs leading-relaxed text-muted">
+        <p className="mx-auto max-w-[42ch] text-pretty text-meta leading-relaxed text-muted">
           {hint}
         </p>
       </div>
       {action}
       {meta && (
-        <p className="font-mono text-[10.5px] tracking-[0.01em] text-(--muted-subtle)">{meta}</p>
+        <p className="font-mono text-micro text-muted-subtle">{meta}</p>
       )}
     </div>
   )
@@ -1374,8 +1406,8 @@ function JobCard({
       <div className="rise-in flex flex-col gap-3 py-1">
         <div className="flex items-center gap-2.5">
           <Spinner size="sm" />
-          <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{job.input}</span>
-          <Tag className="chip--postprocessing px-2 font-medium">Finding media</Tag>
+          <span className="min-w-0 flex-1 truncate font-mono text-meta text-muted">{job.input}</span>
+          <Tag className="px-2 font-medium">Finding media</Tag>
         </div>
         <div className="flex flex-col gap-2">
           <Skeleton className="h-3.5 w-2/3 rounded-md" />
@@ -1391,7 +1423,7 @@ function JobCard({
           <TriangleExclamation />
         </Alert.Indicator>
         <Alert.Content>
-          <Alert.Title className="font-mono text-xs font-normal">{job.input}</Alert.Title>
+          <Alert.Title className="font-mono text-meta font-normal">{job.input}</Alert.Title>
           <Alert.Description>{job.fatal}</Alert.Description>
         </Alert.Content>
       </Alert>
@@ -1453,7 +1485,7 @@ function ResultCard({
             <TriangleExclamation />
           </Alert.Indicator>
           <Alert.Content>
-            <Alert.Title className="text-[13px] font-medium">
+            <Alert.Title className="text-body font-medium">
               Couldn't extract this URL
             </Alert.Title>
             <Alert.Description>{result.error}</Alert.Description>
@@ -1468,28 +1500,28 @@ function ResultCard({
         >
           <Tabs.List
             aria-label="Result type"
-            className="flex w-fit min-w-0 gap-1 rounded-lg bg-surface p-1"
+            className="flex w-fit min-w-0 gap-0.5 rounded-lg bg-(--state-hover-bg) p-1"
           >
             <Tabs.Tab
               id="video"
-              className="press-tactile h-7 w-auto gap-2 rounded-md px-3 text-xs font-medium transition-colors"
+              className="press-tactile h-7 w-auto gap-2 rounded-md px-2.5 text-meta font-medium transition-colors"
             >
               Video{result.items.length > 0 ? ` ${result.items.length}` : ''}
-              <Tabs.Indicator className="rounded-md bg-surface-secondary" />
+              <Tabs.Indicator className="rounded-md bg-(--state-selected-bg)" />
             </Tabs.Tab>
             <Tabs.Tab
               id="playlist"
-              className="press-tactile h-7 w-auto gap-2 rounded-md px-3 text-xs font-medium transition-colors"
+              className="press-tactile h-7 w-auto gap-2 rounded-md px-2.5 text-meta font-medium transition-colors"
             >
               Playlist{pl.count ? ` ${pl.count}` : ''}
-              <Tabs.Indicator className="rounded-md bg-surface-secondary" />
+              <Tabs.Indicator className="rounded-md bg-(--state-selected-bg)" />
             </Tabs.Tab>
           </Tabs.List>
           <Tabs.Panel id="video" className="mt-0 flex flex-col p-0 outline-none">
             {result.items.length > 0 ? (
               mediaItems
             ) : (
-              <p className="py-6 text-center text-xs text-muted">
+              <p className="py-6 text-center text-meta text-muted">
                 {result.error
                   ? ''
                   : 'No single video on this page — see the Playlist tab.'}
@@ -1503,7 +1535,7 @@ function ResultCard({
       ) : (
         <>
           {result.items.length === 0 && !result.error && (
-            <p className="py-6 text-center text-xs text-muted">
+            <p className="py-6 text-center text-meta text-muted">
               No media found on this page.
             </p>
           )}
@@ -1594,42 +1626,42 @@ function PlaylistPanel({
   return (
     <section className="flex flex-col gap-3">
       <div className="flex min-w-0 items-center gap-2.5">
-        <span className="min-w-0 flex-1 truncate text-[13px] font-medium" title={playlist.title}>
+        <span className="min-w-0 flex-1 truncate text-body font-medium" title={playlist.title}>
           {playlist.title || 'Playlist'}
         </span>
-        <Tag className="chip--info shrink-0 px-2 font-medium">
+        <Tag className="shrink-0">
           {entries.length} item{entries.length === 1 ? '' : 's'}
         </Tag>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex shrink-0 items-center gap-0.5">
           <button
             type="button"
             onClick={() => setAll(true)}
-            className="rounded px-2 py-0.5 text-[11px] font-medium text-muted outline-none transition-colors hover:bg-surface-secondary hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus"
+            className="flex h-6 items-center rounded px-2 text-micro font-medium text-muted outline-none transition-colors hover:bg-(--state-hover-bg) hover:text-foreground focus-visible:ring-1 focus-visible:ring-focus"
           >
             All
           </button>
           <button
             type="button"
             onClick={() => setAll(false)}
-            className="rounded px-2 py-0.5 text-[11px] font-medium text-muted outline-none transition-colors hover:bg-surface-secondary hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus"
+            className="flex h-6 items-center rounded px-2 text-micro font-medium text-muted outline-none transition-colors hover:bg-(--state-hover-bg) hover:text-foreground focus-visible:ring-1 focus-visible:ring-focus"
           >
             None
           </button>
         </div>
       </div>
-      <ul className="flex max-h-56 flex-col gap-0.5 overflow-y-auto rounded-lg bg-surface-secondary p-1.5">
+      <ul className="flex max-h-56 flex-col overflow-y-auto overscroll-contain rounded-lg bg-surface-secondary p-1">
         {entries.map((e) => (
           <li key={e.index} className="min-w-0">
             <Checkbox
               isSelected={picked.has(e.index)}
               onChange={() => toggle(e.index)}
-              className="w-full rounded-md px-2 py-1 transition-colors hover:bg-field-hover"
+              className="w-full rounded-md px-2 py-1.5 transition-colors hover:bg-(--state-hover-bg)"
             >
               <Checkbox.Content className="flex w-full min-w-0 items-center gap-2.5">
                 <Checkbox.Control className="shrink-0">
                   <Checkbox.Indicator />
                 </Checkbox.Control>
-                <span className="w-[4ch] shrink-0 text-right font-mono text-[10.5px] tabular-nums text-muted">
+                <span className="w-[3ch] shrink-0 text-right font-mono text-micro tabular-nums text-muted-subtle">
                   {Math.max(playlist.count || 0, entries.at(-1)?.index || 0) -
                     e.index +
                     1}
@@ -1638,25 +1670,25 @@ function PlaylistPanel({
                   <img
                     src={thumbUrl(e.thumbnail, playlist.url || job.input)}
                     alt=""
-                    className="h-6 w-10 shrink-0 rounded-sm object-cover"
+                    className="thumb-outline h-6 w-10 shrink-0 rounded-sm object-cover"
                     loading="lazy"
                     onError={(ev) => {
                       ev.currentTarget.style.display = 'none'
                     }}
                   />
                 ) : (
-                  <div className="flex h-6 w-10 shrink-0 items-center justify-center rounded-sm bg-surface-tertiary text-muted">
+                  <div className="flex h-6 w-10 shrink-0 items-center justify-center rounded-sm bg-surface-tertiary text-muted-subtle">
                     <Play width={10} height={10} />
                   </div>
                 )}
                 <span
-                  className="min-w-0 flex-1 truncate text-xs text-foreground"
+                  className="min-w-0 flex-1 truncate text-meta text-foreground"
                   title={e.title || e.url}
                 >
                   {e.title || e.url || `Item ${e.index}`}
                 </span>
                 {e.duration_secs != null && (
-                  <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-muted">
+                  <span className="shrink-0 font-mono text-micro tabular-nums text-muted-subtle">
                     {fmtDuration(e.duration_secs)}
                   </span>
                 )}
@@ -1672,7 +1704,7 @@ function PlaylistPanel({
         <Button
           size="sm"
           variant="primary"
-          className="press-tactile h-8.5 gap-1.5 px-3.5 text-xs font-medium"
+          className="gap-1.5"
           isDisabled={busy || picked.size === 0}
           onPress={() => void submit()}
         >
@@ -1716,35 +1748,35 @@ function ItemSection({
   const hidden = formatsList.length - VISIBLE_FORMATS
   return (
     <section className="flex flex-col">
-      <div className="flex gap-3 px-0.5 pb-3">
+      <div className="flex gap-3 pb-3">
         {item.thumbnail ? (
           <img
             src={thumbUrl(item.thumbnail, item.page_url)}
             alt=""
-            className="mt-0.5 h-10 w-16 shrink-0 rounded-md object-cover"
+            className="thumb-outline mt-0.5 h-10 w-16 shrink-0 rounded-md object-cover"
             loading="lazy"
             onError={(e) => {
               e.currentTarget.style.display = 'none'
             }}
           />
         ) : (
-          <div className="mt-0.5 flex h-10 w-16 shrink-0 items-center justify-center rounded-md bg-surface-secondary text-muted">
-            <Play width={15} height={15} />
+          <div className="mt-0.5 flex h-10 w-16 shrink-0 items-center justify-center rounded-md bg-surface-secondary text-muted-subtle">
+            <Play width={14} height={14} />
           </div>
         )}
         <div className="flex min-w-0 flex-1 flex-col">
-          <p className="text-balance text-[13.5px] font-medium leading-snug text-foreground">
+          <p className="text-balance text-body font-medium leading-snug text-foreground">
             {item.title ?? (item.id === 'page' ? 'Page media' : item.id)}
           </p>
           {(item.duration_secs != null || extractor) && (
             <div className="mt-1.5 flex items-center gap-1.5">
               {item.duration_secs != null && (
-                <Tag className="font-mono tabular-nums px-2">
+                <Tag className="font-mono tabular-nums">
                   {fmtDuration(item.duration_secs)}
                 </Tag>
               )}
               {extractor && (
-                <Tag className="font-mono text-[11px] px-2 font-medium">
+                <Tag className="font-mono">
                   {extractor}
                 </Tag>
               )}
@@ -1759,24 +1791,23 @@ function ItemSection({
           value={sel}
           onChange={(k) => setSel(String(k))}
         >
-          {formats.map((l, i) => (
+          {formats.map((l) => (
             <FormatRow
               key={rowKey(l)}
               link={l}
               durSecs={item.duration_secs}
-              best={i === 0}
             />
           ))}
         </RadioGroup>
       )}
       {formatsList.length === 0 && (
-        <p className="px-1 pb-1.5 text-xs text-muted">No downloadable formats found.</p>
+        <p className="px-1 pb-1.5 text-meta text-muted">No downloadable formats found.</p>
       )}
       {hidden > 0 && (
         <button
           type="button"
           onClick={() => setExpanded((e) => !e)}
-          className="mx-1 mt-1.5 flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-left text-[11.5px] font-medium text-muted outline-none transition-colors hover:bg-surface-secondary hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus"
+          className="mt-1.5 flex items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-meta font-medium text-muted outline-none transition-colors hover:bg-(--state-hover-bg) hover:text-foreground focus-visible:ring-1 focus-visible:ring-focus"
         >
           <ChevronDown
             width={12}
@@ -1796,61 +1827,61 @@ function ItemSection({
 function FormatRow({
   link,
   durSecs,
-  best,
 }: {
   link: MediaLink
   durSecs?: number
-  best?: boolean
 }) {
   const q = link.quality
   const [now] = useState(() => Date.now() / 1000)
   const expIn = link.expires_at != null ? link.expires_at - now : null
+  const rawLabel = q?.label && !/unknown/i.test(q.label) ? q.label : ''
+  const label =
+    q?.height != null
+      ? `${q.height}p`
+      : rawLabel ||
+        (link.kind === 'audio' ? 'Audio' : link.kind === 'hls' || link.kind === 'dash' ? 'Stream' : 'Video')
+  const container = link.container?.split('-')[0]
+  const codec = link.codecs?.split('.')[0]
+  const detail = [link.kind, container, codec].filter(Boolean).join(' · ')
+  const size =
+    link.probed_size != null
+      ? fmtBytes(link.probed_size)
+      : q?.bandwidth != null && durSecs != null
+        ? `~${fmtBytes((q.bandwidth * durSecs) / 8)}`
+        : null
+  const expiring = expIn != null && expIn < 900
   return (
     <Radio
       value={rowKey(link)}
-      className="mt-0! min-w-0 flex-1 cursor-pointer rounded-lg bg-(--field-background) px-3 py-2 transition-[background-color,box-shadow] duration-150 not-data-selected:hover:bg-(--state-hover-bg) data-selected:bg-(--state-selected-bg) data-selected:shadow-[inset_0_0_0_1.5px_var(--state-selected-border)]"
+      className="mt-0! min-w-0 flex-1 cursor-pointer rounded-lg px-3 py-2.5 transition-colors not-data-selected:hover:bg-(--state-hover-bg) data-selected:bg-(--state-selected-bg)"
     >
-      <Radio.Content className="flex items-center gap-2.5">
+      <Radio.Content className="flex w-full items-center gap-3">
         <Radio.Control className="shrink-0">
           <Radio.Indicator />
         </Radio.Control>
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-          {best && <Tag className="chip--strong">best</Tag>}
-          {q?.height != null ? (
-            <Tag className="chip--strong">{q.height}p</Tag>
-          ) : (
-            q?.label && <Tag className="chip--strong">{q.label}</Tag>
-          )}
-          <Tag>{link.kind}</Tag>
-          {link.container && <Tag>{link.container}</Tag>}
-          {link.codecs && <Tag title={link.codecs}>{link.codecs}</Tag>}
-          {link.probed_size != null ? (
-            <Tag className="font-mono tabular-nums" title="Probed size — the total this download seeds from">
-              {fmtBytes(link.probed_size)}
-            </Tag>
-          ) : (
-            q?.bandwidth != null && durSecs != null && (
-              <Tag className="font-mono tabular-nums" title="Estimated from bitrate × duration">
-                ~{fmtBytes((q.bandwidth * durSecs) / 8)}
-              </Tag>
-            )
-          )}
-          {expIn != null && (
-            <Tag color={expIn <= 0 ? 'danger' : expIn < 900 ? 'warning' : 'default'}>
-              {expIn <= 0
-                ? 'expired'
-                : `exp ${expIn < 3600 ? `${Math.ceil(expIn / 60)}m` : `${(expIn / 3600).toFixed(1)}h`}`}
-            </Tag>
-          )}
-          {q?.bandwidth != null && (
-            <Tag>
-              <span className="font-mono tabular-nums">{(q.bandwidth / 1e6).toFixed(1)}</span>&nbsp;Mbps
-            </Tag>
-          )}
-          {link.source === 'extractor' || link.source === 'direct' ? null : (
-            <Tag>{link.source}</Tag>
-          )}
-        </div>
+        <span className="shrink-0 text-body font-medium text-foreground">
+          {label}
+        </span>
+        <span className="min-w-0 flex-1 truncate font-mono text-meta text-muted" title={detail}>
+          {detail}
+        </span>
+        {expiring && (
+          <span
+            className={`shrink-0 font-mono text-micro tabular-nums ${
+              expIn <= 0 ? 'text-(--state-error-fg)' : 'text-(--state-paused-fg)'
+            }`}
+            title="Link expiry — re-extract when it passes"
+          >
+            {expIn <= 0
+              ? 'expired'
+              : `exp ${expIn < 3600 ? `${Math.ceil(expIn / 60)}m` : `${(expIn / 3600).toFixed(1)}h`}`}
+          </span>
+        )}
+        {size && (
+          <span className="w-[8ch] shrink-0 text-right font-mono text-meta tabular-nums text-foreground-secondary">
+            {size}
+          </span>
+        )}
       </Radio.Content>
     </Radio>
   )

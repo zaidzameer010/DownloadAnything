@@ -50,11 +50,11 @@ struct CachedClient {
 /// rebuilding it would drop the cookie jar and the connection pool.
 static SHARED_CLIENT: Mutex<Option<CachedClient>> = Mutex::new(None);
 
-/// Captured headers scoped to one origin.
+/// Captured headers scoped to one host.
 #[derive(Debug)]
 struct ContextHeaders {
     host: String,
-    /// Presentation headers replayed on every request to the host.
+    /// Headers replayed on every request to the host.
     base: HeaderMap,
     /// `x-*` headers replayed only on media and manifest requests — signed
     /// CDN tokens bind the request to device/session headers, but replaying
@@ -70,26 +70,16 @@ enum Replay {
 
 /// Header names safe to replay beyond the request that captured them.
 ///
-/// Cookies are seeded into the jar instead of replayed as a header, and
-/// `authorization`/`origin` stay request-scoped: replaying a stale auth
-/// token globally breaks API calls (the Python chain does the same).
+/// Captured `Cookie:` values replay as a request header — seeding the
+/// shared client's jar would leak one task's session into every later
+/// extraction to that host. `authorization`/`origin` stay request-scoped:
+/// replaying a stale auth token globally breaks API calls (the Python
+/// chain does the same).
 fn replay_target(name: &str) -> Option<Replay> {
     match name {
-        "referer" | "user-agent" | "accept-language" => Some(Replay::Base),
+        "cookie" | "referer" | "user-agent" | "accept-language" => Some(Replay::Base),
         _ if name.starts_with("x-") => Some(Replay::Media),
         _ => None,
-    }
-}
-
-/// Seed captured `Cookie:` header pairs into the jar, scoped to the origin
-/// the browser sent them on and path `/`.
-fn seed_cookies(jar: &Jar, origin: &Url, header: &str) {
-    for part in header.split(';') {
-        let part = part.trim();
-        if part.is_empty() || !part.contains('=') {
-            continue;
-        }
-        jar.add_cookie_str(part, origin);
     }
 }
 
@@ -101,7 +91,7 @@ pub struct Fetcher {
     /// Captured headers scoped by host, broadest first so the most specific
     /// context wins when headers merge.
     ctx_headers: Vec<ContextHeaders>,
-    /// Test-only handle to the seeded jar.
+    /// Test-only handle to the shared cookie jar.
     #[cfg(test)]
     jar: Arc<Jar>,
 }
@@ -151,10 +141,6 @@ impl Fetcher {
                 let mut media = HeaderMap::new();
                 for pair in &context.headers {
                     let name = pair.name.to_ascii_lowercase();
-                    if name == "cookie" {
-                        seed_cookies(&jar, &context.origin, &pair.value);
-                        continue;
-                    }
                     let Some(target) = replay_target(&name) else {
                         continue;
                     };
@@ -187,6 +173,11 @@ impl Fetcher {
         // Broad contexts first; `insert` in ctx_headers_for then lets the
         // most specific matching host override them.
         ctx_headers.sort_by_key(|context| context.host.len());
+
+        // The jar lives inside the client's cookie provider; the handle is
+        // only inspected by tests.
+        #[cfg(not(test))]
+        drop(jar);
 
         Ok(Self {
             client,
@@ -293,7 +284,6 @@ mod tests {
             proxy: None,
             check_certificate: true,
             contexts: vec![Context {
-                origin: Url::parse("https://cdn.site.com/").unwrap(),
                 host: "cdn.site.com".into(),
                 headers: vec![
                     HeaderPair {
@@ -319,19 +309,24 @@ mod tests {
     }
 
     #[test]
-    fn captured_cookies_are_seeded_into_the_jar() {
+    fn captured_cookies_replay_as_header_and_never_reach_the_shared_jar() {
         let fetcher = Fetcher::new(&config_with_contexts()).unwrap();
         let url = Url::parse("https://cdn.site.com/v.mp4").unwrap();
-        let cookie = fetcher.jar.cookies(&url).expect("seeded cookie");
-        let cookie = cookie.to_str().unwrap();
-        assert!(cookie.contains("sess=1"), "{cookie}");
-        assert!(cookie.contains("theme=dark"), "{cookie}");
+        let headers = fetcher.ctx_headers_for(&url).expect("context headers");
+        assert_eq!(
+            headers.get("cookie").unwrap().to_str().unwrap(),
+            "sess=1; theme=dark"
+        );
         assert!(
-            fetcher
-                .jar
-                .cookies(&Url::parse("https://other.com/").unwrap())
+            fetcher.ctx_headers_for(&Url::parse("https://other.com/").unwrap())
                 .is_none(),
             "cookies must stay scoped to the captured host"
+        );
+        // The shared jar is reused across extractions — one task's captured
+        // session must never seed it for the next task on the same host.
+        assert!(
+            fetcher.jar.cookies(&url).is_none(),
+            "captured cookies must not leak into the shared jar"
         );
     }
 
@@ -373,7 +368,6 @@ mod tests {
         let mut config = config_with_contexts();
         config.contexts = vec![
             Context {
-                origin: Url::parse("https://site.com/").unwrap(),
                 host: "site.com".into(),
                 headers: vec![HeaderPair {
                     name: "referer".into(),
@@ -381,7 +375,6 @@ mod tests {
                 }],
             },
             Context {
-                origin: Url::parse("https://cdn.site.com/").unwrap(),
                 host: "cdn.site.com".into(),
                 headers: vec![HeaderPair {
                     name: "referer".into(),

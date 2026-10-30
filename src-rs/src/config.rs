@@ -43,8 +43,8 @@ pub struct Options {
     pub contexts: Vec<ContextHeaders>,
 }
 
-/// A request context: `url` identifies the origin. Cookies are seeded into
-/// the jar; presentation headers replay on matching hosts and `x-*` headers
+/// A request context: `url` identifies the host. Captured cookies and
+/// presentation headers replay on matching hosts and `x-*` headers
 /// replay only on media/manifest requests.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ContextHeaders {
@@ -97,8 +97,6 @@ pub struct Config {
 /// A request context resolved to a host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Context {
-    /// Origin URL (scheme, host and port) the cookies are scoped to.
-    pub origin: Url,
     /// Lowercase host the headers apply to (subdomains included).
     pub host: String,
     /// Headers to replay, names lowercased.
@@ -130,12 +128,6 @@ impl From<&Options> for Config {
                         warn!(url = %context.url, "context skipped: no host");
                         return None;
                     };
-                    let Ok(origin) =
-                        Url::parse(&format!("{}/", url.origin().ascii_serialization()))
-                    else {
-                        warn!(url = %context.url, "context skipped: bad origin");
-                        return None;
-                    };
                     let headers: Vec<HeaderPair> = context
                         .headers
                         .iter()
@@ -149,7 +141,6 @@ impl From<&Options> for Config {
                         return None;
                     }
                     Some(Context {
-                        origin,
                         host,
                         headers,
                     })
@@ -203,7 +194,6 @@ mod tests {
         assert_eq!(config.proxy.as_deref(), Some("http://127.0.0.1:8080"));
         assert!(!config.check_certificate);
         assert_eq!(config.contexts[0].host, "cdn.site.com");
-        assert_eq!(config.contexts[0].origin.as_str(), "https://cdn.site.com/");
         assert_eq!(config.contexts[0].headers[0].name, "cookie");
     }
 

@@ -33,11 +33,11 @@ export function ExtractDialog({
   return (
     <Modal.Backdrop isOpen={open} onOpenChange={setOpen}>
       <Modal.Container>
-        <Modal.Dialog className="sm:max-w-140">
+        <Modal.Dialog className="sm:max-w-136">
           <Modal.CloseTrigger />
-          <Modal.Header className="gap-1">
+          <Modal.Header className="gap-1.5">
             <Modal.Heading>Extract media</Modal.Heading>
-            <p className="text-pretty text-xs leading-relaxed text-muted">
+            <p className="max-w-[46ch] text-pretty text-meta leading-relaxed text-muted">
               One URL per line. Web pages, playlists, HLS / DASH manifests,
               direct files, and magnet links.
             </p>
@@ -48,7 +48,7 @@ export function ExtractDialog({
                 variant="secondary"
                 rows={5}
                 autoFocus
-                className="w-full resize-none p-3 font-mono text-xs leading-relaxed"
+                className="min-h-34 w-full resize-none p-3.5 font-mono text-meta leading-relaxed"
                 placeholder={
                   'https://example.com/watch?v=…\nmagnet:?xt=urn:btih:…'
                 }
@@ -58,12 +58,12 @@ export function ExtractDialog({
               />
             </TextField>
             <div className="flex items-center justify-between gap-3 px-0.5">
-              <span className="text-[11px] font-medium text-muted">
+              <span className="text-meta font-medium text-muted">
                 {urls > 0
                   ? `${urls} URL${urls === 1 ? '' : 's'} ready`
                   : 'Paste one or more URLs above'}
               </span>
-              <span className="font-mono text-[10.5px] text-(--muted-subtle)">
+              <span className="font-mono text-micro text-muted-subtle">
                 {MOD_KEY}↵ to extract
               </span>
             </div>
@@ -83,7 +83,7 @@ export function ExtractDialog({
             <Button
               size="sm"
               variant="secondary"
-              className="press-tactile h-8.5 gap-1.5 px-3 text-xs font-medium"
+              className="gap-1.5"
               onPress={() => fileRef.current?.click()}
             >
               <Magnet width={14} height={14} />
@@ -92,7 +92,7 @@ export function ExtractDialog({
             <Button
               size="sm"
               variant="primary"
-              className="press-tactile h-8.5 gap-1.5 px-4 text-xs font-medium"
+              className="gap-1.5"
               onPress={go}
               isDisabled={busy || urls === 0}
             >

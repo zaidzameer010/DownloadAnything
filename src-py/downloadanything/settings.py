@@ -66,20 +66,20 @@ class AppSettings:
     categories: list[dict[str, str]] = field(default_factory=list)
     api_port: int = DEFAULT_API_PORT
     api_token: str = ""
-    max_concurrent_downloads: int = 3
+    max_concurrent_downloads: int = 4
     extractor_engine: str = "auto"  # auto|python_ytdlp|custom
     # auto: False sends pages with no dedicated yt-dlp extractor straight to
     # the Rust extractor (yt-dlp's generic page pass is the slow path).
     # Candidate manifest/media probing still runs through yt-dlp.
     ytdlp_generic: bool = False
     downloader_engine: str = "aria2_next"  # aria2_next|ytdlp
-    parallel_segments: int = 16
+    parallel_segments: int = 32
     player_client: str = "default"  # yt-dlp youtube player_client
     ffmpeg_path: str = ""
     aria2_next_path: str = ""
     aria2_rpc_port: int = 16802
-    aria2_split: int = 16
-    aria2_max_connection_per_server: int = 16
+    aria2_split: int = 64
+    aria2_max_connection_per_server: int = 64
     aria2_min_split_size: str = "1M"
     aria2_file_allocation: str = "none"  # none|prealloc|falloc|trunc
     aria2_min_tls_version: str = "TLSv1.2"  # TLSv1.1|TLSv1.2|TLSv1.3
@@ -102,9 +102,9 @@ class AppSettings:
     bt_trackers: str = ""
     media_format: str = ""  # ""|mp4|mkv — "" renders as mp4
     embed_thumbnail: bool = True
-    embed_subtitles: bool = False
+    embed_subtitles: bool = True
     embed_chapters: bool = True
-    embed_metadata: bool = False
+    embed_metadata: bool = True
     check_certificate: bool = True
     cookies_file: str = ""
     cookies_browser: str = "off"
@@ -182,17 +182,14 @@ class AppSettings:
 
 
 def out_dir(s: AppSettings, category: str | None = None) -> str:
-    """Final destination dir: the request's category path, then the first
-    category, then the app-data downloads dir. `~` expands so subprocess/
-    dir consumers get real paths."""
+    """Final destination dir: the request's category path, else the user's
+    Downloads folder. `~` expands so subprocess/dir consumers get real paths."""
     cats = [c for c in s.categories if isinstance(c, dict) and c.get("path")]
     if category:
         for c in cats:
             if c.get("name") == category:
                 return os.path.expanduser(c["path"])
-    if cats:
-        return os.path.expanduser(cats[0]["path"])
-    return str(DATA_DIR / "downloads")
+    return os.path.expanduser("~/Downloads")
 
 
 def tmp_root() -> str:

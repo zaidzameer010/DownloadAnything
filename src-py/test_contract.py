@@ -39,6 +39,15 @@ def _settings(**kw) -> AppSettings:
     return AppSettings(**kw)
 
 
+def _fake_director(params: dict) -> object:
+    """Minimal yt-dlp request director for YoutubeDL stand-ins — production
+    builds one during __init__, so _apply_headers reaches into it."""
+    from types import SimpleNamespace
+
+    headers = params.setdefault("http_headers", {})
+    return SimpleNamespace(handlers={"fake": SimpleNamespace(headers=headers)})
+
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -179,6 +188,92 @@ def test_download_params_impersonate_and_accept_language():
     assert p["http_headers"]["Accept-Language"] == ex.DEFAULT_ACCEPT_LANG
 
 
+def test_page_headers_pin_the_page_fetch_identity():
+    """Signed CDN tokens bind to the page fetch's UA and Accept-Language.
+    _page_headers resolves them from the page host only — a media-host
+    context must not leak its browser identity into the probe."""
+    from downloadanything.models import ContextHeaders, HeaderPair
+
+    media = ContextHeaders(
+        url="https://cdn.x/",
+        headers=[
+            HeaderPair(name="User-Agent", value="BrowserUA/1"),
+            HeaderPair(name="Accept-Language", value="de-DE,de;q=0.9"),
+        ],
+    )
+    got = ex._page_headers(ex.ExtractOptions(contexts=[media]), "https://page.x/watch")
+    assert got == {
+        "User-Agent": ex.DEFAULT_UA,
+        "Accept-Language": ex.DEFAULT_ACCEPT_LANG,
+    }, "media-host contexts must not change the page fetch identity"
+
+    page = ContextHeaders(
+        url="https://page.x/",
+        headers=[
+            HeaderPair(name="User-Agent", value="PageUA/1"),
+            HeaderPair(name="Accept-Language", value="fr-FR,fr;q=0.9"),
+        ],
+    )
+    got2 = ex._page_headers(ex.ExtractOptions(contexts=[page]), "https://page.x/watch")
+    assert got2 == {"User-Agent": "PageUA/1", "Accept-Language": "fr-FR,fr;q=0.9"}
+
+
+def test_rust_candidates_probe_with_pinned_page_headers():
+    """Rust-sourced candidates probe with the page fetch's UA/Accept-Language;
+    extension-sourced candidates keep the captured media-host values."""
+    seen: list[dict | None] = []
+    orig = ex._ytdlp_extract
+    ex._ytdlp_extract = lambda o, u, **k: seen.append(k.get("headers")) or {"input": u, "items": []}
+    try:
+        raw = [{
+            "id": "i",
+            "page_url": "https://page.x/watch",
+            "formats": [{"url": "https://cdn.x/master.m3u8", "kind": "hls"}],
+        }]
+        headers = {"User-Agent": "UA/1", "Accept-Language": "en-US,en;q=0.9"}
+        ex._probe_rust_items(
+            ex.ExtractOptions(), raw, "https://page.x/watch", None, headers
+        )
+        assert seen == [headers]
+        seen.clear()
+        ex._probe_rust_items(ex.ExtractOptions(), raw, "https://page.x/watch")
+        assert seen == [None], "extension-sourced probes keep captured headers"
+    finally:
+        ex._ytdlp_extract = orig
+
+
+def test_probe_pinned_headers_ride_the_cached_info():
+    """The download replays the probe's info dict — it must carry the exact
+    UA/Accept-Language the signed URLs were minted for."""
+    info = {
+        "id": "v",
+        "title": "T",
+        "webpage_url": "https://cdn.x/master.m3u8",
+        "extractor_key": "Generic",
+        "formats": [{
+            "format_id": "h",
+            "url": "https://cdn.x/index.m3u8",
+            "ext": "mp4",
+            "protocol": "m3u8_native",
+            "vcodec": "avc1.64001f",
+        }],
+    }
+    headers = {"User-Agent": "UA/1", "Accept-Language": "en-US,en;q=0.9"}
+    orig = ex.YoutubeDL
+    ex.YoutubeDL = _fake_ydl_for_extract(info)
+    ex._info_cache.clear()
+    try:
+        ex._ytdlp_extract(
+            ex.ExtractOptions(), "https://cdn.x/master.m3u8", probe=True, headers=headers
+        )
+        cached = ex.cached_info(ex.ExtractOptions(), "https://cdn.x/master.m3u8")
+        assert cached["http_headers"]["User-Agent"] == "UA/1"
+        assert cached["http_headers"]["Accept-Language"] == "en-US,en;q=0.9"
+    finally:
+        ex.YoutubeDL = orig
+        ex._info_cache.clear()
+
+
 def test_download_req_contexts_reach_cookie_seeds():
     """Captured contexts ride the download req — their Cookie headers seed
     the download jar (the extractor's session replays at the CDN)."""
@@ -209,12 +304,12 @@ def test_to_downloadanything_options_extraction_chain():
 
 def test_out_dir_category_and_falls_back():
     """A named category resolves to its path; unknown names and no-category
-    settings fall back to the first category, then the app-data dir."""
+    settings fall back to the user's Downloads folder."""
     cats = [{"name": "vid", "path": "~/Media/Videos"}]
     s = _settings(categories=cats)
     assert out_dir(s, "vid") == os.path.expanduser("~/Media/Videos")
-    assert out_dir(s, "nope") == os.path.expanduser("~/Media/Videos")
-    assert out_dir(_settings()) == str(st.DATA_DIR / "downloads")
+    assert out_dir(s, "nope") == os.path.expanduser("~/Downloads")
+    assert out_dir(_settings()) == os.path.expanduser("~/Downloads")
 
 
 def test_check_name_conflict_disk_and_tasks():
@@ -980,6 +1075,85 @@ def test_probe_rust_items_probes_all_single_format_masters():
         ex._ytdlp_extract = orig_ytdlp
 
 
+def test_probe_rust_items_skips_variants_once_a_master_resolves():
+    """A master probe resolves its own ladder — the bare index-v1 variant
+    must not be probed alongside it."""
+    probed: list[str] = []
+    orig = ex._ytdlp_extract
+
+    def fake_ytdlp(opts, url, **kw):
+        probed.append(url)
+        return {
+            "input": url,
+            "items": [{
+                "id": url,
+                "page_url": url,
+                "formats": [
+                    {"url": "https://cdn.x/index-v1-a1.m3u8", "manifest_url": url,
+                     "kind": "hls", "quality": {"height": 720}},
+                    {"url": "https://cdn.x/index-v1-a2.m3u8", "manifest_url": url,
+                     "kind": "hls", "quality": {"height": 480}},
+                ],
+            }],
+        }
+
+    ex._ytdlp_extract = fake_ytdlp
+    try:
+        raw = [{
+            "id": "page",
+            "page_url": "https://page.x/watch",
+            "formats": [
+                {"url": "https://cdn.x/master.m3u8", "kind": "hls"},
+                {"url": "https://cdn.x/index-v1-a1.m3u8", "kind": "hls"},
+            ],
+        }]
+        items = ex._probe_rust_items(ex.ExtractOptions(), raw, "https://page.x/watch")
+        assert probed == ["https://cdn.x/master.m3u8"], \
+            "a resolved master already carries its variants"
+        assert len(items[0]["formats"]) == 2
+    finally:
+        ex._ytdlp_extract = orig
+
+
+def test_probe_rust_items_probes_variants_when_master_is_dead():
+    """A dead master supersedes nothing — its variant fallback still probes."""
+    probed: list[str] = []
+    orig = ex._ytdlp_extract
+
+    def fake_ytdlp(opts, url, **kw):
+        probed.append(url)
+        if "master" in url:
+            return {"input": url, "items": []}
+        return {
+            "input": url,
+            "items": [{
+                "id": url,
+                "page_url": url,
+                "formats": [{"url": url, "manifest_url": url, "kind": "hls",
+                             "quality": {"height": 720}}],
+            }],
+        }
+
+    ex._ytdlp_extract = fake_ytdlp
+    try:
+        raw = [{
+            "id": "page",
+            "page_url": "https://page.x/watch",
+            "formats": [
+                {"url": "https://cdn.x/master.m3u8", "kind": "hls"},
+                {"url": "https://cdn.x/index-v1-a1.m3u8", "kind": "hls"},
+            ],
+        }]
+        items = ex._probe_rust_items(ex.ExtractOptions(), raw, "https://page.x/watch")
+        assert probed == [
+            "https://cdn.x/master.m3u8",
+            "https://cdn.x/index-v1-a1.m3u8",
+        ]
+        assert items, "the variant fallback must still produce a row"
+    finally:
+        ex._ytdlp_extract = orig
+
+
 def test_probe_rust_items_backfills_candidate_metadata():
     """A resolved redirect row loses the candidate's metadata — the
     `_1440p.mp4` name carried the height and container while the probed
@@ -1273,6 +1447,52 @@ def test_cookie_seeds_from_contexts():
     assert ex._cookie_seeds(ctxs) == [
         ("cdn.site.com", "sess=abc; age=1"), ("other.com", "k=v")]
     assert ex._cookie_seeds([{"url": "https://x", "headers": []}]) == []
+
+
+def test_ctx_cookies_seed_even_with_browser_jar():
+    """A selected cookies_browser must not veto captured-context cookies — a
+    CDN session cookie can exist only in the captured request, and the
+    download path already seeds them unconditionally."""
+    import http.cookiejar
+    from downloadanything.models import ContextHeaders, HeaderPair
+    seeds = []
+    jar_obj = http.cookiejar.CookieJar()
+
+    class FakeYDL:
+        def __init__(self, params):
+            self.params = params
+            self.cookiejar = http.cookiejar.CookieJar()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download):
+            return {"id": "v", "title": "t", "webpage_url": url,
+                    "formats": [{"url": "https://cdn.x/v.mp4", "ext": "mp4"}]}
+
+        def sanitize_info(self, i):
+            return i
+
+        def build_format_selector(self, s):
+            return None
+
+    orig = ex.YoutubeDL, ex._browser_jar, ex._seed_cookies
+    ex.YoutubeDL = FakeYDL
+    ex._browser_jar = lambda o: jar_obj
+    ex._seed_cookies = lambda ydl, s: seeds.extend(s)
+    try:
+        ctx = ContextHeaders(url="https://cdn.x/v.mp4", headers=[
+            HeaderPair(name="cookie", value="sess=1")])
+        ex._ytdlp_extract(
+            ex.ExtractOptions(cookies_browser="brave", contexts=[ctx]),
+            "https://site.x/watch")
+        assert seeds == [("cdn.x", "sess=1")], \
+            "captured cookies must seed alongside a selected browser jar"
+    finally:
+        ex.YoutubeDL, ex._browser_jar, ex._seed_cookies = orig
 
 
 # ---- download params ---------------------------------------------------------
@@ -2312,6 +2532,56 @@ def test_extract_result_caches_success_only():
         asyncio.run(ex.extract(opts, ["https://empty"]))
         assert calls == ["https://good", "https://empty", "https://empty"], \
             "error/empty pages re-probe every time"
+    finally:
+        ex._extract_one = orig
+        ex._result_cache.clear()
+
+
+def test_extract_result_cache_ignores_capture_churn():
+    """Every push captures fresh signed context URLs and a new DOM title —
+    that churn must not defeat the result cache for the same page."""
+    ex._result_cache.clear()
+    calls: list[str] = []
+    orig = ex._extract_one
+    from downloadanything.models import ContextHeaders, HeaderPair
+
+    async def fake(opts, u):
+        calls.append(u)
+        return {"input": u, "items": [{"formats": [{"url": "https://x/v.mp4"}]}]}
+
+    ex._extract_one = fake
+    try:
+        common = {"referer": "https://page.x/watch", "cookies_browser": "brave"}
+        o1 = ex.ExtractOptions(
+            title="First title",
+            thumbnail="https://x/a.jpg",
+            contexts=[ContextHeaders(
+                url="https://cdn.x/a.m3u8?t=111",
+                headers=[HeaderPair(name="Cookie", value="s=1")])],
+            **common,
+        )
+        o2 = ex.ExtractOptions(
+            title="Second title",
+            thumbnail="https://x/b.jpg",
+            contexts=[ContextHeaders(
+                url="https://cdn.x/a.m3u8?t=222",
+                headers=[HeaderPair(name="Cookie", value="s=1")])],
+            **common,
+        )
+        asyncio.run(ex.extract(o1, ["https://page.x/watch"]))
+        asyncio.run(ex.extract(o2, ["https://page.x/watch"]))
+        assert calls == ["https://page.x/watch"], \
+            "token/title churn must hit the cache"
+
+        o3 = ex.ExtractOptions(
+            contexts=[ContextHeaders(
+                url="https://cdn.x/a.m3u8?t=333",
+                headers=[HeaderPair(name="Cookie", value="s=2")])],
+            **common,
+        )
+        asyncio.run(ex.extract(o3, ["https://page.x/watch"]))
+        assert calls == ["https://page.x/watch"] * 2, \
+            "a new session cookie must re-probe"
     finally:
         ex._extract_one = orig
         ex._result_cache.clear()
@@ -4035,6 +4305,7 @@ def _fake_ydl_for_extract(info):
     class FakeYDL:
         def __init__(self, params):
             self.params = params
+            self._request_director = _fake_director(params)
             self.cookiejar = http.cookiejar.CookieJar()
 
         def __enter__(self):
@@ -4355,6 +4626,161 @@ def test_download_info_replays_cached_listing_under_both_sigs():
             ex._info_cache.clear()
     finally:
         ex._info_cache.clear()
+
+
+def test_download_info_stale_alt_sig_replay_drops_entry():
+    """A cached listing found under the flipped playlist signature that fails
+    to replay must be evicted — otherwise every playlist task replays it,
+    fails, and pays a fresh extract until the TTL lapses."""
+    import msgspec
+    s = _settings()
+    url = "https://youtube.com/playlist?list=PLy"
+    task = dl.Task("g", {"url": url,
+                         "playlist": {"title": "P", "items": [{"index": 1}]}})
+    opts = dl._dl_extract_opts(task, s)
+    alt = msgspec.structs.replace(opts, playlist=True)
+    info = {"_type": "playlist", "id": "PLy", "entries": [{"id": "a"}]}
+    calls = []
+
+    class FakeYDL:
+        def process_ie_result(self, i, download):
+            calls.append("replay")
+            raise ValueError("expired signature")
+
+        def extract_info(self, u, download, ie_key=None):
+            calls.append("refetch")
+            return info
+
+    try:
+        ex._info_cache.insert((url, ex._info_sig(alt)), info)
+        got = dl._download_info(FakeYDL(), task, s, url)
+        assert calls == ["replay", "refetch"]
+        assert got["id"] == "PLy"
+        assert ex.cached_info(alt, url) is None, \
+            "the alt-sig poisoned entry must be dropped"
+    finally:
+        ex._info_cache.clear()
+
+
+def test_task_probe_cache_persists_on_disk_for_the_task():
+    """The resolved info dict is written under tmp/<gid>/probe/ — a retry or
+    resume after a backend restart (in-memory caches empty) replays it
+    instead of paying a second extraction."""
+    s = _settings()
+    url = "https://x/watch?v=d1"
+    task = dl.Task("gd1", {"url": url, "createdAt": 1})
+    info = {"id": "d1", "title": "t", "webpage_url": url}
+    calls = []
+
+    class FakeYDL:
+        def process_ie_result(self, i, download):
+            calls.append("replay")
+            return i
+
+        def extract_info(self, u, download, ie_key=None):
+            calls.append("refetch")
+            return info
+
+    try:
+        ex._info_cache.clear()
+        dl.clean_task_tmp(task.gid)
+        got = dl._download_info(FakeYDL(), task, s, url)
+        assert calls == ["refetch"]
+        assert dl._task_probe_path(task, url).is_file(), \
+            "the resolved info must be persisted for the task"
+        ex._info_cache.clear()
+        got = dl._download_info(FakeYDL(), task, s, url)
+        assert calls == ["refetch", "replay"] and got["id"] == "d1", \
+            "the task's on-disk probe cache must serve the retry"
+        dl.clean_task_tmp(task.gid)
+        assert not dl._task_probe_path(task, url).exists(), \
+            "finish/remove sweeps the task's cache with its tmp dir"
+    finally:
+        ex._info_cache.clear()
+        dl.clean_task_tmp(task.gid)
+
+
+def test_task_probe_cache_stale_disk_entry_falls_back():
+    """A replay off the task's disk file that fails (expired signed URLs)
+    drops the file and re-extracts — the shared info cache is not touched."""
+    s = _settings()
+    url = "https://x/watch?v=d2"
+    task = dl.Task("gd2", {"url": url, "createdAt": 1})
+    stale = {"id": "old", "webpage_url": url}
+    fresh = {"id": "new", "webpage_url": url}
+    calls = []
+
+    class FakeYDL:
+        def process_ie_result(self, i, download):
+            calls.append("replay")
+            raise ValueError("expired signature")
+
+        def extract_info(self, u, download, ie_key=None):
+            calls.append("refetch")
+            return fresh
+
+    try:
+        ex._info_cache.clear()
+        dl.clean_task_tmp(task.gid)
+        dl._task_probe_write(task, url, stale)
+        got = dl._download_info(FakeYDL(), task, s, url)
+        assert calls == ["replay", "refetch"] and got["id"] == "new"
+        saved = dl._task_probe_read(task, url)
+        assert saved and saved["id"] == "new", \
+            "the fresh extract must replace the stale file"
+    finally:
+        ex._info_cache.clear()
+        dl.clean_task_tmp(task.gid)
+
+
+def test_fetch_thumbnail_pooled_and_validated():
+    """fetch_thumbnail returns image bytes+type and rejects non-images —
+    the pooled curl path and the urlopen fallback share one contract."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    PNG = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\xcf"
+        b"\xc0\xf0\x1f\x00\x04\x03\xc0\x01\x81\x00\xd1\x03\x8f\xc0\xff\xff\xff"
+        b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"
+        b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00"
+        b"IEND\xaeB`\x82"
+    )
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.startswith("/img"):
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.end_headers()
+                self.wfile.write(PNG)
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"<html></html>")
+
+        def log_message(self, *a):
+            pass
+
+    from downloadanything import thumbs
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{srv.server_port}"
+        body, ctype = thumbs.fetch_thumbnail(f"{base}/img.png", "")
+        assert ctype == "image/png" and body == PNG
+        body2, ctype2 = thumbs._fetch_urlopen(f"{base}/img2.png", thumbs._headers(""))
+        assert ctype2 == "image/png" and body2 == PNG
+        for fn in (thumbs.fetch_thumbnail,):
+            try:
+                fn(f"{base}/page", "")
+                assert False, "non-image must raise"
+            except ValueError:
+                pass
+    finally:
+        srv.shutdown()
 
 
 def test_playlist_workers_split_and_parallel_download():

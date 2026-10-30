@@ -484,6 +484,12 @@ ws = websocket_listener(
 # ---- thumbnail proxy -------------------------------------------------------
 
 _thumb_cache: TTLCache[tuple[str, str], tuple[bytes, str]] = TTLCache(128, 3600)
+# Short negative cache — a dead/expired thumb URL otherwise re-pays the
+# upstream timeout on every render pass.
+_thumb_neg: TTLCache[tuple[str, str], None] = TTLCache(256, 60)
+# Concurrent misses for the same image share one upstream fetch — a grid of
+# rows after the same cover must not fan out to one request each.
+_thumb_inflight: dict[tuple[str, str], asyncio.Task] = {}
 
 
 @get("/thumb", include_in_schema=False)
@@ -499,9 +505,17 @@ async def thumbnail_proxy(shared: Shared, request: Request) -> Response:
     key = (url, referer)
     hit = _thumb_cache.get(key)
     if hit is None:
+        if key in _thumb_neg:
+            return Response("thumbnail unavailable", status_code=502, media_type="text/plain")
+        task = _thumb_inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(asyncio.to_thread(fetch_thumbnail, url, referer))
+            _thumb_inflight[key] = task
+            task.add_done_callback(lambda _t, k=key: _thumb_inflight.pop(k, None))
         try:
-            hit = await asyncio.to_thread(fetch_thumbnail, url, referer)
+            hit = await asyncio.shield(task)
         except Exception:
+            _thumb_neg.insert(key, None)
             return Response("thumbnail unavailable", status_code=502, media_type="text/plain")
         _thumb_cache.insert(key, hit)
     body, content_type = hit

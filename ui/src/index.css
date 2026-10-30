@@ -3,19 +3,51 @@
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
 
+/*
+ * DownloadAnything — graphite instrument.
+ *
+ * One material: a cool-neutral graphite ladder, one light source (a faint top
+ * edge on raised surfaces), one accent (ink). Status hues are information, not
+ * decoration: they appear only as a 6px LED, a 2px progress rail and an alert.
+ *
+ * Every neutral is tinted a few thousandths of chroma toward 255° so the black
+ * reads as anodised metal rather than a void.
+ */
+
 @theme {
   --font-sans: "Geist Variable", ui-sans-serif, system-ui, -apple-system,
     "Segoe UI", sans-serif;
   --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo,
     Consolas, monospace;
+
+  /* Type scale — five roles, no arbitrary sizes. */
+  --text-micro: 0.65625rem; /* 10.5 — uppercase overlines only */
+  --text-micro--line-height: 1.25;
+  --text-meta: 0.71875rem; /* 11.5 — metadata, counters */
+  --text-meta--line-height: 1.45;
+  --text-body: 0.8125rem; /* 13 — interface body */
+  --text-body--line-height: 1.5;
+  --text-title: 0.9375rem; /* 15 — page and dialog titles */
+  --text-title--line-height: 1.35;
+  --text-title--letter-spacing: -0.014em;
+  --text-display: 1.1875rem; /* 19 — empty-state headlines */
+  --text-display--line-height: 1.25;
+  --text-display--letter-spacing: -0.02em;
+
+  /* One radius family: 6 chips · 10 controls · 14 panels · 18 overlays. */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.875rem;
+  --radius-2xl: 1.125rem;
 }
 
-/*
- * Minimal monochrome dark theme — near-black canvas, flat hairline-separated
- * surfaces, softened ink, desaturated status accents.
- * Defined on :root, .dark, and [data-theme="dark"] outside @layer so every
- * base and calculated token in @heroui/styles is deterministically overridden.
- */
+@theme inline {
+  --color-foreground-secondary: var(--foreground-secondary);
+  --color-muted-subtle: var(--muted-subtle);
+  --color-background-secondary: var(--background-secondary);
+}
+
 :root,
 .dark,
 [data-theme="dark"] {
@@ -25,19 +57,19 @@
   --white: oklch(1 0 0);
   --black: oklch(0 0 0);
   --snow: oklch(0.985 0 0);
-  --eclipse: oklch(0.07 0 0);
+  --eclipse: oklch(0.08 0.004 255);
 
   --spacing: 0.25rem;
   --radius: 0.625rem;
   --field-radius: 0.625rem;
   --border-width: 1px;
   --field-border-width: 1px;
-  --disabled-opacity: 0.38;
+  --disabled-opacity: 0.45;
   --ring-offset-width: 0px;
   --cursor-interactive: pointer;
   --cursor-disabled: not-allowed;
 
-  /* Motion — exponential ease-out curves */
+  /* Motion — exponential ease-out; nothing past 240ms. */
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
@@ -46,129 +78,126 @@
   --dur-base: 180ms;
   --dur-slow: 240ms;
 
-  /* Canvas & Monochrome Elevation Ladder (small steps — flat, not stacked) */
-  --background: oklch(0.135 0 0);                /* ~#08080a Canvas */
-  --background-secondary: oklch(0.15 0 0);       /* Header / rail */
-  --background-tertiary: oklch(0.165 0 0);
-  --foreground: oklch(0.905 0 0);                /* Softened primary ink */
-  --foreground-secondary: oklch(0.70 0 0);       /* Secondary ink */
+  /* OLED canvas & neutral ladder — pure black, no slate tint. */
+  --background: oklch(0 0 0);
+  --background-secondary: oklch(0.14 0 0);
+  --background-tertiary: oklch(0.17 0 0);
+  --foreground: oklch(0.99 0 0);
+  --foreground-secondary: oklch(0.82 0 0);
   --background-inverse: var(--foreground);
 
-  --surface: oklch(0.16 0 0);                    /* L1 Row / card surface */
+  --surface: oklch(0.15 0 0);
   --surface-foreground: var(--foreground);
-  --surface-hover: oklch(0.195 0 0);             /* L1 hover */
+  --surface-hover: oklch(0.19 0 0);
 
-  --surface-secondary: oklch(0.20 0 0);          /* L2 Raised surface */
+  --surface-secondary: oklch(0.19 0 0);
   --surface-secondary-foreground: var(--foreground);
 
-  --surface-tertiary: oklch(0.24 0 0);           /* L3 Active surface */
+  --surface-tertiary: oklch(0.23 0 0);
   --surface-tertiary-foreground: var(--foreground);
 
-  --overlay: oklch(0.155 0 0);                   /* Modal / drawer / popover */
+  --overlay: oklch(0.17 0 0);
   --overlay-foreground: var(--foreground);
 
-  /* Text & Neutral Hierarchy */
-  --muted: oklch(0.58 0 0);                      /* Supporting copy & metadata */
-  --muted-subtle: oklch(0.44 0 0);               /* Quiet labels & placeholders */
+  /* Ink ladder — neutral, 5.5:1 or better at 11px on black. */
+  --muted: oklch(0.68 0 0);
+  --muted-subtle: oklch(0.59 0 0);
 
-  /* Neutral Controls (--default, --segment) */
-  --default: oklch(0.19 0 0);                    /* Secondary button fill */
-  --default-foreground: oklch(0.90 0 0);
-  --default-hover: oklch(0.225 0 0);
-  --default-pressed: oklch(0.26 0 0);
-  --default-soft: oklch(1 0 0 / 0.045);
-  --default-soft-foreground: oklch(0.80 0 0);
-  --default-soft-hover: oklch(1 0 0 / 0.08);
+  /* Neutral controls — fills, no outlines. */
+  --default: oklch(0.21 0 0);
+  --default-foreground: oklch(0.95 0 0);
+  --default-hover: oklch(0.25 0 0);
+  --default-pressed: oklch(0.29 0 0);
+  --default-soft: oklch(1 0 0 / 0.06);
+  --default-soft-foreground: oklch(0.85 0 0);
+  --default-soft-hover: oklch(1 0 0 / 0.1);
 
-  --segment: oklch(0.225 0 0);                   /* Active tab / segment fill */
-  --segment-foreground: oklch(0.92 0 0);
+  --segment: oklch(0.23 0 0);
+  --segment-foreground: oklch(0.99 0 0);
 
-  /* Monochrome Accent (dimmed white primary action) */
-  --accent: oklch(0.90 0 0);
-  --accent-foreground: oklch(0.09 0 0);
-  --accent-hover: oklch(0.955 0 0);
-  --accent-pressed: oklch(0.82 0 0);
-  --accent-soft: oklch(1 0 0 / 0.06);
-  --accent-soft-foreground: oklch(0.90 0 0);
-  --accent-soft-hover: oklch(1 0 0 / 0.10);
+  /* Accent — pure ink. One filled action per view. */
+  --accent: oklch(1 0 0);
+  --accent-foreground: oklch(0 0 0);
+  --accent-hover: oklch(0.96 0 0);
+  --accent-pressed: oklch(0.86 0 0);
+  --accent-soft: oklch(1 0 0 / 0.08);
+  --accent-soft-foreground: oklch(0.95 0 0);
+  --accent-soft-hover: oklch(1 0 0 / 0.12);
 
-  /* Borders, Separators & Focus — hairlines, not frames */
-  --border: oklch(0.205 0 0);
-  --border-secondary: oklch(0.25 0 0);
-  --border-tertiary: oklch(0.30 0 0);
-  --separator: oklch(0.175 0 0);
-  --separator-secondary: oklch(0.21 0 0);
-  --separator-tertiary: oklch(0.25 0 0);
-  --focus: oklch(0.80 0 0);
+  /* Structure — 1px at 4–7% white; nothing heavier. */
+  --border: oklch(1 0 0 / 0.07);
+  --border-secondary: oklch(1 0 0 / 0.1);
+  --border-tertiary: oklch(1 0 0 / 0.14);
+  --separator: oklch(1 0 0 / 0.04);
+  --separator-secondary: oklch(1 0 0 / 0.06);
+  --separator-tertiary: oklch(1 0 0 / 0.09);
+  --focus: oklch(1 0 0 / 0.55);
   --link: var(--foreground);
 
-  /* Form Fields — recessed but clearly distinct from the canvas */
-  --field-background: oklch(0.185 0 0);
-  --field-hover: oklch(0.22 0 0);
-  --field-focus: oklch(0.205 0 0);
+  /* Fields — a quiet raised well with a 1px edge. */
+  --field-background: oklch(0.2 0 0);
+  --field-hover: oklch(0.23 0 0);
+  --field-focus: oklch(0.21 0 0);
   --field-foreground: var(--foreground);
-  --field-placeholder: oklch(0.44 0 0);
-  --field-border: transparent;
-  --field-border-hover: transparent;
-  --field-border-focus: oklch(0.45 0 0);
+  --field-placeholder: oklch(0.6 0 0);
+  --field-border: oklch(1 0 0 / 0.06);
+  --field-border-hover: oklch(1 0 0 / 0.1);
+  --field-border-focus: oklch(1 0 0 / 0.32);
   --field-shadow: none;
 
-  /* Interactive Surface States — clearly legible against the canvas */
-  --state-hover-bg: oklch(0.195 0 0);
-  --state-active-bg: oklch(0.235 0 0);
-  --state-selected-bg: oklch(0.215 0 0);
-  --state-selected-border: oklch(0.32 0 0);
+  /* Interactive surface states — translucent, no rings. */
+  --state-hover-bg: oklch(1 0 0 / 0.04);
+  --state-active-bg: oklch(1 0 0 / 0.06);
+  --state-selected-bg: oklch(1 0 0 / 0.08);
 
-  /* Semantic Status Colors — desaturated, readable on dark */
-  /* Downloading / Active — muted blue */
-  --info: oklch(0.70 0.10 240);
-  --info-foreground: oklch(0.12 0.02 240);
-  --info-hover: oklch(0.75 0.10 240);
-  --info-soft: color-mix(in oklab, var(--info) 9%, transparent);
-  --info-soft-foreground: oklch(0.79 0.07 240);
-  --info-soft-hover: color-mix(in oklab, var(--info) 14%, transparent);
-  --info-border: color-mix(in oklab, var(--info) 22%, transparent);
+  /* Status — clear hues, one meaning each. */
+  --info: oklch(0.74 0.13 235);
+  --info-foreground: oklch(0.15 0.02 235);
+  --info-hover: oklch(0.79 0.13 235);
+  --info-soft: color-mix(in oklab, var(--info) 12%, transparent);
+  --info-soft-foreground: oklch(0.85 0.09 235);
+  --info-soft-hover: color-mix(in oklab, var(--info) 18%, transparent);
+  --info-border: color-mix(in oklab, var(--info) 28%, transparent);
 
-  /* Completed / Success — muted green */
-  --success: oklch(0.71 0.115 155);
-  --success-foreground: oklch(0.12 0.02 155);
-  --success-hover: oklch(0.76 0.115 155);
-  --success-soft: color-mix(in oklab, var(--success) 9%, transparent);
-  --success-soft-foreground: oklch(0.79 0.085 155);
-  --success-soft-hover: color-mix(in oklab, var(--success) 14%, transparent);
-  --success-border: color-mix(in oklab, var(--success) 22%, transparent);
+  --success: oklch(0.78 0.15 155);
+  --success-foreground: oklch(0.15 0.02 155);
+  --success-hover: oklch(0.83 0.15 155);
+  --success-soft: color-mix(in oklab, var(--success) 12%, transparent);
+  --success-soft-foreground: oklch(0.88 0.1 155);
+  --success-soft-hover: color-mix(in oklab, var(--success) 18%, transparent);
+  --success-border: color-mix(in oklab, var(--success) 28%, transparent);
 
-  /* Paused / Selecting / Warning — muted amber */
-  --warning: oklch(0.76 0.105 80);
-  --warning-foreground: oklch(0.14 0.02 80);
-  --warning-hover: oklch(0.81 0.105 80);
-  --warning-soft: color-mix(in oklab, var(--warning) 9%, transparent);
-  --warning-soft-foreground: oklch(0.81 0.08 80);
-  --warning-soft-hover: color-mix(in oklab, var(--warning) 14%, transparent);
-  --warning-border: color-mix(in oklab, var(--warning) 22%, transparent);
+  --warning: oklch(0.82 0.13 80);
+  --warning-foreground: oklch(0.16 0.02 80);
+  --warning-hover: oklch(0.87 0.13 80);
+  --warning-soft: color-mix(in oklab, var(--warning) 12%, transparent);
+  --warning-soft-foreground: oklch(0.9 0.1 80);
+  --warning-soft-hover: color-mix(in oklab, var(--warning) 18%, transparent);
+  --warning-border: color-mix(in oklab, var(--warning) 28%, transparent);
 
-  /* Error / Danger — muted red */
-  --danger: oklch(0.63 0.15 25);
-  --danger-foreground: oklch(0.96 0 0);
-  --danger-hover: oklch(0.68 0.15 25);
-  --danger-soft: color-mix(in oklab, var(--danger) 9%, transparent);
-  --danger-soft-foreground: oklch(0.78 0.09 25);
-  --danger-soft-hover: color-mix(in oklab, var(--danger) 14%, transparent);
-  --danger-border: color-mix(in oklab, var(--danger) 24%, transparent);
+  --danger: oklch(0.7 0.19 25);
+  --danger-foreground: oklch(0.99 0 0);
+  --danger-hover: oklch(0.75 0.19 25);
+  /* Filled destructive action — a darker step so white text clears 4.5:1. */
+  --danger-solid: oklch(0.52 0.19 25);
+  --danger-solid-hover: oklch(0.56 0.19 25);
+  --danger-solid-pressed: oklch(0.48 0.19 25);
+  --danger-soft: color-mix(in oklab, var(--danger) 12%, transparent);
+  --danger-soft-foreground: oklch(0.85 0.12 25);
+  --danger-soft-hover: color-mix(in oklab, var(--danger) 18%, transparent);
+  --danger-border: color-mix(in oklab, var(--danger) 30%, transparent);
 
-  /* Processing / Seeding — muted violet */
-  --process: oklch(0.69 0.10 290);
-  --process-soft: color-mix(in oklab, var(--process) 9%, transparent);
-  --process-soft-foreground: oklch(0.79 0.07 290);
-  --process-border: color-mix(in oklab, var(--process) 22%, transparent);
+  --process: oklch(0.74 0.14 295);
+  --process-soft: color-mix(in oklab, var(--process) 12%, transparent);
+  --process-soft-foreground: oklch(0.86 0.1 295);
+  --process-border: color-mix(in oklab, var(--process) 28%, transparent);
 
-  /* Queued / Waiting — neutral */
-  --queued: oklch(0.60 0 0);
-  --queued-soft: oklch(1 0 0 / 0.05);
-  --queued-soft-foreground: oklch(0.72 0 0);
-  --queued-border: oklch(1 0 0 / 0.10);
+  --queued: oklch(0.62 0 0);
+  --queued-soft: oklch(1 0 0 / 0.06);
+  --queued-soft-foreground: oklch(0.78 0 0);
+  --queued-border: oklch(1 0 0 / 0.1);
 
-  /* Task State Tokens (Mapped to Statuses) */
+  /* Task state tokens */
   --state-downloading: var(--info);
   --state-downloading-soft: var(--info-soft);
   --state-downloading-fg: var(--info-soft-foreground);
@@ -199,14 +228,12 @@
   --state-queued-fg: var(--queued-soft-foreground);
   --state-queued-border: var(--queued-border);
 
-  /* Overlays & Shadows — quiet elevation */
-  --backdrop: rgb(0 0 0 / 0.6);
-  --surface-shadow: 0 0 0 1px var(--border);
-  --overlay-shadow: 0 0 0 1px var(--border),
-    0 16px 48px -12px rgb(0 0 0 / 0.55);
+  /* Overlays — depth from the fill and a soft shadow, never a ring. */
+  --backdrop: rgb(0 0 0 / 0.72);
+  --surface-shadow: none;
+  --overlay-shadow: 0 24px 64px -16px rgb(0 0 0 / 0.9);
 
-  /* Scrollbars & Tooltips */
-  --scrollbar-thumb: oklch(1 0 0 / 0.10);
+  --scrollbar-thumb: oklch(1 0 0 / 0.12);
   --scrollbar-track: transparent;
   --scrollbar-gutter: auto;
   --scrollbar-width: thin;
@@ -216,15 +243,22 @@
   --tooltip-close-delay: 0ms;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  min-height: 100vh;
+  min-height: 100%;
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
-  font-size: 13.5px;
+  font-size: 0.8125rem;
   line-height: 1.5;
-  letter-spacing: -0.008em;
+  letter-spacing: -0.006em;
+  font-synthesis-weight: none;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
@@ -236,9 +270,112 @@ body {
   color: var(--accent-foreground);
 }
 
-/* One radius language: 10px controls, 14px cards, 16px dialogs, 8px tabs. */
+/* ---------------------------------------------------------------------------
+ * Shared layout
+ * ------------------------------------------------------------------------ */
+
+/* The one chrome surface: header bars, separated by tone alone. */
+.chrome {
+  background: var(--background-secondary);
+}
+
+/* A list band: a rounded, borderless row. Space and hover carry the edge. */
+.band {
+  position: relative;
+  border-radius: var(--radius-xl);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+@media (hover: hover) {
+  .band:hover {
+    background-color: var(--surface-hover);
+  }
+}
+
+.band:focus-within {
+  background-color: var(--surface-hover);
+}
+
+/* Uppercase overline — section labels and table headers. */
+.overline {
+  font-size: 0.65625rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-subtle);
+  line-height: 1.3;
+}
+
+/* Settings: title rail beside controls, collapsing when the pane gets narrow. */
+.settings-content {
+  container-type: inline-size;
+}
+
+.settings-section {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 3rem;
+  align-items: start;
+}
+
+@container (max-width: 750px) {
+  .settings-section {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.25rem;
+  }
+
+  .settings-section > div:first-child > p {
+    max-width: 60ch;
+  }
+}
+
+/* A 6px LED + label. The only place state colour is used in a row. */
+.status-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.status-mark__dot {
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 9999px;
+  flex-shrink: 0;
+  background: currentColor;
+}
+
+.status-mark__label {
+  font-size: 0.71875rem;
+  font-weight: 500;
+  letter-spacing: -0.004em;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-mark[data-tone="attention"] .status-mark__label {
+  color: var(--status-tone, var(--foreground-secondary));
+}
+
+.status-mark[data-tone="error"] .status-mark__label {
+  color: var(--danger);
+}
+
+/* ---------------------------------------------------------------------------
+ * Controls
+ * ------------------------------------------------------------------------ */
+
+/* Component styles live in the components layer so per-instance Tailwind
+ * utilities (heights, widths, colors) can override them. */
+@layer components {
+
 .button {
   border-radius: var(--radius);
+  height: 2.125rem; /* 34 */
+  padding-inline: 0.875rem;
+  gap: 0.4375rem;
   font-size: 0.8125rem;
   font-weight: 500;
   letter-spacing: -0.006em;
@@ -249,6 +386,29 @@ body {
     color var(--dur-fast) var(--ease-out),
     box-shadow var(--dur-fast) var(--ease-out),
     opacity var(--dur-fast) var(--ease-out);
+}
+
+.button--sm {
+  height: 1.875rem; /* 30 */
+  padding-inline: 0.75rem;
+  font-size: 0.78125rem;
+}
+
+.button--lg {
+  height: 2.375rem;
+  padding-inline: 1rem;
+}
+
+.button--icon-only.button--sm {
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+}
+
+.button--icon-only.button--md {
+  width: 1.875rem;
+  height: 1.875rem;
+  padding: 0;
 }
 
 .button--primary {
@@ -264,16 +424,6 @@ body {
   --button-bg-hover: var(--default-hover);
   --button-bg-pressed: var(--default-pressed);
   --button-fg: var(--foreground);
-  border: 1px solid var(--border);
-}
-
-@media (hover: hover) {
-  .button--secondary:hover:not(:disabled),
-  .button--secondary[data-hovered="true"]:not(:disabled),
-  .button--tertiary:hover:not(:disabled),
-  .button--tertiary[data-hovered="true"]:not(:disabled) {
-    border-color: var(--border-secondary);
-  }
 }
 
 .button--ghost {
@@ -291,40 +441,36 @@ body {
 }
 
 .button--danger {
-  --button-bg: var(--danger);
-  --button-bg-hover: var(--danger-hover);
-  --button-bg-pressed: oklch(0.58 0.195 25);
+  --button-bg: var(--danger-solid);
+  --button-bg-hover: var(--danger-solid-hover);
+  --button-bg-pressed: var(--danger-solid-pressed);
   --button-fg: var(--danger-foreground);
 }
 
 .button--danger-soft {
   --button-bg: var(--danger-soft);
   --button-bg-hover: var(--danger-soft-hover);
-  --button-bg-pressed: color-mix(in oklab, var(--danger) 28%, transparent);
+  --button-bg-pressed: color-mix(in oklab, var(--danger) 26%, transparent);
   --button-fg: var(--danger-soft-foreground);
-  border: 1px solid var(--danger-border);
 }
 
 .button:focus-visible,
 .button[data-focus-visible="true"] {
   outline: none;
-  box-shadow: 0 0 0 2px var(--focus);
+  box-shadow: 0 0 0 1px var(--focus);
 }
 
-/* 2. Close Button (Modals, Drawers, AlertDialogs, SearchField) */
+/* Close button — modals, drawers, search fields. */
 .close-button,
 .close-button--default {
   width: 1.75rem;
   height: 1.75rem;
-  border-radius: 0.375rem;
+  border-radius: var(--radius-md);
   background-color: transparent;
   color: var(--muted);
-  border: 1px solid transparent;
   transition:
-    transform var(--dur-fast) var(--ease-out),
     background-color var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out),
-    border-color var(--dur-fast) var(--ease-out);
+    color var(--dur-fast) var(--ease-out);
 }
 
 @media (hover: hover) {
@@ -332,45 +478,43 @@ body {
   .close-button[data-hovered="true"],
   .close-button--default:hover,
   .close-button--default[data-hovered="true"] {
-    background-color: var(--surface-secondary);
+    background-color: var(--state-hover-bg);
     color: var(--foreground);
-    border-color: var(--border);
   }
 }
 
 .close-button:active,
-.close-button[data-pressed="true"],
-.close-button--default:active,
-.close-button--default[data-pressed="true"] {
-  background-color: var(--surface-tertiary);
-  transform: scale(0.95);
+.close-button[data-pressed="true"] {
+  background-color: var(--state-active-bg);
 }
 
 .search-field__clear-button.close-button {
-  width: 1.375rem;
-  height: 1.375rem;
-  border-radius: 0.25rem;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: var(--radius-sm);
 }
 
-/* 3. Form Fields: Input, TextArea, Select Trigger, SearchField Group */
+/* Form fields */
 .label {
-  font-size: 0.78125rem;
+  font-size: 0.75rem;
   font-weight: 500;
   color: var(--foreground-secondary);
-  letter-spacing: -0.005em;
+  letter-spacing: -0.004em;
   line-height: 1.35;
 }
 
 .description {
-  font-size: 0.75rem;
+  font-size: 0.71875rem;
   color: var(--muted);
   line-height: 1.45;
+  text-wrap: pretty;
+  max-width: 68ch;
 }
 
 .textfield,
 .select,
 .search-field {
-  gap: 0.375rem;
+  gap: 0.4375rem;
 }
 
 .input,
@@ -382,7 +526,7 @@ body {
 .search-field__group,
 .search-field--secondary .search-field__group {
   background-color: var(--field-background);
-  border: 1px solid transparent;
+  border: 1px solid var(--field-border);
   border-radius: var(--field-radius);
   color: var(--field-foreground);
   font-size: 0.8125rem;
@@ -398,9 +542,14 @@ body {
 .select--secondary .select__trigger,
 .search-field__group,
 .search-field--secondary .search-field__group {
-  min-height: 2.25rem;
-  height: 2.25rem;
+  min-height: 2.125rem;
+  height: 2.125rem;
   padding-block: 0;
+}
+
+.textarea,
+.textarea--secondary {
+  padding: 0.75rem;
 }
 
 .search-field__input {
@@ -424,6 +573,7 @@ body {
   .search-field__group:hover:not(:focus-within):not([data-focus-within="true"]),
   .search-field--secondary .search-field__group:hover:not(:focus-within):not([data-focus-within="true"]) {
     background-color: var(--field-hover);
+    border-color: var(--field-border-hover);
   }
 }
 
@@ -438,15 +588,10 @@ body {
 .select__trigger:focus-visible,
 .select__trigger[data-focus-visible="true"],
 .select__trigger[data-open="true"],
-.select--secondary .select__trigger:focus-visible,
-.select--secondary .select__trigger[data-focus-visible="true"],
-.select--secondary .select__trigger[data-open="true"],
 .search-field__group:focus-within,
-.search-field__group[data-focus-within="true"],
-.search-field--secondary .search-field__group:focus-within,
-.search-field--secondary .search-field__group[data-focus-within="true"] {
+.search-field__group[data-focus-within="true"] {
   background-color: var(--field-focus);
-  box-shadow: 0 0 0 1.5px var(--field-border-focus);
+  box-shadow: 0 0 0 1px var(--field-border-focus);
   outline: none;
 }
 
@@ -456,12 +601,13 @@ body {
 .text-field[data-invalid] .textarea,
 .field[data-invalid] .select__trigger,
 .search-field[data-invalid] .search-field__group {
-  box-shadow: 0 0 0 1.5px var(--field-border-invalid);
+  box-shadow: 0 0 0 1px var(--danger);
 }
 
 .select__trigger {
   align-items: center;
   gap: 0.5rem;
+  padding-inline: 0.75rem;
 }
 
 .select__value {
@@ -481,14 +627,14 @@ body {
   color: var(--muted-subtle);
 }
 
-/* 4. Popovers, Dropdowns & ListBox */
+/* Popovers, dropdowns, list boxes */
 .select__popover,
 .popover,
 .dropdown__popover {
   background-color: var(--overlay);
-  border: 1px solid var(--separator);
-  border-radius: 0.75rem;
+  border-radius: var(--radius-xl);
   box-shadow: var(--overlay-shadow);
+  overscroll-behavior: contain;
 }
 
 .list-box,
@@ -497,13 +643,13 @@ body {
 }
 
 .list-box > * + * {
-  margin-top: 2px;
+  margin-top: 1px;
 }
 
 .list-box-item,
 .select__popover [data-slot="list-box-item"] {
   min-height: 2rem;
-  border-radius: 0.375rem;
+  border-radius: var(--radius-md);
   padding-inline: 0.625rem;
   padding-block: 0.375rem;
   font-size: 0.8125rem;
@@ -535,7 +681,6 @@ body {
 
 .list-box-item:active,
 .list-box-item[data-pressed="true"] {
-  transform: none;
   background-color: var(--state-active-bg);
 }
 
@@ -543,36 +688,30 @@ body {
   color: var(--accent);
 }
 
-/* 5. Switch */
+/* Switch */
 .switch__control {
   width: 2.25rem;
   height: 1.25rem;
   border-radius: 9999px;
-  background-color: var(--field-background);
-  border: 1px solid var(--border-secondary);
+  background-color: var(--surface-tertiary);
   padding: 2px;
-  transition:
-    background-color var(--dur-base) var(--ease-out),
-    border-color var(--dur-base) var(--ease-out);
+  transition: background-color var(--dur-base) var(--ease-out);
 }
 
 .switch:hover .switch__control,
 .switch:has([data-slot="switch-content"][data-hovered="true"]) .switch__control {
-  background-color: var(--surface-secondary);
-  border-color: var(--border-tertiary);
+  background-color: var(--surface-tertiary);
 }
 
 .switch[aria-checked="true"] .switch__control,
 .switch[data-selected="true"] .switch__control {
   background-color: var(--accent);
-  border-color: var(--accent);
 }
 
 .switch[aria-checked="true"]:hover .switch__control,
 .switch[data-selected="true"]:hover .switch__control,
 .switch:has([data-slot="switch-content"][data-hovered="true"])[data-selected="true"] .switch__control {
   background-color: var(--accent-hover);
-  border-color: var(--accent-hover);
 }
 
 .switch__thumb {
@@ -584,8 +723,7 @@ body {
   box-shadow: none;
   transition:
     margin var(--dur-base) var(--ease-drawer),
-    background-color var(--dur-fast) var(--ease-out),
-    transform var(--dur-fast) var(--ease-out);
+    background-color var(--dur-fast) var(--ease-out);
 }
 
 .switch:hover .switch__thumb {
@@ -599,7 +737,7 @@ body {
   box-shadow: none;
 }
 
-/* 6. Checkbox & Radio */
+/* Checkbox & radio */
 .checkbox__control {
   width: 1rem;
   height: 1rem;
@@ -609,10 +747,14 @@ body {
   box-shadow: none;
 }
 
+.checkbox__control::before {
+  border-radius: 0.1875rem;
+}
+
 .checkbox:hover .checkbox__control,
 .checkbox:has([data-slot="checkbox-content"][data-hovered="true"]) .checkbox__control {
   border-color: var(--foreground-secondary);
-  background-color: var(--surface-secondary);
+  background-color: var(--field-hover);
 }
 
 .checkbox[aria-checked="true"] .checkbox__control,
@@ -642,17 +784,17 @@ body {
   background-color: var(--accent);
 }
 
-/* 7. Tabs */
+/* Tabs — a segmented control: one track, one raised indicator. */
 .tabs__list-container {
-  background-color: var(--surface);
-  border-radius: 0.625rem;
-  padding: 0.25rem;
+  background-color: var(--state-hover-bg);
+  border-radius: var(--radius-lg);
+  padding: 0.1875rem;
   overflow: visible;
 }
 
 .tabs__tab {
-  border-radius: 0.375rem;
-  font-size: 0.8125rem;
+  border-radius: var(--radius-md);
+  font-size: 0.78125rem;
   font-weight: 500;
   color: var(--muted);
   transition:
@@ -663,9 +805,7 @@ body {
 @media (hover: hover) {
   .tabs__tab:not([data-selected="true"]):not([data-disabled="true"]):hover,
   .tabs__tab[data-hovered="true"]:not([data-selected="true"]):not([data-disabled="true"]) {
-    opacity: 1;
     color: var(--foreground);
-    background-color: oklch(1 0 0 / 0.04);
   }
 }
 
@@ -674,27 +814,40 @@ body {
 }
 
 .tabs__indicator {
-  border-radius: 0.375rem;
-  background-color: var(--surface-secondary);
+  border-radius: var(--radius-md);
+  background-color: var(--state-selected-bg);
 }
 
 .tabs__separator {
   display: none;
 }
 
-/* 8. Cards, Modals, AlertDialogs, Drawers, Tooltips, Toasts, Alerts */
-.card {
-  background-color: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 0.75rem;
-  box-shadow: none;
+.tabs__tab:focus-visible,
+.tabs__tab[data-focus-visible="true"],
+.close-button:focus-visible,
+.switch:focus-within .switch__control,
+.checkbox:focus-within .checkbox__control,
+.radio:focus-within .radio__control {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--focus);
+}
+
+/* ---------------------------------------------------------------------------
+ * Surfaces
+ * ------------------------------------------------------------------------ */
+
+.modal__backdrop,
+.alert-dialog__backdrop,
+.drawer__backdrop {
+  background-color: var(--backdrop);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
 }
 
 .modal__dialog,
 .alert-dialog__dialog {
   background-color: var(--overlay);
-  border: 1px solid var(--separator);
-  border-radius: 1rem;
+  border-radius: var(--radius-2xl);
   box-shadow: var(--overlay-shadow);
   padding: 1.5rem;
 }
@@ -709,7 +862,7 @@ body {
 .alert-dialog__heading {
   font-size: 0.9375rem;
   font-weight: 600;
-  letter-spacing: -0.015em;
+  letter-spacing: -0.014em;
   color: var(--foreground);
 }
 
@@ -717,6 +870,7 @@ body {
 .alert-dialog__body {
   font-size: 0.8125rem;
   color: var(--muted);
+  overscroll-behavior: contain;
 }
 
 .modal__header + .modal__body,
@@ -726,158 +880,114 @@ body {
 
 .modal__body + .modal__footer,
 .alert-dialog__body + .alert-dialog__footer {
-  margin-top: 1.125rem;
-  padding-top: 0.875rem;
-  border-top: 1px solid var(--separator);
+  margin-top: 1.5rem;
 }
 
 .modal__close-trigger,
-.alert-dialog__close-trigger {
-  top: 1.25rem;
-  inset-inline-end: 1.25rem;
+.alert-dialog__close-trigger,
+.drawer__close-trigger {
+  top: 1.125rem;
+  inset-inline-end: 1.125rem;
 }
 
 .alert-dialog__icon {
   width: 2.25rem;
   height: 2.25rem;
-  border-radius: 0.5rem;
+  border-radius: var(--radius-lg);
 }
 
 .drawer__dialog {
   background-color: var(--overlay);
-  border-inline-start: 1px solid var(--separator);
   box-shadow: var(--overlay-shadow);
   padding: 1.5rem;
 }
 
 .drawer__header {
   padding-inline-end: 2.25rem;
-  padding-bottom: 0.875rem;
-  border-bottom: 1px solid var(--separator);
+  padding-bottom: 1rem;
 }
 
 .drawer__header + .drawer__body {
-  margin-top: 1rem;
+  margin-top: 1.5rem;
 }
 
 .drawer__body + .drawer__footer {
-  margin-top: 1rem;
-  padding-top: 0.875rem;
-  border-top: 1px solid var(--separator);
+  margin-top: 1.5rem;
 }
 
-.drawer__close-trigger {
-  top: 1.25rem;
-  inset-inline-end: 1.25rem;
+.drawer__body {
+  overscroll-behavior: contain;
 }
 
 .toast {
   background-color: var(--overlay);
-  border: 1px solid var(--separator);
-  border-radius: 0.75rem;
+  border-radius: var(--radius-xl);
   box-shadow: var(--overlay-shadow);
 }
 
 .tooltip {
   background-color: var(--surface-tertiary);
-  border: 1px solid var(--separator);
   color: var(--foreground);
-  border-radius: 0.375rem;
-  padding: 0.25rem 0.5rem;
-  font-size: 0.6875rem;
+  border-radius: var(--radius-md);
+  padding: 0.3125rem 0.5rem;
+  font-size: 0.71875rem;
   font-weight: 500;
   box-shadow: var(--overlay-shadow);
 }
 
 .alert {
-  border-radius: 0.625rem;
+  border-radius: var(--radius-lg);
   padding: 0.75rem 0.875rem;
   gap: 0.625rem;
   background-color: var(--surface);
-  border: 1px solid var(--border);
   box-shadow: none;
 }
 
 .alert--danger {
-  background: color-mix(in oklab, var(--danger) 7%, var(--surface));
-  border-color: var(--danger-border);
+  background: color-mix(in oklab, var(--danger) 10%, var(--surface));
 }
 
 .alert--warning {
-  background: color-mix(in oklab, var(--warning) 7%, var(--surface));
-  border-color: var(--warning-border);
+  background: color-mix(in oklab, var(--warning) 10%, var(--surface));
 }
 
 .alert--success {
-  background: color-mix(in oklab, var(--success) 7%, var(--surface));
-  border-color: var(--success-border);
+  background: color-mix(in oklab, var(--success) 10%, var(--surface));
 }
 
 .alert--accent {
-  background: color-mix(in oklab, var(--accent) 5%, var(--surface));
-  border-color: var(--border-secondary);
+  background: color-mix(in oklab, var(--accent) 6%, var(--surface));
 }
 
-/* 9. Chips & Download Task Status Badges */
+/* Chips — quiet categorical metadata, never a status. */
 .chip {
-  border-radius: 0.375rem;
-  font-size: 0.6875rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.65625rem;
   font-weight: 500;
   line-height: 1;
-  letter-spacing: 0.01em;
+  letter-spacing: 0.02em;
 }
 
 .chip--quiet {
-  --chip-bg: oklch(1 0 0 / 0.04);
+  --chip-bg: oklch(1 0 0 / 0.05);
   --chip-fg: var(--muted);
 }
 
-.chip--strong {
-  --chip-bg: oklch(1 0 0 / 0.08);
-  --chip-fg: var(--foreground-secondary);
+/* Progress — a 2px rail that sits on the row's hairline. */
+.progress-bar {
+  gap: 0;
 }
 
-.chip--downloading {
-  --chip-bg: var(--state-downloading-soft);
-  --chip-fg: var(--state-downloading-fg);
-}
-
-.chip--complete {
-  --chip-bg: var(--state-complete-soft);
-  --chip-fg: var(--state-complete-fg);
-}
-
-.chip--paused,
-.chip--selecting {
-  --chip-bg: var(--state-paused-soft);
-  --chip-fg: var(--state-paused-fg);
-}
-
-.chip--postprocessing,
-.chip--seeding,
-.chip--info {
-  --chip-bg: var(--state-postprocessing-soft);
-  --chip-fg: var(--state-postprocessing-fg);
-}
-
-.chip--error {
-  --chip-bg: var(--state-error-soft);
-  --chip-fg: var(--state-error-fg);
-}
-
-.chip--queued {
-  --chip-bg: var(--state-queued-soft);
-  --chip-fg: var(--state-queued-fg);
-}
-
-/* 10. ProgressBar & Status Fills */
 .progress-bar__track {
-  background-color: var(--surface-tertiary);
+  background-color: var(--state-hover-bg);
   border-radius: 9999px;
+  overflow: hidden;
 }
 
 .progress-bar__fill {
   border-radius: 9999px;
+  background-color: var(--progress-bar-fill, var(--accent));
+  transition: width var(--dur-base) var(--ease-out);
 }
 
 .progress-bar--downloading {
@@ -904,7 +1014,12 @@ body {
   --progress-bar-fill: var(--state-queued);
 }
 
-/* Scrollbars & Number Inputs */
+} /* @layer components */
+
+/* ---------------------------------------------------------------------------
+ * Utilities
+ * ------------------------------------------------------------------------ */
+
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) transparent;
@@ -922,8 +1037,8 @@ input[type="number"] {
 }
 
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
@@ -931,9 +1046,9 @@ input[type="number"] {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: oklch(1 0 0 / 0.10);
+  background: oklch(1 0 0 / 0.1);
   background-clip: content-box;
-  border: 2px solid transparent;
+  border: 3px solid transparent;
   border-radius: 999px;
 }
 
@@ -942,61 +1057,25 @@ input[type="number"] {
   background-clip: content-box;
 }
 
-/* Tactile press utility */
+/* Images sit on the surface, not in it. */
+.thumb-outline {
+  outline: 1px solid oklch(1 0 0 / 0.06);
+  outline-offset: -1px;
+}
+
 .press-tactile {
   transition:
     background-color var(--dur-fast) var(--ease-out),
-    opacity var(--dur-fast) var(--ease-out),
     border-color var(--dur-fast) var(--ease-out),
     color var(--dur-fast) var(--ease-out),
-    box-shadow var(--dur-fast) var(--ease-out);
-}
-
-/* Live throughput meter */
-.meter {
-  display: inline-flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 11px;
-}
-
-.meter i {
-  width: 2px;
-  height: 100%;
-  border-radius: 1px;
-  background: var(--info);
-  transform: scaleY(0.35);
-  transform-origin: bottom;
-  animation: meter 1.1s var(--ease-in-out) infinite;
-}
-
-.meter i:nth-child(2) {
-  animation-delay: 0.12s;
-}
-
-.meter i:nth-child(3) {
-  animation-delay: 0.24s;
-}
-
-.meter i:nth-child(4) {
-  animation-delay: 0.36s;
-}
-
-@keyframes meter {
-  0%,
-  100% {
-    transform: scaleY(0.35);
-  }
-  50% {
-    transform: scaleY(1);
-  }
+    opacity var(--dur-fast) var(--ease-out);
 }
 
 /* Quiet entrance for list content and page windows */
 @keyframes rise-in {
   from {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(3px);
   }
   to {
     opacity: 1;
@@ -1011,35 +1090,32 @@ input[type="number"] {
 @keyframes page-enter {
   from {
     opacity: 0;
-    transform: scale(0.995) translateY(2px);
   }
   to {
     opacity: 1;
-    transform: none;
   }
 }
 
 .page-enter {
-  animation: page-enter 180ms var(--ease-out) both;
+  animation: page-enter var(--dur-base) var(--ease-out) both;
 }
 
-/* Reduced motion: keep color/opacity feedback, drop movement and scale. */
 @media (prefers-reduced-motion: reduce) {
   .rise-in,
   .page-enter {
     animation: none;
   }
 
-  .meter i {
-    animation: none;
-    transform: scaleY(0.6);
-  }
-
   .press-tactile {
     transition:
       background-color var(--dur-fast) ease,
-      opacity var(--dur-fast) ease,
       border-color var(--dur-fast) ease,
-      color var(--dur-fast) ease;
+      color var(--dur-fast) ease,
+      opacity var(--dur-fast) ease;
+  }
+
+  .button:active,
+  .button[data-pressed="true"] {
+    transform: none;
   }
 }

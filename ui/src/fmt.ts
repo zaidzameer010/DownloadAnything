@@ -30,8 +30,8 @@ export function taskName(d: DownloadInfo): string {
   return (
     d.bittorrent?.name ||
     d.playlist?.title ||
-    base ||
     d.downloadanything?.title ||
+    base ||
     d.downloadanything?.filename ||
     d.downloadanything?.filenameHint ||
     d.gid
@@ -138,9 +138,11 @@ export function commonDir(paths: string[]): string {
   return root
 }
 
-/** A node in the folder tree — '' name is the torrent root itself. */
+/** A node in the folder tree — '' name/path is the torrent root itself. */
 export interface FileTreeNode<T> {
   name: string
+  /** Relative dir path — stable key for expand/collapse state. */
+  path: string
   dirs: FileTreeNode<T>[]
   files: { file: T; name: string }[]
 }
@@ -151,7 +153,7 @@ export function buildFileTree<T extends { path: string }>(files: T[]): FileTreeN
   const root = commonDir(files.map((f) => f.path))
   const rel = (p: string) =>
     root && p.startsWith(root) ? p.slice(root.length).replace(/^[\\/]/, '') : p
-  const tree: FileTreeNode<T> = { name: '', dirs: [], files: [] }
+  const tree: FileTreeNode<T> = { name: '', path: '', dirs: [], files: [] }
   const byPath = new Map<string, FileTreeNode<T>>([['', tree]])
   for (const file of files) {
     const segs = rel(file.path).split(/[\\/]/)
@@ -161,7 +163,7 @@ export function buildFileTree<T extends { path: string }>(files: T[]): FileTreeN
       prefix = prefix ? `${prefix}/${seg}` : seg
       let child = byPath.get(prefix)
       if (!child) {
-        child = { name: seg, dirs: [], files: [] }
+        child = { name: seg, path: prefix, dirs: [], files: [] }
         byPath.set(prefix, child)
         node.dirs.push(child)
       }

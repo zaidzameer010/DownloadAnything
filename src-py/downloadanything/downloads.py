@@ -11,6 +11,7 @@ resume) — an approximation, not a mid-flight freeze.
 import asyncio
 import base64
 import contextlib
+import hashlib
 import os
 import re
 import secrets
@@ -25,6 +26,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import msgspec
+import orjson
 import structlog
 from yt_dlp import YoutubeDL as _YoutubeDL
 from yt_dlp.postprocessor.common import PostProcessor
@@ -981,35 +983,92 @@ def _dl_extract_opts(task: Task, s: AppSettings) -> ExtractOptions:
     return msgspec.convert(o, ExtractOptions)
 
 
+def _task_probe_path(task: Task, url: str) -> Path:
+    """The task's own probe-cache file, inside the task tmp dir — survives a
+    backend restart and is swept with the dir on finish/remove (and by the
+    startup orphan sweep)."""
+    name = hashlib.sha1(url.encode("utf-8")).hexdigest() + ".json"
+    return Path(task_tmp_dir(task.gid), "probe", name)
+
+
+def _task_probe_read(task: Task, url: str) -> dict[str, Any] | None:
+    p = _task_probe_path(task, url)
+    try:
+        return orjson.loads(p.read_bytes())
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        log.debug("task probe cache unreadable", gid=task.gid, path=str(p), error=str(e))
+        return None
+
+
+def _task_probe_write(task: Task, url: str, info: Any) -> None:
+    """tmp+rename write — playlist workers can read the shared file while a
+    sibling is still resolving it."""
+    try:
+        raw = orjson.dumps(info)
+    except Exception as e:
+        log.debug("task probe cache skipped — not serializable", gid=task.gid, url=url, error=str(e))
+        return
+    p = _task_probe_path(task, url)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_bytes(raw)
+        os.replace(tmp, p)
+    except OSError as e:
+        log.debug("task probe cache write failed", gid=task.gid, path=str(p), error=str(e))
+
+
 def _download_info(ydl: YoutubeDL, task: Task, s: AppSettings, url: str) -> Any:
     """Reuse the probe's cached info dict when present — process_ie_result
     re-runs format selection under this ydl's params, so the picked row
-    resolves without a second webpage/player/JS-challenge round-trip. A
-    failed replay (stale signed URLs, odd artifacts) drops the entry and
-    extracts fresh."""
+    resolves without a second webpage/player/JS-challenge round-trip. The
+    task's own copy is kept on disk (tmp/<gid>/probe) so a retry or resume
+    after a backend restart replays without extracting — it lives until the
+    task is finished or removed. A failed replay (stale signed URLs, odd
+    artifacts) drops both layers and extracts fresh."""
     opts = _dl_extract_opts(task, s)
     # A media-file task URL (sniffed/direct rows, manifest page_urls) must
     # not hit a claiming site IE — udemy.com/assets/*.m3u8 lands on
     # UdemyIE and dies looking for a course id. Generic parses m3u8/mpd
     # manifests and progressive files natively.
     ie = "Generic" if extract._is_media_url(url) else None
-    cached = extract.cached_info(opts, url)
-    hit_url = url
-    # Playlist listings cache under either probe signature — the video pass
-    # caches playlist?list pages itself, the flat listing pass caches the
-    # playlist a watch?v+list URL hides. Try the flipped signature on a miss.
-    alt = None
-    if task.req.get("playlist") and cached is None:
-        alt = msgspec.structs.replace(opts, playlist=True)
-        cached = extract.cached_info(alt, url)
-    if cached is None and (page_url := task.req.get("pageUrl") or "") != url:
-        cached = extract.cached_info(opts, page_url)
-        hit_url = page_url
-        if cached is None and alt is not None:
-            cached = extract.cached_info(alt, page_url)
+    hit_opts, hit_url = opts, url
+    from_disk = True
+    cached = _task_probe_read(task, url)
     if cached is None:
-        return ydl.extract_info(url, download=True, ie_key=ie)
-    log.info("probe cache hit — skipping re-extract", gid=task.gid, url=url)
+        from_disk = False
+        cached = extract.cached_info(opts, url)
+        # Playlist listings cache under either probe signature — the video pass
+        # caches playlist?list pages itself, the flat listing pass caches the
+        # playlist a watch?v+list URL hides. Try the flipped signature on a miss.
+        alt = None
+        if task.req.get("playlist") and cached is None:
+            alt = msgspec.structs.replace(opts, playlist=True)
+            cached = extract.cached_info(alt, url)
+            if cached is not None:
+                hit_opts = alt
+        page_url = task.req.get("pageUrl") or ""
+        if cached is None and page_url and page_url != url:
+            cached = extract.cached_info(opts, page_url)
+            hit_url = page_url
+            if cached is None and alt is not None:
+                cached = extract.cached_info(alt, page_url)
+                if cached is not None:
+                    hit_opts = alt
+        if cached is not None:
+            _task_probe_write(task, url, cached)
+    if cached is None:
+        info = ydl.extract_info(url, download=True, ie_key=ie)
+        _task_probe_write(task, url, info)
+        return info
+    log.info(
+        "probe cache hit — skipping re-extract",
+        gid=task.gid,
+        url=url,
+        source="disk" if from_disk else "probe",
+    )
     try:
         return ydl.process_ie_result(cached, download=True)
     except Exception as e:
@@ -1025,8 +1084,13 @@ def _download_info(ydl: YoutubeDL, task: Task, s: AppSettings, url: str) -> Any:
             url=url,
             error=clean_text(str(e)),
         )
-        extract.drop_cached_info(opts, hit_url)
-        return ydl.extract_info(url, download=True, ie_key=ie)
+        with contextlib.suppress(OSError):
+            _task_probe_path(task, url).unlink(missing_ok=True)
+        if not from_disk:
+            extract.drop_cached_info(hit_opts, hit_url)
+        info = ydl.extract_info(url, download=True, ie_key=ie)
+        _task_probe_write(task, url, info)
+        return info
 
 
 def _reset_live_items(task: Task) -> None:

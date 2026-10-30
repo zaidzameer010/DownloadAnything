@@ -30,6 +30,14 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "fileAssociations": [
+      {
+        "ext": ["torrent"],
+        "name": "BitTorrent Seed File",
+        "mimeType": "application/x-bittorrent",
+        "role": "Viewer"
+      }
+    ],
     "externalBin": [
       "binaries/aria2-next"
     ],

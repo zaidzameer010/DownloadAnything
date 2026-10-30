@@ -1,13 +1,11 @@
 import { Chip } from '@heroui/react'
 
-/** Format-row chip — the soft small chip every metadata flag reuses. */
+/** Quiet categorical metadata — format flags, durations, extractor names. */
 export function Tag({
-  color,
   className,
   title,
   children,
 }: {
-  color?: React.ComponentProps<typeof Chip>['color']
   className?: string
   title?: string
   children: React.ReactNode
@@ -16,8 +14,7 @@ export function Tag({
     <Chip
       size="sm"
       variant="soft"
-      color={color}
-      className={`${color ? '' : 'chip--quiet'} h-5 ${className ?? ''}`}
+      className={`chip--quiet h-4.5 shrink-0 gap-1 px-1.5 ${className ?? ''}`}
       title={title}
     >
       {children}

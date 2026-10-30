@@ -384,6 +384,10 @@ export const onEngine = (cb: (e: EngineStatus) => void) => {
 /** Best-effort window raise when a push arrives while unfocused. */
 export async function focusWindow() {
   try {
+    if (inTauri()) {
+      await tauriInvoke<void>('focus_window')
+      return
+    }
     const w = window.__TAURI__?.window?.getCurrentWindow()
     await w?.unminimize()
     await w?.setFocus()
@@ -410,6 +414,24 @@ export function onUpdateReady(cb: (u: UpdateReady) => void): Promise<() => void>
 /** Restarts the app to apply an installed update. */
 export function restartApp() {
   return tauriInvoke<void>('restart_app')
+}
+
+/** OS-opened .torrent files (double-click / drop on the app icon) while the
+ *  app was already running — Rust emits the paths after raising the window. */
+export function onTorrentFiles(cb: (paths: string[]) => void): Promise<() => void> {
+  const listen = window.__TAURI__?.event?.listen
+  if (!listen) return Promise.resolve(() => {})
+  return listen<string[]>('downloadanything-torrent-files', (e) => cb(e.payload))
+}
+
+/** .torrent paths queued before the webview could listen (cold start). */
+export function takePendingTorrents() {
+  return tauriInvoke<string[]>('take_pending_torrents')
+}
+
+/** Reads an OS-opened .torrent path for the inspect card. */
+export function readTorrentFile(path: string) {
+  return tauriInvoke<number[]>('read_torrent_file', { path })
 }
 
 export interface BrowserInfo {

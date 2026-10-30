@@ -5,6 +5,8 @@ extractor and the browser extension only discover candidate URLs — what
 survives and in which order is decided here, for both stages:
 
     order_candidates()  candidate URLs → the order yt-dlp probes them in
+    split_manifests()   candidates → (masters, variants): variants probe
+                        only when no master produced media
     rank_formats()      wire formats   → the final rows the UI shows
 
 Roles, best first:
@@ -507,6 +509,24 @@ def order_candidates(
         )
     )
     return out[:limit]
+
+
+def split_manifests(
+    links: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(masters, variants) in input order. A master's probe resolves its own
+    variant ladder, so variants are only probed when no master produced
+    media — a dead master keeps its variant fallback."""
+    masters: list[dict[str, Any]] = []
+    variants: list[dict[str, Any]] = []
+    for link in links:
+        target = (
+            masters
+            if role(str(link.get("url") or ""), link.get("kind")) == "master"
+            else variants
+        )
+        target.append(link)
+    return masters, variants
 
 
 def _bare_variant(link: dict[str, Any]) -> bool:

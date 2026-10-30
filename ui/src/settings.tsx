@@ -41,7 +41,7 @@ import {
   Magnet,
   Plus,
   Puzzle,
-  Xmark,
+  TrashBin,
 } from '@gravity-ui/icons'
 import { IconBtn } from './icon-btn'
 
@@ -153,34 +153,29 @@ const DEFAULT_SETTINGS: AppSettings = {
   retries: 3,
 }
 
-/** One settings group: title/description rail on the left, elevated surface card on the right. */
+/** One settings group: title/description rail on the left, controls on the right. */
 function Section({
   title,
   description,
-  action,
   children,
 }: {
   title: string
   description?: string
-  action?: React.ReactNode
   children: React.ReactNode
 }) {
   return (
-    <section className="grid grid-cols-[220px_minmax(0,1fr)] items-start gap-8 border-b border-separator pb-8 last:border-0 last:pb-0 xl:grid-cols-[260px_minmax(0,1fr)] xl:gap-10">
-      <div className="flex flex-col gap-1.5 pt-1">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-[14px] font-semibold tracking-[-0.015em] text-foreground">
-            {title}
-          </h2>
-          {action}
-        </div>
+    <section className="settings-section">
+      <div className="flex flex-col gap-1.5">
+        <h2 className="text-body font-semibold leading-[1.35] tracking-[-0.01em] text-foreground">
+          {title}
+        </h2>
         {description && (
-          <p className="text-pretty text-xs leading-relaxed text-muted">
+          <p className="max-w-[34ch] text-pretty text-meta leading-relaxed text-muted">
             {description}
           </p>
         )}
       </div>
-      <div className="flex min-w-0 flex-col gap-5 py-0.5">
+      <div className="flex min-w-0 flex-col gap-5">
         {children}
       </div>
     </section>
@@ -271,7 +266,7 @@ function Field({
         max={max}
         step={step}
         placeholder={placeholder}
-        className={`w-full ${mono ? 'font-mono text-xs' : ''}`}
+        className={`w-full ${mono ? 'font-mono text-meta' : ''}`}
       />
       {hint && <Description>{hint}</Description>}
     </TextField>
@@ -294,14 +289,14 @@ function ToggleRow({
     <Switch
       isSelected={selected}
       onChange={onChange}
-      className="flex-row-reverse items-center justify-between gap-6 py-3"
+      className="flex-row-reverse items-start justify-between gap-6 py-3"
     >
-      <Switch.Control className="shrink-0">
+      <Switch.Control className="mt-0.5 shrink-0">
         <Switch.Thumb />
       </Switch.Control>
       <Switch.Content className="min-w-0 flex-1 flex-col items-start gap-0.5">
-        <Label className="text-[13px] font-medium text-foreground">{label}</Label>
-        <Description className="text-pretty text-xs leading-relaxed text-muted">
+        <Label className="text-body font-medium text-foreground">{label}</Label>
+        <Description className="text-pretty text-meta leading-relaxed text-muted">
           {hint}
         </Description>
       </Switch.Content>
@@ -309,16 +304,16 @@ function ToggleRow({
   )
 }
 
-/** Bordered recessed list of switch rows, separated by hairlines. */
+/** Recessed list of switch rows, separated by hairlines. */
 function ToggleList({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex flex-col divide-y divide-separator rounded-lg bg-surface px-4">
+    <div className="flex flex-col rounded-xl bg-surface px-4">
       {children}
     </div>
   )
 }
 
-/** Read-only status badge with semantic dot and text. */
+/** Read-only status: the same LED language as a task row. */
 function StatusLine({
   tone = 'success',
   children,
@@ -327,25 +322,17 @@ function StatusLine({
   children: React.ReactNode
 }) {
   return (
-    <span
-      className={`inline-flex min-w-0 items-center gap-1.5 rounded-md px-2 py-0.5 font-mono text-[11px] font-medium ${
-        tone === 'success'
-          ? 'bg-success-soft text-success-soft-foreground'
-          : tone === 'warning'
-            ? 'bg-warning-soft text-warning-soft-foreground'
-            : 'bg-danger-soft text-danger-soft-foreground'
-      }`}
-    >
+    <span className="status-mark" data-tone={tone === 'danger' ? 'error' : 'neutral'}>
       <span
-        className={`size-1.5 shrink-0 rounded-full ${
+        className={`status-mark__dot ${
           tone === 'success'
-            ? 'bg-success'
+            ? 'text-success'
             : tone === 'warning'
-              ? 'bg-warning'
-              : 'bg-danger'
+              ? 'text-warning'
+              : 'text-danger'
         }`}
       />
-      <span className="truncate">{children}</span>
+      <span className="status-mark__label">{children}</span>
     </span>
   )
 }
@@ -367,11 +354,7 @@ function ConfirmDialog({
 }) {
   return (
     <AlertDialog>
-      <Button
-        variant="secondary"
-        size="sm"
-        className="press-tactile h-8.5 px-3 text-xs font-medium"
-      >
+      <Button variant="secondary" size="sm">
         {trigger}
       </Button>
       <AlertDialog.Backdrop>
@@ -457,23 +440,22 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
 
   return (
     <div className="page-enter flex h-full flex-col overflow-hidden bg-background">
-      <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-(--background-secondary) px-5">
+      <header className="chrome flex h-13 shrink-0 items-center gap-4 px-6">
         <Button
-          variant="secondary"
+          variant="ghost"
           size="sm"
-          className="press-tactile h-8.5 gap-1.5 px-3 text-xs font-medium"
+          className="-ms-2 gap-1.5 text-muted"
           onPress={onBack}
         >
           <ArrowLeft width={13} height={13} />
-          <span>Back</span>
+          <span>Downloads</span>
         </Button>
-        <span aria-hidden="true" className="h-4 w-px bg-separator" />
-        <h1 className="text-[15px] font-semibold tracking-[-0.02em] text-foreground">
+        <h1 className="text-title font-semibold tracking-[-0.014em] text-foreground">
           Settings
         </h1>
         {status && (
           <StatusLine tone={status.running ? 'success' : 'danger'}>
-            {status.running ? `${status.version ?? 'yt-dlp'}` : 'offline'}
+            {status.running ? 'Engine ready' : 'Engine offline'}
           </StatusLine>
         )}
 
@@ -493,11 +475,11 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
           <Button
             size="sm"
             variant="primary"
-            className="press-tactile h-8.5 gap-1.5 px-3.5 text-xs font-medium"
+            className="gap-1.5"
             onPress={save}
             isDisabled={!engine || saving}
           >
-            {savedTick && <Check width={14} height={14} />}
+            {savedTick && <Check width={13} height={13} />}
             <span>
               {savedTick ? 'Saved' : saving ? 'Saving…' : 'Save changes'}
             </span>
@@ -509,45 +491,59 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
         orientation="vertical"
         selectedKey={tab}
         onSelectionChange={(k) => setTab(String(k) as SettingsTab)}
-        className="flex min-h-0 flex-1 gap-0"
+        className="flex min-h-0 flex-1 flex-col gap-0 lg:flex-row"
       >
-        <aside className="flex w-60 shrink-0 flex-col border-e border-border bg-(--background-secondary) p-3.5">
-          <span className="mb-2 px-2.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-(--muted-subtle)">
-            Configuration
-          </span>
+        <div className="chrome flex shrink-0 items-center gap-1 overflow-x-auto px-3 py-2 lg:hidden">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              aria-pressed={tab === t.id}
+              onClick={() => setTab(t.id)}
+              className={`press-tactile flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-meta font-medium outline-none transition-colors focus-visible:ring-1 focus-visible:ring-focus ${
+                tab === t.id
+                  ? 'bg-(--state-selected-bg) text-foreground shadow-[inset_0_0_0_1px_oklch(1_0_0/0.08)]'
+                  : 'text-muted hover:bg-(--state-hover-bg) hover:text-foreground'
+              }`}
+            >
+              {t.icon}
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <aside className="hidden w-58 shrink-0 flex-col bg-background-secondary p-3 lg:flex">
           <Tabs.ListContainer className="rounded-none bg-transparent">
-            <Tabs.List aria-label="Settings sections" className="w-full gap-1 p-0">
+            <Tabs.List aria-label="Settings sections" className="w-full gap-0.5 p-0">
               {TABS.map((t) => (
                 <Tabs.Tab
                   key={t.id}
                   id={t.id}
                   aria-label={t.label}
-                  className="press-tactile h-10 w-full min-w-0 justify-start gap-2.5 rounded-lg px-3 text-left text-[13px] font-medium text-muted transition-colors data-selected:text-foreground"
+                  className="press-tactile h-8.5 w-full min-w-0 justify-start gap-2.5 rounded-lg px-2.5 text-left text-body font-medium text-muted transition-colors data-selected:text-foreground"
                 >
                   <span className="shrink-0">{t.icon}</span>
                   <span className="truncate">{t.label}</span>
-                  <Tabs.Indicator className="rounded-lg bg-surface-secondary" />
+                  <Tabs.Indicator className="rounded-lg" />
                 </Tabs.Tab>
               ))}
             </Tabs.List>
           </Tabs.ListContainer>
 
-          <div className="mt-auto flex flex-col gap-2 border-t border-separator px-2.5 pt-4 pb-1">
+          <div className="mt-auto flex flex-col gap-1 px-2 pt-4 pb-1">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted">
-                Runtime
-              </span>
+              <span className="overline">Runtime</span>
               <span
                 className={`size-1.5 shrink-0 rounded-full ${
                   status?.running ? 'bg-success' : 'bg-danger'
                 }`}
               />
             </div>
-            <span className="truncate font-mono text-[11px] text-(--foreground-secondary)">
+            <span className="truncate font-mono text-micro text-foreground-secondary">
               {status?.version?.split(' · ')[0] ?? 'Engine offline'}
             </span>
             {status?.version?.includes(' · ') && (
-              <span className="truncate font-mono text-[10px] text-muted">
+              <span className="truncate font-mono text-micro text-muted-subtle">
                 {status.version.split(' · ')[1]}
               </span>
             )}
@@ -555,7 +551,7 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
         </aside>
 
         <ScrollShadow className="min-h-0 flex-1 overflow-y-auto">
-          <div className="mx-auto w-full max-w-6xl px-8 py-8 xl:px-12">
+          <div className="settings-content mx-auto w-full max-w-248 px-6 py-8 lg:px-10 lg:py-9">
             <Tabs.Panel id="extraction" className="ms-0 p-0 outline-none">
               <ExtractionPane engine={engine} setF={setF} ytdlpInfo={ytdlpInfo} />
             </Tabs.Panel>
@@ -602,7 +598,7 @@ function ExtractionPane({
   ytdlpInfo: YtDlpInfo | null
 }) {
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-12">
       <Section
         title="Extractor pipeline"
         description="Which engine handles a link, and how it falls back."
@@ -651,37 +647,37 @@ function ExtractionPane({
         </ToggleList>
 
         {ytdlpInfo && (
-          <div className="flex flex-col gap-2.5 rounded-lg bg-surface p-3.5">
-            <div className="flex items-center justify-between gap-3 border-b border-separator pb-2">
-              <span className="text-xs font-medium text-foreground">
+          <div className="flex flex-col gap-2.5 rounded-xl bg-surface p-4">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-meta font-medium text-foreground-secondary">
                 Detected binaries
               </span>
               <StatusLine tone={ytdlpInfo.available ? 'success' : 'danger'}>
                 {ytdlpInfo.available ? 'Ready' : 'Unavailable'}
               </StatusLine>
             </div>
-            <dl className="grid grid-cols-[84px_minmax(0,1fr)] gap-x-3 gap-y-1.5 font-mono text-[11px]">
+            <dl className="grid grid-cols-[84px_minmax(0,1fr)] gap-x-3 gap-y-1.5 font-mono text-micro">
               {ytdlpInfo.ytdlp_path && (
                 <>
-                  <dt className="text-muted">yt-dlp</dt>
-                  <dd className="truncate text-(--foreground-secondary)" title={ytdlpInfo.ytdlp_path}>
+                  <dt className="text-muted-subtle">yt-dlp</dt>
+                  <dd className="truncate text-foreground-secondary" title={ytdlpInfo.ytdlp_path}>
                     {ytdlpInfo.ytdlp_path}
                   </dd>
                 </>
               )}
               {ytdlpInfo.ffmpeg_path && (
                 <>
-                  <dt className="text-muted">ffmpeg</dt>
-                  <dd className="truncate text-(--foreground-secondary)" title={ytdlpInfo.ffmpeg_path}>
+                  <dt className="text-muted-subtle">ffmpeg</dt>
+                  <dd className="truncate text-foreground-secondary" title={ytdlpInfo.ffmpeg_path}>
                     {ytdlpInfo.ffmpeg_path}
                   </dd>
                 </>
               )}
               {ytdlpInfo.aria2_next_path && (
                 <>
-                  <dt className="text-muted">aria2-next</dt>
+                  <dt className="text-muted-subtle">aria2-next</dt>
                   <dd
-                    className="truncate text-(--foreground-secondary)"
+                    className="truncate text-foreground-secondary"
                     title={ytdlpInfo.aria2_next_path}
                   >
                     {ytdlpInfo.aria2_next_version
@@ -782,7 +778,7 @@ function EnginePane({
 }) {
   if (!engine) {
     return (
-      <p className="py-6 text-center text-sm text-muted">
+      <p className="py-6 text-center text-body text-muted">
         Settings unavailable. Reconnect to the engine and try again.
       </p>
     )
@@ -797,20 +793,20 @@ function EnginePane({
     }
   }
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-12">
       <Section
         title="Engine & server"
         description="The local API the browser extension talks to."
       >
-        <div className="flex items-center justify-between gap-3 rounded-lg bg-surface px-3.5 py-2.5">
-          <span className="text-xs font-medium text-(--foreground-secondary)">Backend status</span>
+        <div className="flex items-center justify-between gap-3 rounded-xl bg-surface px-4 py-2.5">
+          <span className="text-meta font-medium text-foreground-secondary">Backend status</span>
           {status && (
             <StatusLine tone={status.running ? 'success' : 'danger'}>
               {status.running ? `${status.version ?? 'yt-dlp'}` : 'offline'}
             </StatusLine>
           )}
         </div>
-        {status?.error && <p className="text-xs text-danger">{status.error}</p>}
+        {status?.error && <p className="text-meta text-(--state-error-fg)">{status.error}</p>}
 
         <Field
           label="Extension API port"
@@ -825,7 +821,7 @@ function EnginePane({
         <div className="flex flex-col gap-1.5">
           <Label>Extension token</Label>
           <div className="flex items-center gap-2">
-            <code className="flex h-9 min-w-0 flex-1 items-center truncate rounded-lg bg-surface px-3 font-mono text-xs text-(--foreground-secondary)">
+            <code className="flex h-8.5 min-w-0 flex-1 items-center truncate rounded-lg bg-surface px-3 font-mono text-meta text-foreground-secondary">
               {engine.apiToken}
             </code>
             <IconBtn
@@ -857,8 +853,8 @@ function EnginePane({
         title="aria2-next daemon"
         description="The persistent RPC downloader. Ports and state checkpoints."
       >
-        <div className="flex items-center justify-between gap-3 rounded-lg bg-surface px-3.5 py-2.5">
-          <span className="text-xs font-medium text-(--foreground-secondary)">Daemon status</span>
+        <div className="flex items-center justify-between gap-3 rounded-xl bg-surface px-4 py-2.5">
+          <span className="text-meta font-medium text-foreground-secondary">Daemon status</span>
           {ytdlpInfo && (
             <StatusLine
               tone={ytdlpInfo.aria2_next_available ? 'success' : 'danger'}
@@ -940,14 +936,14 @@ function DownloadsPane({
 }) {
   if (!engine) {
     return (
-      <p className="py-6 text-center text-sm text-muted">
+      <p className="py-6 text-center text-body text-muted">
         Settings unavailable. Reconnect to the engine and try again.
       </p>
     )
   }
   const isAria2 = (engine.downloaderEngine ?? 'aria2_next') === 'aria2_next'
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-12">
       <Section
         title="Downloader engine"
         description="What yt-dlp hands finished streams to."
@@ -1098,21 +1094,21 @@ function TorrentsPane({
 }) {
   if (!engine) {
     return (
-      <p className="py-6 text-center text-sm text-muted">
+      <p className="py-6 text-center text-body text-muted">
         Settings unavailable. Reconnect to the engine and try again.
       </p>
     )
   }
   if ((engine.downloaderEngine ?? 'aria2_next') !== 'aria2_next') {
     return (
-      <p className="py-6 text-center text-sm text-muted">
+      <p className="py-6 text-center text-body text-muted">
         Torrent settings apply to the aria2-next downloader. Switch the
         downloader engine under Downloads to configure them.
       </p>
     )
   }
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-12">
       <Section
         title="Seeding"
         description="How long finished torrents keep uploading."
@@ -1210,13 +1206,13 @@ function MediaPane({
 }) {
   if (!engine) {
     return (
-      <p className="py-6 text-center text-sm text-muted">
+      <p className="py-6 text-center text-body text-muted">
         Settings unavailable. Reconnect to the engine and try again.
       </p>
     )
   }
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-12">
       <Section
         title="Media container"
         description="Container and metadata written into finished files."
@@ -1270,13 +1266,13 @@ function OutputPane({
 }) {
   if (!engine) {
     return (
-      <p className="py-6 text-center text-sm text-muted">
+      <p className="py-6 text-center text-body text-muted">
         Settings unavailable. Reconnect to the engine and try again.
       </p>
     )
   }
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-12">
       <CategoriesSection engine={engine} setF={setF} />
     </div>
   )
@@ -1356,14 +1352,14 @@ function ExtensionPane() {
   }
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-12">
       <Section
         title="Browser extension"
         description="Send pages and media from your browser to DownloadAnything."
       >
-        <div className="flex flex-col gap-3 rounded-lg bg-surface px-3.5 py-3">
+        <div className="flex flex-col gap-3 rounded-xl bg-surface p-4">
           <div className="flex items-center justify-between gap-3">
-            <span className="text-xs font-medium text-(--foreground-secondary)">
+            <span className="text-meta font-medium text-foreground-secondary">
               Bundled extension
             </span>
             {setup ? (
@@ -1376,7 +1372,7 @@ function ExtensionPane() {
           </div>
           {setup && (
             <div className="flex items-center gap-2">
-              <code className="flex h-9 min-w-0 flex-1 items-center truncate rounded-lg bg-surface-secondary px-3 font-mono text-xs text-(--foreground-secondary)">
+              <code className="flex h-8.5 min-w-0 flex-1 items-center truncate rounded-lg bg-surface-secondary px-3 font-mono text-micro text-foreground-secondary">
                 {setup.path}
               </code>
               <IconBtn
@@ -1403,22 +1399,22 @@ function ExtensionPane() {
               </IconBtn>
             </div>
           )}
-          {error && <p className="text-xs text-danger">{error}</p>}
+          {error && <p className="text-meta leading-relaxed text-muted">{error}</p>}
         </div>
 
         <div className="flex flex-col gap-1.5">
           <Label>Installed browsers</Label>
           {setup?.browsers.length ? (
-            <div className="flex flex-col divide-y divide-separator rounded-lg bg-surface px-4">
+            <div className="flex flex-col rounded-xl bg-surface px-4">
               {setup.browsers.map((browser) => (
                 <div key={browser.id} className="flex items-center justify-between gap-3 py-3">
                   <div className="flex min-w-0 items-center gap-2.5">
-                    <Globe width={15} height={15} className="shrink-0 text-muted" />
-                    <span className="truncate text-xs font-medium text-foreground">
+                    <Globe width={14} height={14} className="shrink-0 text-muted-subtle" />
+                    <span className="truncate text-meta font-medium text-foreground">
                       {browser.name}
                     </span>
                     {browser.running && (
-                      <span className="rounded-md bg-warning-soft px-1.5 py-0.5 font-mono text-[10px] text-warning-soft-foreground">
+                      <span className="rounded-sm bg-warning-soft px-1.5 py-0.5 font-mono text-micro text-warning-soft-foreground">
                         Running
                       </span>
                     )}
@@ -1426,7 +1422,6 @@ function ExtensionPane() {
                   <Button
                     size="sm"
                     variant="secondary"
-                    className="press-tactile h-8.5 px-3 text-xs font-medium"
                     isDisabled={!!installing}
                     onPress={() => install(browser)}
                   >
@@ -1436,18 +1431,22 @@ function ExtensionPane() {
               ))}
             </div>
           ) : (
-            <p className="text-xs text-muted">
-              {setup ? 'No Chromium-based browsers found.' : 'Looking for browsers…'}
+            <p className="text-meta text-muted">
+              {setup
+                ? 'No Chromium-based browsers found.'
+                : error
+                  ? 'Browser install is only available in the desktop app.'
+                  : 'Looking for browsers…'}
             </p>
           )}
         </div>
 
         {pendingRestart && (
-          <div className="rounded-lg border border-separator bg-surface px-4 py-3.5">
-            <p className="text-xs font-semibold text-foreground">
+          <div className="rounded-xl bg-surface px-4 py-3.5">
+            <p className="text-meta font-semibold text-foreground">
               {pendingRestart.name} is running
             </p>
-            <p className="mt-1 text-[11px] leading-relaxed text-muted">
+            <p className="mt-1 max-w-[60ch] text-pretty text-micro leading-relaxed text-muted">
               Restart it to load the extension. Open tabs are usually restored, but unsaved
               work may be lost.
             </p>
@@ -1455,7 +1454,6 @@ function ExtensionPane() {
               <Button
                 size="sm"
                 variant="primary"
-                className="press-tactile h-8.5 px-3 text-xs font-medium"
                 isDisabled={restarting}
                 onPress={restart}
               >
@@ -1464,7 +1462,6 @@ function ExtensionPane() {
               <Button
                 size="sm"
                 variant="secondary"
-                className="press-tactile h-8.5 px-3 text-xs font-medium"
                 isDisabled={restarting}
                 onPress={() => setPendingRestart(null)}
               >
@@ -1475,18 +1472,18 @@ function ExtensionPane() {
         )}
 
         {installed && (
-          <div className="rounded-lg border border-separator bg-surface px-4 py-3.5">
-            <p className="text-xs font-semibold text-foreground">
+          <div className="rounded-xl bg-surface px-4 py-3.5">
+            <p className="text-meta font-semibold text-foreground">
               {installed.sessionLoad
                 ? `Opened in ${installed.browser.name}`
                 : `Finish in ${installed.browser.name}`}
             </p>
-            <ol className="mt-2 list-decimal space-y-1 ps-4 text-xs leading-relaxed text-muted">
+            <ol className="mt-2 list-decimal space-y-1 ps-4 text-meta leading-relaxed text-muted">
               <li>Turn on Developer mode.</li>
               <li>Click Load unpacked.</li>
               <li>Select the extension folder shown above (its path is on your clipboard).</li>
             </ol>
-            <p className="mt-2 text-[11px] leading-relaxed text-muted">
+            <p className="mt-2 max-w-[64ch] text-pretty text-micro leading-relaxed text-muted">
               {installed.sessionLoad
                 ? `The app passed the extension to ${installed.browser.name} for this session. If the browser was already running, it ignored it — quit and try again. Complete the steps above to keep the extension after restarting.`
                 : 'Chrome blocks silent installs of unpacked extensions, so this final selection has to happen in the browser. The folder is already open in your file manager.'}
@@ -1518,45 +1515,19 @@ function CategoriesSection({
   return (
     <Section
       title="Output categories"
-      description="Named output folders offered in the download dialog. Downloads with no category use the first path."
-      action={
-        <Button
-          size="sm"
-          variant="secondary"
-          className="press-tactile h-8 shrink-0 gap-1.5 px-2.5 text-xs font-medium"
-          onPress={() => setCats([...cats, { name: '', path: '' }])}
-        >
-          <Plus width={12} height={12} />
-          Add
-        </Button>
-      }
+      description="Named output folders offered in the download dialog. Downloads with no category go to your Downloads folder."
     >
-      {cats.length === 0 ? (
-        <div className="flex flex-col items-start gap-2.5 rounded-lg border border-dashed border-separator bg-surface p-5">
-          <p className="text-xs text-muted">
-            No categories yet. Downloads land in the app's default folder.
-          </p>
-          <Button
-            size="sm"
-            variant="secondary"
-            className="press-tactile h-8 gap-1.5 px-3 text-xs font-medium"
-            onPress={() => setCats([{ name: '', path: '' }])}
-          >
-            <Plus width={12} height={12} />
-            Add category
-          </Button>
-        </div>
-      ) : (
-        <div className="flex flex-col overflow-hidden rounded-lg bg-surface">
-          <div className="grid grid-cols-[180px_minmax(0,1fr)_36px] items-center gap-3 border-b border-separator px-3.5 py-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted">
-            <span>Name</span>
-            <span>Folder path</span>
+      {cats.length > 0 && (
+        <div className="flex flex-col overflow-hidden rounded-xl bg-surface">
+          <div className="grid grid-cols-[180px_minmax(0,1fr)_28px] items-center gap-3 px-3.5 py-2">
+            <span className="overline">Name</span>
+            <span className="overline">Folder path</span>
             <span aria-hidden="true" />
           </div>
           {cats.map((c, i) => (
             <div
               key={i}
-              className="grid grid-cols-[180px_minmax(0,1fr)_36px] items-center gap-3 border-b border-separator px-3.5 py-2.5 last:border-0"
+              className="grid grid-cols-[180px_minmax(0,1fr)_28px] items-center gap-3 px-3.5 py-2 last:border-0"
             >
               <TextField
                 aria-label="Category name"
@@ -1572,19 +1543,32 @@ function CategoriesSection({
                 onChange={(v) => update(i, { path: v })}
                 className="min-w-0"
               >
-                <Input variant="secondary" className="w-full font-mono text-xs" placeholder="/path/to/folder" />
+                <Input variant="secondary" className="w-full font-mono text-meta" placeholder="/path/to/folder" />
               </TextField>
               <IconBtn
                 label="Remove category"
-                className="hover:bg-(--danger-soft) hover:text-(--state-error-fg)"
+                danger
                 onPress={() => setCats(cats.filter((_, j) => j !== i))}
               >
-                <Xmark width={14} height={14} />
+                <TrashBin width={14} height={14} />
               </IconBtn>
             </div>
           ))}
         </div>
       )}
+      {cats.length === 0 && (
+        <p className="text-meta text-muted">
+          No categories yet. Downloads land in your Downloads folder.
+        </p>
+      )}
+      <button
+        type="button"
+        onClick={() => setCats([...cats, { name: '', path: '' }])}
+        className="press-tactile flex h-9 w-full items-center gap-1.5 rounded-lg px-3 text-meta font-medium text-muted outline-none transition-colors hover:bg-(--state-hover-bg) hover:text-foreground focus-visible:ring-1 focus-visible:ring-focus"
+      >
+        <Plus width={12} height={12} />
+        Add category
+      </button>
     </Section>
   )
 }

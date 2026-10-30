@@ -194,6 +194,10 @@ async function rpc(method, params = {}) {
 
 // ---- Media Sniffing & Stream Capture ----
 const CAPTURE_MAX = 32;
+// A player that stopped requesting media an hour ago is stale — its signed
+// URLs are dead and would only add failed probes to the next push. Kept long
+// enough that a still-playing long video's manifest capture survives.
+const CAPTURE_TTL_MS = 60 * 60 * 1000;
 const HEADER_ALLOW = /^(?:cookie|referer|user-agent|accept-language|x-)/;
 const MEDIA_EXT_RE =
   /^(?:mp4|webm|mkv|mov|m4v|ts|mp3|m4a|opus|wav|flac|aac)$/;
@@ -426,9 +430,51 @@ function manifestTier(url) {
   }
 }
 
+/** Drop captures older than the TTL; returns the tab's live list. */
+function pruneCaptured(tabId, now = Date.now()) {
+  const list = captured.get(tabId) ?? [];
+  const fresh = list.filter((m) => now - (m.at || 0) <= CAPTURE_TTL_MS);
+  if (fresh.length !== list.length) {
+    captured.set(tabId, fresh);
+    queuePersist();
+    updateBadge(tabId).catch(() => {});
+  }
+  return fresh;
+}
+
+/** Origin + directory of a media URL — one player's ladder lives in one
+ *  directory, so sibling players never share a scope. */
+function urlScope(url) {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname.slice(0, u.pathname.lastIndexOf('/') + 1)}`;
+  } catch {
+    return '';
+  }
+}
+
+/** Keep only captures in the selected player's scopes — switching players
+ *  drops the previous player's URLs. No-op when no scoped URL is given. */
+function scopeCaptured(tabId, urls) {
+  const scopes = new Set(
+    urls
+      .filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u))
+      .map(urlScope)
+      .filter(Boolean)
+  );
+  if (tabId == null || !scopes.size) return;
+  const live = pruneCaptured(tabId);
+  const kept = live.filter((m) => scopes.has(urlScope(m.url)));
+  if (kept.length !== live.length) {
+    captured.set(tabId, kept);
+    queuePersist();
+    updateBadge(tabId).catch(() => {});
+  }
+}
+
 async function captureContexts(tabId) {
   await hydrate();
-  const list = captured.get(tabId) ?? [];
+  const list = pruneCaptured(tabId);
   const manifests = list
     .filter((m) => m.manifest)
     .sort((a, b) => manifestTier(b.url) - manifestTier(a.url) || b.at - a.at);
@@ -676,15 +722,17 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const pageUrl = tab?.url || info.pageUrl || '';
   const title = tabId != null ? await domTitle(tabId, tab?.title) : (tab?.title || '');
   const thumbnail = tabId != null ? await domThumbnail(tabId) : '';
-  const contexts =
-    tabId != null ? mergeSources(await captureContexts(tabId), await domSources(tabId)) : [];
 
   let targetUrl = pageUrl;
   if (info.menuItemId === 'downloadanything-download-link' && info.linkUrl) {
     targetUrl = info.linkUrl;
   } else if (info.menuItemId === 'downloadanything-download-media' && (info.srcUrl || info.linkUrl)) {
     targetUrl = info.srcUrl || info.linkUrl;
+    // Picking one media element selects its player — drop the previous one.
+    scopeCaptured(tabId, [targetUrl]);
   }
+  const contexts =
+    tabId != null ? mergeSources(await captureContexts(tabId), await domSources(tabId)) : [];
 
   try {
     await rpc('push', {
@@ -761,6 +809,9 @@ async function handlePush(
   // frame's page image.
   const resolvedThumbnail =
     thumbnail || (tabId != null ? await domThumbnail(tabId) : '') || '';
+  // A player selection scopes the tab's captures to that player: switching
+  // players keeps the current ladder and drops the previous one's URLs.
+  scopeCaptured(tabId, [mediaUrl, ...(sources || []).map((s) => s?.url)]);
   const contexts = mergeSources(tabId != null ? await captureContexts(tabId) : [], sources);
   if (
     mediaUrl &&

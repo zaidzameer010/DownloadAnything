@@ -22,6 +22,9 @@ use tauri_plugin_updater::UpdaterExt;
 
 pub struct ShellState {
     pub backend: Mutex<Option<Child>>,
+    /// .torrent paths the OS handed us before the webview was listening —
+    /// the UI drains them once on mount via `take_pending_torrents`.
+    pub pending_torrents: Mutex<Vec<String>>,
 }
 
 /// Serializes updater runs: the startup check and the menu item can overlap,
@@ -44,6 +47,58 @@ fn backend_info() -> Result<Value, String> {
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) {
     app.restart();
+}
+
+/// Extension pushes land in the webview, which can't unhide the app by itself:
+/// show() undoes a macOS Cmd-H / Windows tray hide before the window raises.
+#[tauri::command]
+fn focus_window(app: tauri::AppHandle) {
+    raise_main_window(&app);
+}
+
+fn raise_main_window(app: &tauri::AppHandle) {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let _ = app.show();
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// .torrent paths opened while the webview wasn't listening yet (cold start).
+#[tauri::command]
+fn take_pending_torrents(state: State<'_, ShellState>) -> Vec<String> {
+    std::mem::take(&mut *state.pending_torrents.lock().unwrap())
+}
+
+/// Reads an OS-opened .torrent for the inspect card. 8 MiB matches the
+/// picked-file limit — real .torrent files are KBs to a few MB.
+#[tauri::command]
+fn read_torrent_file(path: String) -> Result<Vec<u8>, String> {
+    let p = Path::new(&path);
+    if !p.extension().is_some_and(|e| e == "torrent") {
+        return Err("not a .torrent file".into());
+    }
+    let meta = std::fs::metadata(p).map_err(|e| format!("could not read {path}: {e}"))?;
+    if meta.len() > 8 * 1024 * 1024 {
+        return Err("torrent file too large".into());
+    }
+    std::fs::read(p).map_err(|e| format!("could not read {path}: {e}"))
+}
+
+fn queue_torrent_paths(app: &tauri::AppHandle, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    let state: State<'_, ShellState> = app.state();
+    state.pending_torrents.lock().unwrap().extend(paths.iter().cloned());
+    let _ = app.emit("downloadanything-torrent-files", paths);
+    raise_main_window(app);
+}
+
+fn is_torrent_path(s: &str) -> bool {
+    s.to_ascii_lowercase().ends_with(".torrent")
 }
 
 #[derive(serde::Serialize)]
@@ -733,27 +788,28 @@ fn open_full_disk_access_settings() {
 
 /// Native prompt while the app lacks Full Disk Access — browser cookies from
 /// Safari and other protected stores need it. macOS has no API to request it,
-/// so the dialog only explains and opens the pane.
+/// so the dialog only explains and opens the pane. NSAlert is used directly
+/// because Tauri's dialog plugin can't set a custom icon.
 #[cfg(target_os = "macos")]
-fn prompt_full_disk_access(app: &tauri::AppHandle) {
+fn prompt_full_disk_access() {
     if has_full_disk_access() {
         return;
     }
-    app.dialog()
-        .message(
-            "DownloadAnything needs Full Disk Access to read cookies from Safari and other protected browser stores.\n\nOpen Privacy & Security → Full Disk Access, enable DownloadAnything (click + if it isn't listed), then relaunch DownloadAnything.",
-        )
-        .title("Full Disk Access")
-        .kind(MessageDialogKind::Info)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Open Settings".into(),
-            "Later".into(),
-        ))
-        .show(|open_settings| {
-            if open_settings {
-                open_full_disk_access_settings();
-            }
-        });
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSAlert, NSWorkspace};
+    use objc2_foundation::NSString;
+    let mtm = MainThreadMarker::new().expect("prompt must run on the main thread");
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str("Full Disk Access Required"));
+    alert.setInformativeText(&NSString::from_str(
+        "DownloadAnything reads browser cookies for private or age-gated downloads.\n\nEnable DownloadAnything in Privacy & Security → Full Disk Access, then relaunch.",
+    ));
+    let icon = NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str("/"));
+    // Soundness: `icon` is a valid retained NSImage that outlives the call.
+    unsafe { alert.setIcon(Some(&icon)) };
+    alert.addButtonWithTitle(&NSString::from_str("Open Settings"));
+    alert.runModal();
+    open_full_disk_access_settings();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -769,6 +825,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(ShellState {
             backend: Mutex::new(None),
+            // Cold-start double-click on Windows/Linux delivers the file as
+            // argv[1]; macOS uses RunEvent::Opened instead.
+            pending_torrents: Mutex::new(
+                std::env::args()
+                    .skip(1)
+                    .filter(|a| is_torrent_path(a))
+                    .collect(),
+            ),
         })
         .setup(move |app| {
             let child = spawn_backend(app.handle());
@@ -781,7 +845,7 @@ pub fn run() {
                 }
             });
             #[cfg(target_os = "macos")]
-            prompt_full_disk_access(app.handle());
+            prompt_full_disk_access();
             // Dev builds aren't installable bundles — skip the download entirely.
             if !cfg!(debug_assertions) {
                 let handle = app.handle().clone();
@@ -796,6 +860,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             backend_info,
             restart_app,
+            focus_window,
+            take_pending_torrents,
+            read_torrent_file,
             extension_setup,
             install_extension,
             restart_browser_with_extension,
@@ -804,6 +871,17 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                let paths = urls
+                    .iter()
+                    .filter(|u| u.scheme() == "file")
+                    .filter_map(|u| u.to_file_path().ok())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .filter(|p| is_torrent_path(p))
+                    .collect::<Vec<_>>();
+                queue_torrent_paths(app, paths);
+            }
             if let tauri::RunEvent::Exit = event {
                 let state: State<'_, ShellState> = app.state();
                 let mut backend = state.backend.lock().unwrap();

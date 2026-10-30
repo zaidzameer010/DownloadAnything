@@ -50,6 +50,7 @@ from .filter import (
     rank_formats,
     role,
     site_asset,
+    split_manifests,
 )
 from .log import YDL_LOGGER, clean_text
 from .models import ExtractOptions
@@ -542,18 +543,54 @@ def _ie_broken(url: str) -> bool:
     return bool(host) and _broken_ie.get(host) is not None
 
 
-def _ytdlp_extract(opts: ExtractOptions, raw: str, probe: bool = False) -> dict[str, Any]:
+def _page_headers(opts: ExtractOptions, page_url: str) -> dict[str, str]:
+    """Base UA/Accept-Language the Rust page fetch used for `page_url`.
+    Signed CDN tokens bind to both, so the page's candidates must probe with
+    these exact values — a captured media-host context must not override
+    them. Rust replays a page-host context's headers when one exists."""
+    headers = {
+        "User-Agent": opts.user_agent or DEFAULT_UA,
+        "Accept-Language": DEFAULT_ACCEPT_LANG,
+    }
+    replay_ctx_headers(
+        headers,
+        ((c.url, ((h.name, h.value) for h in c.headers)) for c in opts.contexts),
+        page_url,
+        ua_from_ctx=not opts.user_agent,
+    )
+    return {k: headers[k] for k in ("User-Agent", "Accept-Language")}
+
+
+def _apply_headers(ydl: YoutubeDL, headers: dict[str, str]) -> None:
+    """Force headers onto a constructed yt-dlp instance. Setting
+    `impersonate` builds the request director during __init__, snapshotting
+    params['http_headers'] before callers can change it, so the handler
+    copies are updated too."""
+    ydl.params["http_headers"].update(headers)
+    for handler in ydl._request_director.handlers.values():
+        handler.headers.update(headers)
+
+
+def _ytdlp_extract(
+    opts: ExtractOptions,
+    raw: str,
+    probe: bool = False,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     try:
         params, cookie_seeds = _ydl_params(opts, raw)
         with YoutubeDL(params) as ydl:
+            if headers:
+                _apply_headers(ydl, headers)
             if jar := _browser_jar(opts):
                 # Copies — an extractor mutating its jar must not leak into
                 # the shared cache entry.
                 for c in jar:
                     ydl.cookiejar.set_cookie(copy.copy(c))
-            # A selected browser is the authoritative cookie source —
-            # captured Cookie headers only fill in when none was chosen.
-            if cookie_seeds and not (opts.cookies_browser and opts.cookies_browser != "off"):
+            # Captured cookies always seed, host-scoped — a selected browser
+            # store can't cover a CDN session cookie that only exists in the
+            # captured request (the download path seeds them too).
+            if cookie_seeds:
                 _seed_cookies(ydl, cookie_seeds)
             info = ydl.extract_info(raw, download=False)
             info = ydl.sanitize_info(info)
@@ -596,6 +633,12 @@ def _ytdlp_extract(opts: ExtractOptions, raw: str, probe: bool = False) -> dict[
     pairs = [(e, it) for e in sources if e and (it := _item(e, opts.referer, pick))]
     if opts.max_items:
         pairs = pairs[: opts.max_items]
+    if headers:
+        # The download replays this dict — carry the exact UA/Accept-Language
+        # the signed URLs were minted for.
+        info["http_headers"] = {**(info.get("http_headers") or {}), **headers}
+        for e, _ in pairs:
+            e["http_headers"] = {**(e.get("http_headers") or {}), **headers}
     items = [it for _, it in pairs]
     # Probe rows show what the download gets: HEAD fills size, a bounded
     # range read sniffs codec tags from the moov box.
@@ -962,6 +1005,7 @@ def _probe_rust_item(
     ctx_title: str | None,
     page_thumbnail: str | None = None,
     page_duration: float | None = None,
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """Probe one Rust item's candidate URLs through yt-dlp and shape its rows."""
     cands = order_candidates(raw_item.get("formats") or [])
@@ -981,7 +1025,7 @@ def _probe_rust_item(
             if referer and referer != sub_opts.referer
             else sub_opts
         )
-        return _ytdlp_extract(probe_opts, str(cand["url"]), probe=True)
+        return _ytdlp_extract(probe_opts, str(cand["url"]), probe=True, headers=headers)
 
     def fold(cand: dict[str, Any], probed: dict[str, Any]) -> int:
         """Merge a probe result into the format list; return the row
@@ -1043,20 +1087,28 @@ def _probe_rust_item(
             merged_formats.append(cand)
         return got
 
-    # Manifest candidates probe in parallel — per-quality masters each
-    # resolve to a single rendition, so serial probing costs one
-    # round-trip per row. A manifest resolving a multi-format ladder
-    # already carried every variant: the remaining direct-file
-    # fallbacks then stay unprobed.
+    # Masters first, in the filter's order: one master probe resolves its
+    # whole variant ladder, so bare variants are only probed when no master
+    # produced media (a dead master keeps its variant fallback). Per-quality
+    # masters each resolve one rendition, so masters probe in parallel.
     manifest = [c for c in cands if c.get("kind") in ("hls", "dash")]
     rest = [c for c in cands if c.get("kind") not in ("hls", "dash")]
+    masters, variants = split_manifests(manifest)
     ladder = False
-    workers = min(len(cands), _PROBE_WORKERS)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for cand, probed in zip(manifest, pool.map(probe, manifest), strict=True):
-            if fold(cand, probed) > 1:
-                ladder = True
-        if not ladder:
+    resolved = False
+    if masters:
+        with ThreadPoolExecutor(max_workers=min(len(masters), _PROBE_WORKERS)) as pool:
+            for cand, probed in zip(masters, pool.map(probe, masters), strict=True):
+                got = fold(cand, probed)
+                resolved = resolved or got > 0
+                ladder = ladder or got > 1
+    if variants and not resolved:
+        with ThreadPoolExecutor(max_workers=min(len(variants), _PROBE_WORKERS)) as pool:
+            for cand, probed in zip(variants, pool.map(probe, variants), strict=True):
+                if fold(cand, probed) > 1:
+                    ladder = True
+    if rest and not ladder:
+        with ThreadPoolExecutor(max_workers=min(len(rest), _PROBE_WORKERS)) as pool:
             for cand, probed in zip(rest, pool.map(probe, rest), strict=True):
                 fold(cand, probed)
     shaped = rank_formats(merged_formats, raw_item.get("duration_secs"))
@@ -1089,13 +1141,16 @@ def _probe_rust_items(
     raw_items: list[dict[str, Any]],
     page_ref: str,
     page_meta: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Send candidate media URLs extracted by the Rust page scraper into Python
     yt-dlp so manifests (HLS/DASH) and streams are expanded, while preserving
     the page metadata (title, thumbnail, duration, referer) scraped by Rust.
     Candidates are ordered and the result ranked by downloadanything.filter —
     the single filtering system. Items probe in parallel (bounded) so a
-    multi-video page doesn't serialize one round-trip per item."""
+    multi-video page doesn't serialize one round-trip per item. `headers`
+    pins the page fetch's UA/Accept-Language for Rust-sourced candidates;
+    extension-sourced ones keep the captured media-host values."""
     sub_opts = msgspec.structs.replace(opts, referer=page_ref)
     ctx_title = _page_title(page_meta, opts, page_ref)
     page_thumbnail = opts.thumbnail or (page_meta or {}).get("thumbnail")
@@ -1108,7 +1163,7 @@ def _probe_rust_items(
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = pool.map(
             lambda ri: _probe_rust_item(
-                sub_opts, ri, page_ref, ctx_title, page_thumbnail, page_duration
+                sub_opts, ri, page_ref, ctx_title, page_thumbnail, page_duration, headers
             ),
             raw_items,
         )
@@ -1148,7 +1203,9 @@ def _rust_extract(opts: ExtractOptions, raw: str) -> dict[str, Any] | None:
     raw_items = page.get("items") or []
     if raw_items:
         page_ref = str(page.get("final_url") or opts.referer or raw)
-        page["items"] = _probe_rust_items(opts, raw_items, page_ref, page)
+        page["items"] = _probe_rust_items(
+            opts, raw_items, page_ref, page, _page_headers(opts, page_ref)
+        )
         if not page["items"]:
             page["error"] = "no media found on page"
             page["error_code"] = CODE_NO_MEDIA
@@ -1414,34 +1471,51 @@ _info_cache: TTLCache[tuple[Any, ...], dict[str, Any]] = TTLCache(_INFO_CACHE_MA
 
 
 def _ctx_key(opts: ExtractOptions) -> tuple[Any, ...]:
-    """Contexts fingerprint — session cookies change what a page yields."""
+    """Contexts fingerprint — host-scoped headers, not the captured URL's
+    path/query: signed media tokens churn on every request and would defeat
+    download reuse."""
     return tuple(
-        (c.url, c.title, tuple((h.name, h.value) for h in c.headers)) for c in opts.contexts
+        (
+            (urlsplit(c.url).hostname or "").lower(),
+            tuple(sorted((h.name.lower(), h.value) for h in c.headers)),
+        )
+        for c in opts.contexts
+    )
+
+
+def _session_key(opts: ExtractOptions) -> tuple[Any, ...]:
+    """Result-cache session identity — captured cookies by host. URL/token
+    and presentation-header churn between pushes of the same page must not
+    defeat the cache; a login (new cookies) still invalidates it."""
+    return tuple(
+        sorted(
+            {
+                ((urlsplit(c.url).hostname or "").lower(), h.value)
+                for c in opts.contexts
+                for h in c.headers
+                if h.name.lower() == "cookie"
+            }
+        )
     )
 
 
 def _opts_key(opts: ExtractOptions) -> tuple[Any, ...]:
-    """Cache identity of an options struct — contexts included (session
-    cookies change what a page yields), so a fresh push with new captures
-    still gets a fresh probe."""
+    """Result-cache identity — only what changes the media a page yields.
+    Output-only fields (title/thumbnail), probe knobs (timeouts, retries,
+    pacing) and captured-URL churn are deliberately excluded."""
     return (
         opts.extractor_engine,
         opts.ytdlp_generic,
         opts.cookies_file,
         opts.cookies_browser,
         opts.referer,
-        opts.title,
-        opts.thumbnail,
         opts.user_agent,
         opts.proxy,
-        opts.timeout_secs,
-        opts.retries,
-        opts.rate_limit_rps,
         opts.max_items,
         opts.player_client,
         opts.check_certificate,
         opts.playlist,
-        _ctx_key(opts),
+        _session_key(opts),
     )
 
 
@@ -1496,7 +1570,7 @@ def cached_info(opts: ExtractOptions, url: str) -> dict[str, Any] | None:
     try:
         return orjson.loads(orjson.dumps(hit))
     except Exception:
-        _info_cache.pop(key, None)
+        drop_cached_info(opts, url)
         return None
 
 

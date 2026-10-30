@@ -1,6 +1,15 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Alert, Button, Checkbox, Modal, Spinner, toast } from '@heroui/react'
-import { ArrowDownToLine, Folder, Magnet, TriangleExclamation } from '@gravity-ui/icons'
+import {
+  ArrowDown,
+  ArrowDownToLine,
+  ArrowUp,
+  ChevronRight,
+  Folder,
+  FolderOpen,
+  Magnet,
+  TriangleExclamation,
+} from '@gravity-ui/icons'
 import { addDownload, inspectTorrent, setTorrentFiles } from '../tauri'
 import {
   buildFileTree,
@@ -18,6 +27,7 @@ import type {
   RequestContext,
   TorrentPreview,
 } from '../types'
+import { describeFile } from '../filter'
 import { CategorySelect, useCategories } from './categories'
 import { Tag } from './tag'
 
@@ -40,7 +50,7 @@ export const pickMany = (set: Set<number>, indices: number[], select: boolean) =
 }
 
 /** Copy `set` with one index flipped. */
-export const toggleIndex = (set: Set<number>, idx: number) => {
+const toggleIndex = (set: Set<number>, idx: number) => {
   const next = new Set(set)
   if (next.has(idx)) next.delete(idx)
   else next.add(idx)
@@ -69,6 +79,22 @@ export function TorrentFileList({
   maxH?: string
 }) {
   const tree = buildFileTree(files)
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [sort, setSort] = useState<{ key: 'name' | 'size'; dir: 1 | -1 }>({
+    key: 'name',
+    dir: 1,
+  })
+  const toggleCollapse = (path: string) =>
+    setCollapsed((c) => {
+      const next = new Set(c)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  const sortBy = (key: 'name' | 'size') =>
+    setSort((s) =>
+      s.key === key ? { key, dir: (s.dir * -1) as 1 | -1 } : { key, dir: 1 },
+    )
 
   const collect = (
     n: FileTreeNode<TorrentFileEntry>,
@@ -82,27 +108,47 @@ export function TorrentFileList({
     return out
   }
 
+  /** Explorer-style ordering: applied within each tree level — dirs sort by
+   *  aggregate size, files by their own length. */
+  const sortedDirs = (dirs: FileTreeNode<TorrentFileEntry>[]) =>
+    [...dirs].sort((a, b) =>
+      sort.key === 'size'
+        ? (collect(a).size - collect(b).size) * sort.dir
+        : a.name.localeCompare(b.name) * sort.dir,
+    )
+  const sortedFiles = (list: { file: TorrentFileEntry; name: string }[]) =>
+    [...list].sort((a, b) =>
+      sort.key === 'size'
+        ? (Number(a.file.length ?? 0) - Number(b.file.length ?? 0)) * sort.dir
+        : a.name.localeCompare(b.name) * sort.dir,
+    )
+
   const fileRow = (f: TorrentFileEntry, name: string) => {
     const idx = Number(f.index ?? 0)
+    const { Icon } = describeFile({
+      url: '',
+      ext: name.includes('.') ? name.split('.').pop() : '',
+    })
     return (
       <li key={`${f.index}:${f.path}`} className="min-w-0">
         <Checkbox
           isSelected={picked.has(idx)}
           onChange={() => onToggle(idx)}
-          className="w-full rounded-md px-2 py-1 transition-colors hover:bg-field-hover"
+          className="w-full rounded-md px-1.5 py-1 transition-colors hover:bg-(--state-hover-bg)"
         >
-          <Checkbox.Content className="flex w-full min-w-0 items-center gap-2.5">
+          <Checkbox.Content className="flex w-full min-w-0 items-center gap-2">
             <Checkbox.Control className="shrink-0">
               <Checkbox.Indicator />
             </Checkbox.Control>
+            <Icon width={12} height={12} className="shrink-0 text-muted-subtle" />
             <span
-              className="min-w-0 flex-1 truncate font-mono text-xs text-foreground"
+              className="min-w-0 flex-1 truncate font-mono text-meta text-foreground-secondary"
               title={f.path}
             >
               {name}
             </span>
             {f.length && (
-              <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted">
+              <span className="shrink-0 font-mono text-micro tabular-nums text-muted">
                 {fmtBytes(Number(f.length))}
               </span>
             )}
@@ -115,14 +161,15 @@ export function TorrentFileList({
   const dirNode = (node: FileTreeNode<TorrentFileEntry>): ReactNode => {
     const { idxs, size } = collect(node)
     const sel = idxs.filter((i) => picked.has(i)).length
+    const open = !collapsed.has(node.path)
     return (
-      <div key={node.name} className="flex min-w-0 flex-col gap-0.5">
-        <div className="flex items-center gap-1.5 px-2 pt-1.5">
+      <div key={node.path} className="flex min-w-0 flex-col">
+        <div className="flex items-center rounded-md px-1 transition-colors hover:bg-(--state-hover-bg)">
           {onToggleDir && (
             <Checkbox
               isSelected={idxs.length > 0 && sel === idxs.length}
               onChange={() => onToggleDir(idxs, sel !== idxs.length)}
-              className="shrink-0 rounded transition-colors"
+              className="shrink-0 ps-1"
             >
               <Checkbox.Content className="flex items-center">
                 <Checkbox.Control className="shrink-0">
@@ -131,59 +178,103 @@ export function TorrentFileList({
               </Checkbox.Content>
             </Checkbox>
           )}
-          <Folder width={12} height={12} className="shrink-0 text-muted" />
-          <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-(--foreground-secondary)">
-            {node.name}
-          </span>
-          {size > 0 && (
-            <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted">
-              {fmtBytes(size)}
+          <button
+            type="button"
+            onClick={() => toggleCollapse(node.path)}
+            aria-expanded={open}
+            aria-label={`${open ? 'Collapse' : 'Expand'} ${node.name}`}
+            className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left outline-none focus-visible:ring-1 focus-visible:ring-focus"
+          >
+            <ChevronRight
+              width={10}
+              height={10}
+              className={`shrink-0 text-muted-subtle transition-transform duration-150 ${open ? 'rotate-90' : ''}`}
+            />
+            {open ? (
+              <FolderOpen width={12} height={12} className="shrink-0 text-muted-subtle" />
+            ) : (
+              <Folder width={12} height={12} className="shrink-0 text-muted-subtle" />
+            )}
+            <span className="min-w-0 flex-1 truncate text-meta font-medium text-foreground-secondary">
+              {node.name}
             </span>
-          )}
+            {size > 0 && (
+              <span className="shrink-0 font-mono text-micro tabular-nums text-muted">
+                {fmtBytes(size)}
+              </span>
+            )}
+          </button>
         </div>
-        <div className="flex min-w-0 flex-col gap-0.5 pl-6">
-          <ul className="flex flex-col gap-0.5">
-            {node.files.map(({ file, name }) => fileRow(file, name))}
-          </ul>
-          {node.dirs.map(dirNode)}
-        </div>
+        {open && (
+          <div className="ms-3.5 flex min-w-0 flex-col border-s border-separator ps-1.5">
+            <ul className="flex flex-col">
+              {sortedFiles(node.files).map(({ file, name }) => fileRow(file, name))}
+            </ul>
+            {sortedDirs(node.dirs).map(dirNode)}
+          </div>
+        )}
       </div>
     )
   }
 
   const rootFiles = (
-    <ul className="flex flex-col gap-0.5">
-      {tree.files.map(({ file, name }) => fileRow(file, name))}
+    <ul className="flex flex-col">
+      {sortedFiles(tree.files).map(({ file, name }) => fileRow(file, name))}
     </ul>
   )
 
+  const SortHeader = ({ id, label }: { id: 'name' | 'size'; label: string }) => {
+    const active = sort.key === id
+    return (
+      <button
+        type="button"
+        onClick={() => sortBy(id)}
+        className={`flex h-6 items-center gap-0.5 rounded px-1.5 text-micro font-semibold uppercase tracking-[0.08em] outline-none transition-colors hover:text-foreground focus-visible:ring-1 focus-visible:ring-focus ${
+          active ? 'text-foreground-secondary' : 'text-muted-subtle'
+        }`}
+      >
+        {label}
+        {active &&
+          (sort.dir === 1 ? (
+            <ArrowUp width={9} height={9} />
+          ) : (
+            <ArrowDown width={9} height={9} />
+          ))}
+      </button>
+    )
+  }
+
   return (
-    <div className="flex w-full flex-col gap-2 rounded-lg bg-surface-secondary p-2.5 text-left">
+    <div className="flex w-full flex-col gap-2 rounded-lg bg-surface-secondary p-2 text-left">
       {onAll && (
-        <div className="flex items-center justify-between border-b border-separator px-1.5 pb-1.5">
-          <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted">
+        <div className="flex items-center justify-between px-1">
+          <span className="overline">
             {files.length} file{files.length === 1 ? '' : 's'}
           </span>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-0.5">
             <button
               type="button"
               onClick={() => onAll(true)}
-              className="rounded px-2 py-0.5 text-[11px] font-medium text-muted outline-none transition-colors hover:bg-surface-secondary hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus"
+              className="flex h-6 items-center rounded px-2 text-micro font-medium text-muted outline-none transition-colors hover:bg-(--state-hover-bg) hover:text-foreground focus-visible:ring-1 focus-visible:ring-focus"
             >
               All
             </button>
             <button
               type="button"
               onClick={() => onAll(false)}
-              className="rounded px-2 py-0.5 text-[11px] font-medium text-muted outline-none transition-colors hover:bg-surface-secondary hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus"
+              className="flex h-6 items-center rounded px-2 text-micro font-medium text-muted outline-none transition-colors hover:bg-(--state-hover-bg) hover:text-foreground focus-visible:ring-1 focus-visible:ring-focus"
             >
               None
             </button>
           </div>
         </div>
       )}
-      <div className={`flex ${maxH} flex-col gap-1 overflow-y-auto`}>
-        {tree.dirs.map(dirNode)}
+      <div className="flex items-center justify-between px-0.5 pb-1.5">
+        <SortHeader id="name" label="Filename" />
+        <SortHeader id="size" label="Size" />
+      </div>
+      <div className={`flex ${maxH} flex-col overflow-y-auto`}>
+        {sortedDirs(tree.dirs).map(dirNode)}
         {rootFiles}
       </div>
     </div>
@@ -279,16 +370,16 @@ export function TorrentJobCard({
   return (
     <section className="rise-in flex flex-col gap-3">
       <div className="flex items-center gap-2.5">
-        <Magnet width={16} height={16} className="shrink-0 text-muted" />
-        <span className="min-w-0 flex-1 truncate text-[13px] font-medium" title={job.input}>
+        <Magnet width={14} height={14} className="shrink-0 text-muted" />
+        <span className="min-w-0 flex-1 truncate text-body font-medium" title={job.input}>
           {name || (magnet ? 'Magnet link' : 'Torrent file')}
         </span>
-        <Tag className="chip--info shrink-0 px-2 font-medium">
+        <Tag className="shrink-0">
           {magnet ? 'magnet' : data ? '.torrent' : 'torrent'}
         </Tag>
       </div>
       {magnet ? (
-        <p className="truncate font-mono text-[11px] text-muted" title={job.input}>
+        <p className="truncate font-mono text-micro text-muted" title={job.input}>
           {hash || job.input}
         </p>
       ) : error ? (
@@ -301,13 +392,13 @@ export function TorrentJobCard({
           </Alert.Content>
         </Alert>
       ) : !preview ? (
-        <div className="flex items-center gap-2 text-xs text-muted">
+        <div className="flex items-center gap-2 text-meta text-muted">
           <Spinner size="sm" />
           Reading torrent…
         </div>
       ) : (
         <>
-          <p className="text-xs text-muted">
+          <p className="font-mono text-meta tabular-nums text-muted">
             {fmtBytes(Number(preview.totalLength ?? 0))}
             {preview.mode === 'multi' ? ' · multi-file' : ' · single file'}
           </p>
@@ -325,7 +416,7 @@ export function TorrentJobCard({
         <Button
           size="sm"
           variant="primary"
-          className="press-tactile h-8.5 gap-1.5 px-3.5 text-xs font-medium"
+          className="gap-1.5"
           isDisabled={busy || !canSubmit}
           onPress={() => void submit()}
         >
@@ -391,22 +482,22 @@ export function TorrentPickerDialog({
   return (
     <Modal.Backdrop isOpen={!!item} onOpenChange={(o) => !o && onClose()}>
       <Modal.Container>
-        <Modal.Dialog className="sm:max-w-140">
+        <Modal.Dialog className="sm:max-w-136">
           <Modal.CloseTrigger />
-          <Modal.Header className="gap-1">
+          <Modal.Header className="gap-1.5">
             <Modal.Heading>
               <span className="flex items-center gap-2">
-                <Magnet width={15} height={15} className="text-muted" />
+                <Magnet width={14} height={14} className="text-muted" />
                 Choose files
               </span>
             </Modal.Heading>
-            <p className="text-pretty text-xs leading-relaxed text-muted">
+            <p className="max-w-[48ch] text-pretty text-meta leading-relaxed text-muted">
               Only the checked files download. You can add the rest later by
               resuming this task.
             </p>
           </Modal.Header>
           <Modal.Body className="flex flex-col gap-3">
-            <p className="truncate text-[13px] font-medium text-foreground" title={item?.bittorrent?.name}>
+            <p className="truncate text-body font-medium text-foreground" title={item?.bittorrent?.name}>
               {item?.bittorrent?.name || 'Torrent'}
             </p>
             <TorrentFileList
@@ -417,7 +508,7 @@ export function TorrentPickerDialog({
               onAll={setAll}
               maxH="max-h-[45vh]"
             />
-            <div className="flex items-center justify-between font-mono text-[11px] tabular-nums text-muted">
+            <div className="flex items-center justify-between font-mono text-meta tabular-nums text-muted">
               <span>
                 {picked.size} of {files.length} selected
               </span>
@@ -429,7 +520,6 @@ export function TorrentPickerDialog({
               slot="close"
               variant="secondary"
               size="sm"
-              className="press-tactile h-8.5 px-3.5 text-xs font-medium"
               onPress={onClose}
             >
               Cancel
@@ -438,7 +528,6 @@ export function TorrentPickerDialog({
               slot="close"
               variant="primary"
               size="sm"
-              className="press-tactile h-8.5 px-4 text-xs font-medium"
               isDisabled={busy || picked.size === 0}
               onPress={() => void submit()}
             >

@@ -7,15 +7,18 @@ export function IconBtn({
   isDisabled,
   size = 'sm',
   variant = 'ghost',
+  danger = false,
   className = '',
   children,
 }: {
   label: string
   onPress?: () => void
   isDisabled?: boolean
-  /** `md` is the header/toolbar size; `sm` is the dense row size. */
+  /** `md` is the header size; `sm` is the dense row size. */
   size?: 'sm' | 'md'
   variant?: 'ghost' | 'secondary'
+  /** Destructive intent: the glyph turns danger on hover. */
+  danger?: boolean
   className?: string
   children: React.ReactNode
 }) {
@@ -24,13 +27,11 @@ export function IconBtn({
       <Button
         isIconOnly
         variant={variant}
-        size="sm"
+        size={size === 'md' ? 'md' : 'sm'}
         aria-label={label}
         isDisabled={isDisabled}
         onPress={onPress}
-        className={`press-tactile ${
-          size === 'md' ? 'size-8.5 rounded-lg' : 'size-7.5 rounded-md'
-        } shrink-0 text-muted hover:text-foreground active:bg-(--state-active-bg) ${className}`}
+        className={`${danger ? 'hover:text-(--state-error-fg) hover:bg-danger-soft' : ''} ${className}`}
       >
         {children}
       </Button>

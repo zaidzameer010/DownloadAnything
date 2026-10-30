@@ -31,20 +31,17 @@ export function CategorySelect({
     <Select
       aria-label="Output category"
       variant="secondary"
-      value={value || '__default'}
-      onChange={(k) => onChange(String(k) === '__default' ? '' : String(k))}
+      placeholder="Downloads"
+      value={value || null}
+      onChange={(k) => onChange(String(k))}
       className="w-40"
     >
-      <Select.Trigger className="h-8.5">
+      <Select.Trigger>
         <Select.Value />
         <Select.Indicator />
       </Select.Trigger>
       <Select.Popover>
         <ListBox>
-          <ListBox.Item id="__default" textValue="Default folder">
-            Default folder
-            <ListBox.ItemIndicator />
-          </ListBox.Item>
           {cats.map((c) => (
             <ListBox.Item key={c.name} id={c.name} textValue={c.name}>
               {c.name}

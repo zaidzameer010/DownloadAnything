@@ -8,7 +8,7 @@ import {
   Play,
   TriangleExclamation,
 } from '@gravity-ui/icons'
-import { TaskStatusChip, isLive } from '../downloads'
+import { TaskStatusMark, isLive } from '../downloads'
 import {
   buildFileTree,
   fmtBytes,
@@ -33,11 +33,11 @@ function InfoRow({
 }) {
   if (value == null || value === '') return null
   return (
-    <tr className="border-b border-separator last:border-0">
-      <td className="w-24 py-2 pr-3 align-baseline text-[11.5px] text-muted">{label}</td>
+    <tr>
+      <td className="w-28 py-1.5 pe-4 align-baseline text-meta text-muted">{label}</td>
       <td
-        className={`min-w-0 break-all py-2 align-baseline text-xs text-(--foreground-secondary) ${
-          mono ? 'font-mono' : ''
+        className={`min-w-0 wrap-break-word py-1.5 align-baseline text-meta text-foreground-secondary ${
+          mono ? 'font-mono tabular-nums' : ''
         }`}
       >
         {value}
@@ -49,11 +49,9 @@ function InfoRow({
 /** Grouped key/value table — the drawer's layout primitive. */
 function InfoSection({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="flex flex-col gap-1.5">
-      <h3 className="px-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted">
-        {title}
-      </h3>
-      <div className="border-t border-separator px-0.5 pt-0.5">
+    <section className="flex flex-col gap-2">
+      <h3 className="overline">{title}</h3>
+      <div>
         <table className="w-full table-fixed border-collapse">
           <tbody>{children}</tbody>
         </table>
@@ -99,73 +97,72 @@ export function TaskInfoDrawer({
   return (
     <Drawer.Backdrop isOpen={!!item} onOpenChange={(o) => !o && onClose()}>
       <Drawer.Content placement="right">
-        <Drawer.Dialog className="h-full w-full sm:max-w-125">
+        <Drawer.Dialog className="h-full w-full sm:max-w-130">
           <Drawer.CloseTrigger />
-          <Drawer.Header className="flex flex-col gap-2.5">
+          <Drawer.Header className="flex flex-col gap-2">
             <Drawer.Heading
-              className="truncate text-[15px] font-semibold tracking-[-0.015em] text-foreground"
+              className="truncate text-title font-semibold tracking-[-0.014em] text-foreground"
               title={item ? taskName(item) : ''}
             >
               {item ? taskName(item) : 'Task'}
             </Drawer.Heading>
             {item && (
-              <div className="flex flex-wrap items-center gap-2">
-                <TaskStatusChip d={item} />
+              <div className="flex flex-wrap items-center gap-3">
+                <TaskStatusMark d={item} />
                 {total > 0 && (
-                  <span className="font-mono text-[11px] tabular-nums text-muted">
+                  <span className="font-mono text-meta tabular-nums text-muted">
                     {fmtBytes(total)}
                   </span>
                 )}
               </div>
             )}
           </Drawer.Header>
-          <Drawer.Body className="flex flex-col gap-4">
+          <Drawer.Body className="flex flex-col gap-5">
             {item?.downloadanything?.thumbnail && (
               <img
                 src={item.downloadanything.thumbnail}
                 alt=""
-                className="h-32 w-full shrink-0 rounded-xl object-cover"
+                className="thumb-outline h-36 w-full shrink-0 rounded-xl object-cover"
                 onError={(e) => {
                   e.currentTarget.style.display = 'none'
                 }}
               />
             )}
 
-            <Tabs defaultSelectedKey="details" className="flex flex-col gap-3">
+            <Tabs defaultSelectedKey="details" className="flex flex-col gap-4">
               <Tabs.List
                 aria-label="Task info sections"
-                className="flex w-fit min-w-0 gap-1 rounded-lg bg-surface p-1"
+                className="flex w-fit min-w-0 gap-0.5 rounded-lg bg-(--state-hover-bg) p-1"
               >
                 <Tabs.Tab
                   id="details"
-                  className="press-tactile h-7 w-auto gap-2 rounded-md px-3 text-xs font-medium transition-colors"
+                  className="press-tactile h-7 w-auto gap-2 rounded-md px-2.5 text-meta font-medium transition-colors"
                 >
                   Details
-                  <Tabs.Indicator className="rounded-md bg-surface-secondary" />
+                  <Tabs.Indicator className="rounded-md bg-(--state-selected-bg)" />
                 </Tabs.Tab>
                 {bt && (
                   <Tabs.Tab
                     id="torrent"
-                    className="press-tactile h-7 w-auto gap-2 rounded-md px-3 text-xs font-medium transition-colors"
+                    className="press-tactile h-7 w-auto gap-2 rounded-md px-2.5 text-meta font-medium transition-colors"
                   >
                     Torrent
-                    <Tabs.Indicator className="rounded-md bg-surface-secondary" />
+                    <Tabs.Indicator className="rounded-md bg-(--state-selected-bg)" />
                   </Tabs.Tab>
                 )}
                 {item?.files && item.files.length > 0 && (
                   <Tabs.Tab
                     id="files"
-                    className="press-tactile h-7 w-auto gap-2 rounded-md px-3 text-xs font-medium transition-colors"
+                    className="press-tactile h-7 w-auto gap-2 rounded-md px-2.5 text-meta font-medium transition-colors"
                   >
-                    {item.files.length > 1 ? `Files (${item.files.length})` : 'File'}
-                    <Tabs.Indicator className="rounded-md bg-surface-secondary" />
+                    {item.files.length > 1 ? `Files ${item.files.length}` : 'File'}
+                    <Tabs.Indicator className="rounded-md bg-(--state-selected-bg)" />
                   </Tabs.Tab>
                 )}
               </Tabs.List>
 
-              <Tabs.Panel id="details" className="mt-0 flex flex-col gap-4 p-0 outline-none">
+              <Tabs.Panel id="details" className="mt-0 flex flex-col gap-5 p-0 outline-none">
                 <InfoSection title="Overview">
-                  <InfoRow label="Status" value={item?.status} />
                   <InfoRow label="Title" value={item?.downloadanything?.title} mono={false} />
                   <InfoRow
                     label="Duration"
@@ -188,21 +185,23 @@ export function TaskInfoDrawer({
                 </InfoSection>
 
                 <InfoSection title="Transfer">
-                  <InfoRow
-                    label="Progress"
-                    value={progress != null ? `${progress.toFixed(1)}%` : undefined}
-                  />
+                  {!isComplete && (
+                    <InfoRow
+                      label="Progress"
+                      value={progress != null ? `${progress.toFixed(1)}%` : undefined}
+                    />
+                  )}
                   <InfoRow
                     label="Downloaded"
                     value={
-                      done > 0 || total > 0
+                      !isComplete && done > 0
                         ? `${fmtBytes(done)}${total > 0 ? ` / ${fmtBytes(total)}` : ''}`
                         : undefined
                     }
                   />
                   <InfoRow
                     label="Size"
-                    value={total > 0 && !item?.playlist ? fmtBytes(total) : undefined}
+                    value={total > 0 && (isComplete || done === 0) ? fmtBytes(total) : undefined}
                   />
                   {item?.playlist && (
                     <InfoRow
@@ -243,7 +242,7 @@ export function TaskInfoDrawer({
               </Tabs.Panel>
 
               {bt && (
-                <Tabs.Panel id="torrent" className="mt-0 flex flex-col gap-4 p-0 outline-none">
+                <Tabs.Panel id="torrent" className="mt-0 flex flex-col gap-5 p-0 outline-none">
                   <InfoSection title="Torrent">
                     <InfoRow label="Name" value={bt.name} />
                     <InfoRow label="Info hash" value={bt.infoHash} />
@@ -294,7 +293,7 @@ export function TaskInfoDrawer({
               )}
 
               {item?.files && item.files.length > 0 && (
-                <Tabs.Panel id="files" className="mt-0 flex flex-col gap-4 p-0 outline-none">
+                <Tabs.Panel id="files" className="mt-0 flex flex-col gap-5 p-0 outline-none">
                   {item.files.length === 1 ? (
                     <InfoSection title="File">
                       <InfoRow
@@ -323,7 +322,7 @@ export function TaskInfoDrawer({
                                   className="pb-1 pt-2"
                                   style={{ paddingLeft: depth * 16 }}
                                 >
-                                  <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-muted">
+                                  <span className="inline-flex items-center gap-1.5 text-meta font-medium text-muted">
                                     <Folder width={11} height={11} className="shrink-0" />
                                     {d.name}
                                   </span>
@@ -336,18 +335,15 @@ export function TaskInfoDrawer({
                             const flen = Number(f.length ?? 0)
                             const fdone = Number(f.completedLength ?? 0)
                             rows.push(
-                              <tr
-                                key={`${f.index}:${f.path}`}
-                                className="border-b border-separator last:border-0"
-                              >
+                              <tr key={`${f.index}:${f.path}`}>
                                 <td
-                                  className="min-w-0 truncate py-1.5 pr-3 font-mono text-xs text-(--foreground-secondary)"
+                                  className="min-w-0 truncate py-1 pe-4 font-mono text-meta text-foreground-secondary"
                                   style={{ paddingLeft: depth * 16 }}
                                   title={f.path}
                                 >
                                   {name}
                                 </td>
-                                <td className="w-28 py-1.5 text-right font-mono text-[10.5px] tabular-nums text-muted">
+                                <td className="w-28 py-1 text-right font-mono text-micro tabular-nums text-muted">
                                   {bt && flen > 0 ? `${fmtBytes(fdone)} / ` : ''}
                                   {fmtBytes(flen)}
                                 </td>
@@ -381,7 +377,7 @@ export function TaskInfoDrawer({
                 <Button
                   variant="secondary"
                   size="sm"
-                  className="press-tactile h-8.5 gap-1.5 px-3 text-xs font-medium"
+                  className="gap-1.5"
                   onPress={() => act(item.gid, 'pause')}
                 >
                   <Pause width={13} height={13} />
@@ -392,7 +388,7 @@ export function TaskInfoDrawer({
                 <Button
                   variant="secondary"
                   size="sm"
-                  className="press-tactile h-8.5 gap-1.5 px-3 text-xs font-medium"
+                  className="gap-1.5"
                   onPress={() => act(item.gid, 'resume')}
                 >
                   <Play width={13} height={13} />
@@ -403,7 +399,7 @@ export function TaskInfoDrawer({
                 <Button
                   variant="secondary"
                   size="sm"
-                  className="press-tactile h-8.5 gap-1.5 px-3 text-xs font-medium"
+                  className="gap-1.5"
                   onPress={() => act(item.gid, 'retry')}
                 >
                   <ArrowRotateLeft width={13} height={13} />
@@ -415,7 +411,7 @@ export function TaskInfoDrawer({
               <Button
                 variant="primary"
                 size="sm"
-                className="press-tactile ms-auto h-8.5 gap-1.5 px-3.5 text-xs font-medium"
+                className="ms-auto gap-1.5"
                 onPress={() => act(item.gid, 'showFile')}
               >
                 <FolderOpen width={14} height={14} />
