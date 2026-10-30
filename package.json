@@ -6,6 +6,7 @@
     "dev": "bun ui/node_modules/@tauri-apps/cli/tauri.js dev",
     "build": "bun ui/node_modules/@tauri-apps/cli/tauri.js build",
     "backend:bundle": "bun scripts/bundle-backend.ts",
+    "version:bump": "bun scripts/bump-version.ts",
     "ui:dev": "bun --cwd ui dev",
     "ui:build": "bun --cwd ui build"
   },
