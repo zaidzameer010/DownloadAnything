@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from 'react'
 import {
   Alert,
   Button,
@@ -39,6 +45,7 @@ import { DownloadsView } from './downloads'
 import { describeFile, interceptKind, isMediaFile } from './filter'
 import {
   errMsg,
+  estBytes,
   fmtBytes,
   fmtDuration,
   formatSelection,
@@ -109,6 +116,8 @@ type Job = {
   /** Magnet / .torrent input — handled by the torrent card, never probed. */
   | { state: 'torrent' }
 )
+
+type DoneJob = Extract<Job, { state: 'done' }>
 
 type StatusFilter = 'all' | 'active' | 'completed' | 'paused' | 'failed'
 
@@ -782,7 +791,7 @@ function buildReq({ item, link, page, contexts, category }: ProbeSelection & { c
     thumbnail: item.thumbnail,
     reprId: link.repr_id,
     pageUrl: link.page_url || item.page_url || page,
-    expectedSize: link.probed_size,
+    expectedSize: link.probed_size || estBytes(link, item.duration_secs) || undefined,
     createdAt: Math.floor(Date.now() / 1000),
     contexts,
     category: category || undefined,
@@ -1250,6 +1259,15 @@ function ProbeModal({
   const hasPlaylist = jobs.some(
     (j) => j.state === 'done' && (j.result.playlist?.entries.length ?? 0) > 0,
   )
+  // Nothing to choose format-wise: every result is a playlist listing.
+  const playlistOnly =
+    jobs.length > 0 &&
+    jobs.every(
+      (j) =>
+        j.state === 'done' &&
+        j.result.items.length === 0 &&
+        (j.result.playlist?.entries.length ?? 0) > 0,
+    )
   // The Playlist tab owns its submit row — the shared footer (it serves
   // item selections, which playlists don't produce) must hide while every
   // done job is on it, or the modal shows two download rows at once.
@@ -1300,14 +1318,18 @@ function ProbeModal({
                       ? 'Extraction failed'
                       : torrentOnly
                         ? 'Torrent'
-                        : ready > 0 || hasPlaylist
-                          ? 'Choose a format'
-                          : 'No media found'}
+                        : playlistOnly
+                          ? 'Choose playlist items'
+                          : ready > 0 || hasPlaylist
+                            ? 'Choose a format'
+                            : 'No media found'}
                 </span>
               </Modal.Heading>
-              {!probing && ready > 0 && (
+              {!probing && (ready > 0 || playlistOnly) && (
                 <p className="text-pretty text-meta leading-relaxed text-muted">
-                  The best available format is preselected for each item.
+                  {playlistOnly
+                    ? 'Picked items download at the best available quality.'
+                    : 'The best available format is preselected for each item.'}
                 </p>
               )}
             </Modal.Header>
@@ -1323,7 +1345,7 @@ function ProbeModal({
                     job={job}
                     report={report(job)}
                     onTabChange={reportTab(job)}
-                    onTorrentAdded={() => {
+                    onAdded={() => {
                       if (ready === 0) onOpenChange(false)
                     }}
                   />
@@ -1390,16 +1412,16 @@ function EmptyState({
 function JobCard({
   job,
   report,
-  onTorrentAdded,
+  onAdded,
   onTabChange,
 }: {
   job: Job
   report?: (itemKey: string, sel: Omit<ProbeSelection, 'jobId'> | null) => void
-  onTorrentAdded?: () => void
+  onAdded?: () => void
   onTabChange?: (tab: string) => void
 }) {
   if (job.state === 'torrent') {
-    return <TorrentJobCard job={job} onAdded={onTorrentAdded} />
+    return <TorrentJobCard job={job} onAdded={onAdded} />
   }
   if (job.state === 'running') {
     return (
@@ -1430,29 +1452,28 @@ function JobCard({
     )
   }
   return (
-    <ResultCard
-      job={job}
-      report={report}
-      onPlaylistAdded={onTorrentAdded}
-      onTabChange={onTabChange}
-    />
+    <ResultCard job={job} report={report} onAdded={onAdded} onTabChange={onTabChange} />
   )
 }
 
 function ResultCard({
   job,
   report,
-  onPlaylistAdded,
+  onAdded,
   onTabChange,
 }: {
-  job: Job
+  job: DoneJob
   report?: (itemKey: string, sel: Omit<ProbeSelection, 'jobId'> | null) => void
-  onPlaylistAdded?: () => void
+  onAdded?: () => void
   onTabChange?: (tab: string) => void
 }) {
-  if (job.state !== 'done') return null
   const result = job.result
   const pl = result.playlist
+  // Lives here, not in PlaylistPanel: the tab unmounts its panel, and a
+  // user's picks must survive a look at the Video tab.
+  const [picked, setPicked] = useState<Set<number>>(
+    () => new Set(pl?.entries.map((e) => e.index) ?? []),
+  )
   const mediaItems = (
     <>
       {result.items.map((item, i) => (
@@ -1502,13 +1523,15 @@ function ResultCard({
             aria-label="Result type"
             className="flex w-fit min-w-0 gap-0.5 rounded-lg bg-(--state-hover-bg) p-1"
           >
-            <Tabs.Tab
-              id="video"
-              className="press-tactile h-7 w-auto gap-2 rounded-md px-2.5 text-meta font-medium transition-colors"
-            >
-              Video{result.items.length > 0 ? ` ${result.items.length}` : ''}
-              <Tabs.Indicator className="rounded-md bg-(--state-selected-bg)" />
-            </Tabs.Tab>
+            {result.items.length > 0 && (
+              <Tabs.Tab
+                id="video"
+                className="press-tactile h-7 w-auto gap-2 rounded-md px-2.5 text-meta font-medium transition-colors"
+              >
+                Video {result.items.length}
+                <Tabs.Indicator className="rounded-md bg-(--state-selected-bg)" />
+              </Tabs.Tab>
+            )}
             <Tabs.Tab
               id="playlist"
               className="press-tactile h-7 w-auto gap-2 rounded-md px-2.5 text-meta font-medium transition-colors"
@@ -1517,19 +1540,19 @@ function ResultCard({
               <Tabs.Indicator className="rounded-md bg-(--state-selected-bg)" />
             </Tabs.Tab>
           </Tabs.List>
-          <Tabs.Panel id="video" className="mt-0 flex flex-col p-0 outline-none">
-            {result.items.length > 0 ? (
-              mediaItems
-            ) : (
-              <p className="py-6 text-center text-meta text-muted">
-                {result.error
-                  ? ''
-                  : 'No single video on this page — see the Playlist tab.'}
-              </p>
-            )}
-          </Tabs.Panel>
+          {result.items.length > 0 && (
+            <Tabs.Panel id="video" className="mt-0 flex flex-col p-0 outline-none">
+              {mediaItems}
+            </Tabs.Panel>
+          )}
           <Tabs.Panel id="playlist" className="mt-0 p-0 outline-none">
-            <PlaylistPanel job={job} playlist={pl} onAdded={onPlaylistAdded} />
+            <PlaylistPanel
+              job={job}
+              playlist={pl}
+              picked={picked}
+              setPicked={setPicked}
+              onAdded={onAdded}
+            />
           </Tabs.Panel>
         </Tabs>
       ) : (
@@ -1546,25 +1569,23 @@ function ResultCard({
   )
 }
 
-/** Playlist adds always take the best available quality (`bv*+ba/b`) —
- *  per-entry formats resolve at download time anyway. */
-
-/** Playlist tab: checkbox-picked entries + one quality bound for all of
- *  them. Submitting adds ONE task — the backend iterates the picked
- *  indices into <out>/<playlist title>/. */
+/** Playlist tab: checkbox-picked entries submitted as ONE task — the
+ *  backend downloads the picked indices at the best available quality
+ *  into <out>/<playlist title>/. */
 function PlaylistPanel({
   job,
   playlist,
+  picked,
+  setPicked,
   onAdded,
 }: {
-  job: Job
+  job: DoneJob
   playlist: NonNullable<PageResult['playlist']>
+  picked: Set<number>
+  setPicked: Dispatch<SetStateAction<Set<number>>>
   onAdded?: () => void
 }) {
   const entries = playlist.entries
-  const [picked, setPicked] = useState<Set<number>>(
-    () => new Set(entries.map((e) => e.index)),
-  )
   const [cat, setCat] = useState('')
   const [busy, setBusy] = useState(false)
   const cats = useCategories(true)
@@ -1649,7 +1670,7 @@ function PlaylistPanel({
           </button>
         </div>
       </div>
-      <ul className="flex max-h-56 flex-col overflow-y-auto overscroll-contain rounded-lg bg-surface-secondary p-1">
+      <ul className="flex max-h-72 flex-col overflow-y-auto overscroll-contain rounded-lg bg-surface-secondary p-1">
         {entries.map((e) => (
           <li key={e.index} className="min-w-0">
             <Checkbox
@@ -1662,9 +1683,7 @@ function PlaylistPanel({
                   <Checkbox.Indicator />
                 </Checkbox.Control>
                 <span className="w-[3ch] shrink-0 text-right font-mono text-micro tabular-nums text-muted-subtle">
-                  {Math.max(playlist.count || 0, entries.at(-1)?.index || 0) -
-                    e.index +
-                    1}
+                  {e.index}
                 </span>
                 {e.thumbnail ? (
                   <img
@@ -1843,11 +1862,12 @@ function FormatRow({
   const container = link.container?.split('-')[0]
   const codec = link.codecs?.split('.')[0]
   const detail = [link.kind, container, codec].filter(Boolean).join(' · ')
+  const est = estBytes(link, durSecs)
   const size =
     link.probed_size != null
       ? fmtBytes(link.probed_size)
-      : q?.bandwidth != null && durSecs != null
-        ? `~${fmtBytes((q.bandwidth * durSecs) / 8)}`
+      : est != null
+        ? `~${fmtBytes(est)}`
         : null
   const expiring = expIn != null && expIn < 900
   return (

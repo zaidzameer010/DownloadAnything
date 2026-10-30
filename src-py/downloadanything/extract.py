@@ -249,15 +249,24 @@ def _ydl_params(opts: ExtractOptions, url: str) -> tuple[dict[str, Any], list[tu
 def _seed_cookies(ydl: YoutubeDL, seeds: list[tuple[str, str]]) -> None:
     """Parse captured `Cookie:` headers into the jar, scoped to the domain
     the browser sent them on — yt-dlp's own unscoped→scoped fixup shape
-    (`.{host}`, leading dot, path `/`)."""
+    (`.{host}`, leading dot, path `/`). A name the jar already carries for
+    the host is skipped: the browser store wins, and a second copy under a
+    sibling domain (`www.x` vs `.x`) would send the host two values — the
+    duplicated session cookie made YouTube drop ytInitialData."""
     import http.cookiejar
 
     for host, header in seeds:
         domain = f".{host}"
+        present = {
+            c.name
+            for c in ydl.cookiejar
+            if c.domain and c.name and host_matches(host, c.domain.lstrip(".").lower())
+        }
         for part in header.split(";"):
             name, sep, value = part.strip().partition("=")
-            if not sep or not name:
+            if not sep or not name or name in present:
                 continue
+            present.add(name)
             ydl.cookiejar.set_cookie(
                 http.cookiejar.Cookie(
                     0,
@@ -473,7 +482,9 @@ def _playlist_meta(info: dict[str, Any], entries: Iterable) -> dict[str, Any]:
     """A playlist result → the Playlist tab's listing. Flat entries arrive
     as url stubs ({url, id, title, ie_key}); resolved entries carry the same
     fields. `index` is yt-dlp's 1-based playlist_index — DownloadReq picks
-    and the download's playlist_items spec select by it."""
+    and the download's playlist_items spec select by it. Flat stubs drop
+    that field, so their enumeration position (unavailable slots included)
+    is the same 1-based index."""
     items: list[dict[str, Any]] = []
     for i, e in enumerate(entries):
         if not isinstance(e, dict):
@@ -815,8 +826,12 @@ def _stat_session() -> Any:
 def _probe_headers(source: dict[str, Any], opts: ExtractOptions, url: str) -> dict[str, str]:
     """Headers for a direct probe: the row's own, plus the extraction jar's
     Cookie header when the row carries none. Signed CDN URLs bind the key to
-    the session, so a HEAD/range/master probe 403s on a wrong key otherwise."""
+    the session, so a HEAD/range/master probe 403s on a wrong key otherwise —
+    and to the page fetch's UA/Accept-Language, so stat probes send those too
+    (the impersonate session's own UA is rejected by UA-bound tokens)."""
     headers = {k: v for k, v in (source.get("headers") or {}).items() if isinstance(v, str)}
+    headers.setdefault("User-Agent", opts.user_agent or DEFAULT_UA)
+    headers.setdefault("Accept-Language", DEFAULT_ACCEPT_LANG)
     if not any(k.lower() == "cookie" for k in headers) and (
         ck := _cookie_header_for_url(opts, url)
     ):

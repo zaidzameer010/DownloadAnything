@@ -57,7 +57,9 @@ fn focus_window(app: tauri::AppHandle) {
 }
 
 fn raise_main_window(app: &tauri::AppHandle) {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    // AppHandle::show (unhide the whole app) exists only on macOS; on
+    // Windows the window-level show/unminimize below covers it.
+    #[cfg(target_os = "macos")]
     let _ = app.show();
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();

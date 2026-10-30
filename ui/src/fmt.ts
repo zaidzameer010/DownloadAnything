@@ -1,4 +1,9 @@
-import type { ChromeDownloadMeta, DownloadInfo, DownloadsSnapshot } from './types'
+import type {
+  ChromeDownloadMeta,
+  DownloadInfo,
+  DownloadsSnapshot,
+  MediaLink,
+} from './types'
 
 /** Payload-done torrents still seeding count as completed everywhere. */
 export function isDone(d: DownloadInfo): boolean {
@@ -40,13 +45,13 @@ export function taskName(d: DownloadInfo): string {
 
 /** 0..1 progress for a task. Playlist tasks count items (their byte total
  *  only covers started items); fragment downloads count segments; the rest
- *  use bytes. Restored playlist tasks lose per-item progress — they fall
- *  back to the persisted byte counters. */
+ *  use bytes. Pausing resets in-flight items to waiting, so a paused
+ *  playlist rides the persisted byte counters instead of item counts. */
 export function taskProgress(d: DownloadInfo): number | null {
   const pl = d.playlist?.items
-  if (pl && pl.length > 0) {
-    const touched = pl.some((i) => i.status !== 'waiting' || i.downloaded > 0)
-    if (touched) {
+  if (pl && pl.length > 0 && d.status !== 'paused') {
+    const live = pl.some((i) => i.status === 'complete' || i.status === 'active')
+    if (live) {
       let done = 0
       for (const it of pl) {
         if (it.status === 'complete') done += 1
@@ -192,6 +197,14 @@ export function formatSelection(indices: number[]): string {
   }
   if (start) parts.push(start === prev ? String(start) : `${start}-${prev}`)
   return parts.join(',')
+}
+
+/** Bandwidth×duration byte estimate — the ~ size the format rows show when
+ *  no probed_size exists; seeds expectedSize so stream tasks can show the
+ *  same number. null when either input is unknown. */
+export function estBytes(link: MediaLink, durSecs?: number): number | null {
+  const bw = link.quality?.bandwidth
+  return bw != null && durSecs != null ? Math.round((bw * durSecs) / 8) : null
 }
 
 export function fmtBytes(n: number): string {

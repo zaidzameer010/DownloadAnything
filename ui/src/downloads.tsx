@@ -197,23 +197,31 @@ function DlRow({
   const plDone = plItems.filter((i) => i.status === 'complete').length
 
   const stats: string[] = []
+  // `total` is seeded from the probe's expectedSize — the size the user saw
+  // in the probe modal. For hls/dash it stays a bandwidth estimate (VBR
+  // streams have no byte total), so it keeps the modal's ~ and drops out
+  // once real bytes pass it.
+  const approxTotal =
+    d.downloadanything?.media === 'hls' || d.downloadanything?.media === 'dash'
+  const size =
+    total > 0
+      ? isComplete || (approxTotal && done >= total)
+        ? fmtBytes(done > 0 ? done : total)
+        : `${fmtBytes(done)} / ${approxTotal ? '~' : ''}${fmtBytes(total)}`
+      : done > 0
+        ? fmtBytes(done)
+        : ''
   if (plItems.length > 0) {
     stats.push(`${plDone}/${plItems.length} items`)
     if (done > 0) stats.push(fmtBytes(done))
   } else if (frags) {
     if (frags.total > 0) stats.push(`${frags.done}/${frags.total} segments`)
-    if (done > 0) stats.push(fmtBytes(done))
+    if (size) stats.push(size)
   } else {
     if (progress != null && !isComplete) {
       stats.push(`${Math.min(100, progress * 100).toFixed(1)}%`)
     }
-    if (isComplete && total > 0) {
-      stats.push(fmtBytes(total))
-    } else if (total > 0) {
-      stats.push(`${fmtBytes(done)} / ${fmtBytes(total)}`)
-    } else if (done > 0) {
-      stats.push(fmtBytes(done))
-    }
+    if (size) stats.push(size)
   }
   if (eta) stats.push(`ETA ${eta}`)
   if (bt) {
@@ -240,7 +248,7 @@ function DlRow({
   const KindIcon = kind.Icon
 
   const indeterminate =
-    (!progress && (d.status === 'active' || d.status === 'downloading')) ||
+    (progress == null && (d.status === 'active' || d.status === 'downloading')) ||
     d.status === 'postprocessing' ||
     bt?.state === 'downloadingMetadata'
   const showRail = !isComplete && !isSelecting
@@ -380,7 +388,7 @@ function DlRow({
         {plItems.length > 0 && (
           <Disclosure.Content>
             <Disclosure.Body className="p-0 pb-3">
-              <PlaylistItemList items={plItems} count={pl?.count} />
+              <PlaylistItemList items={plItems} />
             </Disclosure.Body>
           </Disclosure.Content>
         )}
@@ -402,21 +410,10 @@ function DlRow({
   )
 }
 
-/** Per-entry rows under a playlist task — reversed index, status dot,
+/** Per-entry rows under a playlist task — playlist index, status dot,
  *  title, and a size/progress tail. Scrolls past ~8 rows so long playlists
  *  don't flood. */
-function PlaylistItemList({
-  items,
-  count,
-}: {
-  items: PlaylistTaskItem[]
-  count?: number
-}) {
-  const total = Math.max(
-    count || 0,
-    items.length,
-    ...items.map((i) => i.index),
-  )
+function PlaylistItemList({ items }: { items: PlaylistTaskItem[] }) {
   return (
     <ul className="flex max-h-60 flex-col overflow-y-auto rounded-lg bg-surface-secondary p-1">
       {items.map((it) => {
@@ -449,6 +446,8 @@ function PlaylistItemList({
             ) : (
               <span>{fmtBytes(it.downloaded)}</span>
             )
+          ) : it.downloaded > 0 ? (
+            <span>{fmtBytes(it.downloaded)}</span>
           ) : (
             <span className="text-muted-subtle">queued</span>
           )
@@ -456,10 +455,15 @@ function PlaylistItemList({
           <li
             key={it.index}
             className="flex min-w-0 items-center gap-2.5 rounded-md px-2 py-1"
-            title={it.error || it.filename || it.url || it.title}
+            title={
+              it.error ||
+              (it.status === 'complete' ? it.filename : '') ||
+              it.url ||
+              it.title
+            }
           >
             <span className="w-[3ch] shrink-0 text-right font-mono text-micro tabular-nums text-muted-subtle">
-              {total - it.index + 1}
+              {it.index}
             </span>
             {icon}
             <span className="min-w-0 flex-1 truncate text-meta text-foreground-secondary">

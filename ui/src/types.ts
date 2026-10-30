@@ -272,8 +272,9 @@ export interface DownloadReq {
     bandwidth?: number
     audioOnly?: boolean
   }
-  /** The probe's size for this row — seeds the task's initial totalLength
-   *  so the download shows the number the probe displayed. */
+  /** The probe's size for this row — the bandwidth×duration estimate for
+   *  streams with no probed_size. Seeds the task's initial totalLength so
+   *  the download shows the number the probe displayed. */
   expectedSize?: number
   /** Category name from settings — resolves to its output path at task start. */
   category?: string
@@ -289,7 +290,7 @@ export interface DownloadReq {
   playlist?: {
     title?: string
     url?: string
-    /** Full playlist size — items are numbered `count - index + 1`. */
+    /** Full playlist size for the header and tab counts. */
     count?: number
     items: {
       index: number

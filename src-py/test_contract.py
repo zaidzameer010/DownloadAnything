@@ -1495,6 +1495,26 @@ def test_ctx_cookies_seed_even_with_browser_jar():
         ex.YoutubeDL, ex._browser_jar, ex._seed_cookies = orig
 
 
+def test_seed_cookies_skips_names_the_jar_already_has():
+    """A captured Cookie header must not duplicate the browser store: the
+    same name under `.youtube.com` and `.www.youtube.com` sends the host two
+    values and YouTube drops the session (ytInitialData missing)."""
+    import http.cookiejar
+    jar = http.cookiejar.CookieJar()
+    jar.set_cookie(http.cookiejar.Cookie(
+        0, "SID", "from-jar", None, False, ".youtube.com", True, True,
+        "/", True, False, None, False, None, None, {}))
+
+    class FakeYDL:
+        cookiejar = jar
+
+    ex._seed_cookies(FakeYDL(), [("www.youtube.com", "SID=captured; VISITOR=abc")])
+    got = {(c.domain, c.name): c.value for c in jar}
+    assert got[(".youtube.com", "SID")] == "from-jar"
+    assert got[(".www.youtube.com", "VISITOR")] == "abc"
+    assert (".www.youtube.com", "SID") not in got
+
+
 # ---- download params ---------------------------------------------------------
 
 def test_ydl_params_format_from_repr_id():
@@ -4468,6 +4488,18 @@ def test_playlist_dir_sanitizer():
     assert len(dl._playlist_dir("x" * 500)) == 120
 
 
+def test_playlist_folder_resolves_category_and_sanitizes_title():
+    """The destination folder is known at task start — the row and details
+    drawer name it before the first item finishes."""
+    out = _TMP / "plfolder"
+    s = _settings(categories=[{"name": "cat", "path": str(out)}])
+    t = dl.Task("plfolder", {
+        "url": "u", "category": "cat",
+        "playlist": {"title": "A/B", "items": [{"index": 1}]},
+    })
+    assert dl._playlist_folder(t, s) == str(out / "A B")
+
+
 def test_ydl_dl_params_playlist():
     """Playlist params: entries land under <out>/<playlist title>/ with
     index-prefixed names; picked indices become a playlist_items spec; the
@@ -4485,10 +4517,28 @@ def test_ydl_dl_params_playlist():
     assert p["outtmpl"] == "My Mix/%(playlist_index)02d - %(title)s.%(ext)s"
     assert p["playlist_items"] == "2-3,7"
     assert p["ignoreerrors"] is True
+    assert p["allow_playlist_files"] is False, \
+        "playlist-level covers must not land in the output folder per worker"
     assert p["download_archive"].endswith("/g/archive.txt")
     # The out dir stays the resolved category root — the playlist folder is
     # inside it, not a replacement for it.
     assert p["paths"]["home"] == out_dir(_settings(), None)
+
+
+def test_ydl_dl_params_playlist_rejects_invalid_indices():
+    """A pick whose indices all normalize away must not fall through to an
+    unset playlist_items — that downloads the entire playlist."""
+    req = {
+        "url": "https://youtube.com/playlist?list=PL1",
+        "playlist": {"title": "My Mix", "items": [{"index": 0}]},
+    }
+    t = dl.Task("g", req)
+    try:
+        dl._ydl_dl_params(t, _settings(), _db()[0])
+    except ValueError as e:
+        assert "no valid indices" in str(e)
+    else:
+        raise AssertionError("expected ValueError for an empty pick spec")
 
 
 def test_playlist_task_snapshot_and_progress():
@@ -4512,6 +4562,8 @@ def test_playlist_task_snapshot_and_progress():
     assert snap["playlist"]["title"] == "My Mix"
     assert [i["index"] for i in snap["playlist"]["items"]] == [1, 2]
     assert all(i["status"] == "waiting" for i in snap["playlist"]["items"])
+    # The destination folder is named before the first item finishes.
+    assert snap["files"][0]["path"] == "/out/My Mix"
 
     db = _db()[0]
     hook = dl._progress_hook(t, db)
@@ -4530,6 +4582,29 @@ def test_playlist_task_snapshot_and_progress():
     assert it["status"] == "complete"
     assert it["filename"] == "/out/My Mix/01 - a.mp4"
     assert t._pl_by_idx[2]["status"] == "waiting"
+
+
+def test_playlist_snapshot_sums_item_speeds():
+    """Parallel workers each report their own speed; the task row shows
+    their sum, and the per-item accumulator stays out of the wire shape."""
+    req = {
+        "url": "u",
+        "playlist": {"title": "Mix", "items": [
+            {"index": 1, "id": "a"}, {"index": 2, "id": "b"},
+        ]},
+    }
+    t = dl.Task("plspeed", req)
+    hook = dl._progress_hook(t, _db()[0])
+    hook({"status": "downloading", "downloaded_bytes": 40, "total_bytes": 100,
+          "speed": 1000, "info_dict": {"playlist_index": 1}})
+    hook({"status": "downloading", "downloaded_bytes": 10, "total_bytes": 100,
+          "speed": 2000, "info_dict": {"playlist_index": 2}})
+    snap = t.snapshot_entry("/out")
+    assert snap["downloadSpeed"] == "3000"
+    assert "speed" not in snap["playlist"]["items"][0]
+    hook({"status": "finished", "total_bytes": 100,
+          "info_dict": {"playlist_index": 1}})
+    assert t._pl_by_idx[1]["speed"] == 0
 
 
 def test_finish_playlist_marks_items():
@@ -4588,6 +4663,52 @@ def test_finish_playlist_sizes_from_disk():
     assert t.playlist_items[1]["status"] == "complete"
     assert t.playlist_items[1]["filename"] == str(b)
     assert (t.playlist_items[1]["done"], t.playlist_items[1]["total"]) == (500, 500)
+
+
+def test_archive_ids_keep_full_ids():
+    """Archive lines are "<extractor> <id>" — only the extractor token is
+    dropped, so ids containing spaces still match the item rows."""
+    tmp = Path(st.task_tmp_dir("plarc"))
+    tmp.mkdir(parents=True, exist_ok=True)
+    (tmp / "archive.txt").write_text("youtube b\nsite two words\n")
+    assert dl._archive_ids("plarc") == {"b", "two words"}
+
+
+def test_restore_marks_archived_playlist_items_complete():
+    """A paused playlist restores from its tmp archive — entries recorded
+    there are done, so the row shows real item progress after a restart."""
+    tmp = Path(st.task_tmp_dir("plrestore"))
+    tmp.mkdir(parents=True, exist_ok=True)
+    (tmp / "archive.txt").write_text("youtube a\n")
+    req = {"url": "u", "playlist": {"title": "Mix", "items": [
+        {"index": 1, "id": "a"}, {"index": 2, "id": "b"},
+    ]}}
+    info = {"gid": "plrestore", "status": "paused", "files": [{"path": "/out/Mix"}]}
+    reg = dl.Registry(_db()[0], _settings())
+    reg.restore([(info, req)])
+    t = reg.get("plrestore")
+    assert [i["status"] for i in t.playlist_items] == ["complete", "waiting"]
+
+
+def test_restore_fills_completed_playlist_item_sizes():
+    """A completed playlist restores each item's size and path from its
+    numbered files — the db only persists the task-level total."""
+    folder = _TMP / "plrestore-sizes"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "01 - a.mkv").write_bytes(b"x" * 300)
+    (folder / "02 - b.mkv").write_bytes(b"y" * 500)
+    req = {"url": "u", "playlist": {"title": "Mix", "items": [
+        {"index": 1, "id": "a"}, {"index": 2, "id": "b"},
+    ]}}
+    info = {"gid": "plrestore-sizes", "status": "complete",
+            "files": [{"path": str(folder)}]}
+    reg = dl.Registry(_db()[0], _settings())
+    reg.restore([(info, req)])
+    t = reg.get("plrestore-sizes")
+    assert [i["status"] for i in t.playlist_items] == ["complete", "complete"]
+    assert t.playlist_items[0]["total"] == 300
+    assert t.playlist_items[1]["total"] == 500
+    assert t.playlist_items[1]["filename"].endswith("02 - b.mkv")
 
 
 def test_download_info_replays_cached_listing_under_both_sigs():

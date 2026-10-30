@@ -94,7 +94,7 @@ class PlaylistReq(Struct, rename="camel"):
     """Whole-playlist (or picked-subset) add — a single task whose items
     download into a playlist-named folder. `url` is the playlist's page URL
     (also the request's url); `title` names the output folder; `count` is
-    the full playlist size so the UI can number items reversed."""
+    the full playlist size for the header and tab counts."""
 
     title: str = ""
     url: str = ""

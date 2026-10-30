@@ -201,6 +201,7 @@ const CAPTURE_TTL_MS = 60 * 60 * 1000;
 const HEADER_ALLOW = /^(?:cookie|referer|user-agent|accept-language|x-)/;
 const MEDIA_EXT_RE =
   /^(?:mp4|webm|mkv|mov|m4v|ts|mp3|m4a|opus|wav|flac|aac)$/;
+const AUDIO_FILE_RE = /^(?:mp3|m4a|opus|wav|flac|aac)$/;
 const RETIRED_EXT = new Set([
   'ogg', 'oga', 'avi', '3gp', 'wmv', 'flv', 'mpg', 'mpeg', 'wma', 'aiff', 'm2ts', 'alac',
 ]);
@@ -403,6 +404,9 @@ async function rememberMedia(tabId, url, headers, mime) {
     if (match.kind) existing.kind = match.kind;
     if (match.label) existing.label = match.label;
     if (!existing.height) existing.height = heightFromUrl(url);
+    // The entry is created on request headers, where no response mime exists
+    // yet — the response pass is the only one that can fill it.
+    if (mime && !existing.mime) existing.mime = mime;
   } else {
     list.push({
       url,
@@ -492,6 +496,14 @@ async function captureContexts(tabId) {
 // Merge the DOM source ladder into captured contexts — each <source> carries
 // its own resolution/mime codecs, which the request sniffer cannot see.
 function mergeSources(contexts, sources) {
+  const dom = new Set((sources || []).map((s) => s?.url).filter(Boolean));
+  // A site's own UI sounds are ordinary audio/mpeg requests; only audio a
+  // media element references is page content (YouTube's /s/search/audio/*.mp3
+  // otherwise became the pushed page's only "media").
+  const audioOnly = (c) =>
+    !dom.has(c.url) &&
+    (/^audio\//i.test(c.mime || '') || AUDIO_FILE_RE.test(urlParts(c.url).ext));
+  contexts = contexts.filter((c) => !audioOnly(c));
   for (const source of sources || []) {
     const url = source?.url || '';
     if (!/^https?:\/\//i.test(url)) continue;

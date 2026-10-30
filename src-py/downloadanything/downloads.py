@@ -103,6 +103,7 @@ class Task:
                 "downloaded": 0,
                 "total": 0,
                 "done": 0,
+                "speed": 0.0,
                 "filename": "",
                 "error": "",
             }
@@ -122,7 +123,13 @@ class Task:
             frags_done, frags_total = self.frags_done, self.frags_total
             torrent = dict(self.torrent)
             tfiles = [dict(f) for f in self.torrent_files]
-            pl_items = [{k: v for k, v in it.items() if k != "done"} for it in self.playlist_items]
+            # `done`/`speed` are worker accumulators — the row shows
+            # `downloaded` and the summed speed instead.
+            pl_items = [
+                {k: v for k, v in it.items() if k not in ("done", "speed")}
+                for it in self.playlist_items
+            ]
+            pl_speed = sum(it.get("speed") or 0.0 for it in self.playlist_items)
         req = self.req
         entry: dict[str, Any] = {
             "gid": self.gid,
@@ -166,6 +173,12 @@ class Task:
                 "count": int(pl.get("count") or len(pl_items)),
                 "items": pl_items,
             }
+            # Before the first item finishes, name the destination folder —
+            # the details drawer's File section otherwise has only a size.
+            if not entry["files"][0]["path"]:
+                entry["files"][0]["path"] = str(
+                    Path(download_dir) / _playlist_dir(pl.get("title"))
+                )
             # The displayed size/progress is the sum of every item's merged
             # (video+audio) bytes — leg accumulators equal this mid-run;
             # archive-skipped items add their on-disk size at the end.
@@ -177,6 +190,10 @@ class Task:
             if pl_total > total:
                 entry["totalLength"] = str(pl_total)
                 entry["files"][0]["length"] = str(pl_total)
+            # Parallel workers each report their own speed — the task's is
+            # whichever hook fired last, so the item sum is the real rate.
+            if pl_speed > speed:
+                entry["downloadSpeed"] = str(int(pl_speed))
         if torrent:
             entry["bittorrent"] = torrent
             if tfiles:
@@ -235,15 +252,31 @@ class Registry:
                 task.created_at = int(info["createdAt"])
             if task.status == "complete" and task.playlist_items:
                 # Per-item states aren't persisted — a completed row shows
-                # its items done; a paused one re-resolves via the archive.
+                # its items done, and the numbered files restore their sizes.
+                folder = Path(task.filename) if task.filename else None
+                if folder is not None and not folder.is_dir():
+                    folder = None
                 for it in task.playlist_items:
                     it["status"] = "complete"
+                    hit = _numbered_item_file(it, folder) if folder else None
+                    if hit:
+                        size = hit.stat().st_size
+                        if size > 0:
+                            it["filename"] = str(hit)
+                            it["done"] = it["downloaded"] = it["total"] = size
             elif task.status == "error" and task.playlist_items:
                 # A task-level error means every entry failed (partial
                 # playlists complete) — don't restore them as "queued".
                 for it in task.playlist_items:
                     it["status"] = "error"
                     it["error"] = it["error"] or task.error
+            elif task.status == "paused" and task.playlist_items:
+                # The tmp archive survives a pause — entries it recorded are
+                # done, so a restored row shows the real item progress.
+                archived = _archive_ids(task.gid)
+                for it in task.playlist_items:
+                    if it["id"] and it["id"] in archived:
+                        it["status"] = "complete"
             if aria2_next.is_torrent_req(req):
                 # Torrent gids are the aria2 gids — controls reach a restored
                 # torrent before any worker runs.
@@ -349,6 +382,7 @@ def _progress_hook(task: Task, db: TaskDb) -> Callable[[dict[str, Any]], None]:
                 if item is not None:
                     item["status"] = "active"
                     item["downloaded"] = item["done"] + dl
+                    item["speed"] = d.get("speed") or 0.0
                 if fc := d.get("fragment_count"):
                     # Fragment downloads (HLS/DASH): byte estimates swing
                     # with fragment-size variance — the fragment count is
@@ -418,6 +452,7 @@ def _progress_hook(task: Task, db: TaskDb) -> Callable[[dict[str, Any]], None]:
                     item["done"] += leg
                     item["downloaded"] = item["done"]
                     item["total"] = max(item["total"], item["done"])
+                    item["speed"] = 0.0
             if fn := d.get("filename"):
                 if playlist:
                     # The playlist row names the playlist, not whichever
@@ -720,6 +755,7 @@ def _pp_hook(task: Task) -> Callable[[dict[str, Any]], None]:
                         if it is not None:
                             it["status"] = "complete"
                             it["filename"] = fp
+                            it["speed"] = 0.0
 
     return hook
 
@@ -745,6 +781,20 @@ def _playlist_dir(title: str | None) -> str:
     return name or "Playlist"
 
 
+def _playlist_folder(task: Task, s: AppSettings) -> str:
+    """The task's output folder — known before the first item finishes so
+    the row and details drawer can name the destination while it runs."""
+    pl = task.req.get("playlist") or {}
+    return str(Path(out_dir(s, task.req.get("category"))) / _playlist_dir(pl.get("title")))
+
+
+def _numbered_item_file(it: dict[str, Any], folder: Path) -> Path | None:
+    """The item's `<index> - <title>.<ext>` output file in the playlist
+    folder, when it exists."""
+    hit = next(folder.glob(f"{it['index']:02d} - *"), None)
+    return hit if hit and hit.is_file() else None
+
+
 def _items_spec(items: list[dict[str, Any]]) -> str:
     """Picked playlist indices → yt-dlp's playlist_items syntax (1-3,5).
     Same range compressor as aria2's select-file syntax — one implementation."""
@@ -759,7 +809,9 @@ def _archive_ids(gid: str) -> set[str]:
         lines = Path(task_tmp_dir(gid), "archive.txt").read_text().splitlines()
     except OSError:
         return set()
-    return {ln.split()[-1] for ln in lines if ln.strip()}
+    # Archive lines are "<extractor> <id>" — ids may contain spaces, so only
+    # the extractor token is dropped.
+    return {ln.partition(" ")[2].strip() for ln in lines if " " in ln}
 
 
 # fMP4 legs concatenated from HLS/DASH fragments can carry trailing NOPTS
@@ -958,17 +1010,25 @@ def _ydl_dl_params(
         params["postprocessors"] = pps
     if pl:
         items = pl.get("items") or []
-        if pl_spec or items:
-            # The UI's picked indices → yt-dlp's playlist_items spec —
-            # sparse selections keep their absolute playlist_index. A
-            # worker override (pl_spec) restricts this pass to its chunk.
-            params["playlist_items"] = pl_spec or _items_spec(items)
+        # The UI's picked indices → yt-dlp's playlist_items spec — sparse
+        # selections keep their absolute playlist_index. A worker override
+        # (pl_spec) restricts this pass to its chunk.
+        spec = pl_spec if pl_spec is not None else _items_spec(items)
+        if spec:
+            params["playlist_items"] = spec
+        elif items:
+            # A non-empty pick with no usable indices must never fall through
+            # to "no playlist_items" — that downloads the entire list.
+            raise ValueError("playlist items have no valid indices")
         # Pause/restart skips entries already downloaded — yt-dlp records
         # each success in the task's tmp archive (swept with the task dir).
         params["download_archive"] = str(Path(task_tmp_dir(task.gid)) / "archive.txt")
         # A dead/private entry must not sink the rest of the playlist —
         # per-item errors land in the snapshot's item rows instead.
         params["ignoreerrors"] = True
+        # Playlist-level files (cover, .info.json) would land in the output
+        # folder once per parallel worker; per-entry files stay untouched.
+        params["allow_playlist_files"] = False
     aria2_next.configure_ydl_params(params, task, s)
     return params
 
@@ -1100,6 +1160,7 @@ def _reset_live_items(task: Task) -> None:
         for it in task.playlist_items:
             if it["status"] == "active":
                 it["status"] = "waiting"
+                it["speed"] = 0.0
 
 
 def _finish_playlist(task: Task, infos: Any, s: AppSettings) -> str:
@@ -1109,9 +1170,7 @@ def _finish_playlist(task: Task, infos: Any, s: AppSettings) -> str:
     (already downloaded before this run) → done; absent → failed. Every
     resolved item takes its final path and size from disk — leg bytes are
     pre-merge and the extractor's filesize is pre-postprocess."""
-    pl = task.req.get("playlist") or {}
-    folder = _playlist_dir(pl.get("title") or "Playlist")
-    final = str(Path(out_dir(s, task.req.get("category"))) / folder)
+    final = _playlist_folder(task, s)
     seen: dict[Any, dict[str, Any]] = {}
     for info in infos if isinstance(infos, list) else [infos]:
         if not isinstance(info, dict):
@@ -1124,6 +1183,7 @@ def _finish_playlist(task: Task, infos: Any, s: AppSettings) -> str:
     with task.lock:
         for it in task.playlist_items:
             e = seen.get(it["index"])
+            it["speed"] = 0.0
             if it["status"] != "complete":
                 if e is not None:
                     it["status"] = "complete"
@@ -1142,8 +1202,8 @@ def _finish_playlist(task: Task, infos: Any, s: AppSettings) -> str:
                 rd = e.get("requested_downloads") or []
                 fp = (rd[0].get("filepath") if rd else e.get("filepath")) or ""
             if not fp or not os.path.isfile(fp):
-                hit = next(folder_dir.glob(f"{it['index']:02d} - *"), None)
-                fp = str(hit) if hit and hit.is_file() else fp or it["filename"]
+                hit = _numbered_item_file(it, folder_dir)
+                fp = str(hit) if hit else fp or it["filename"]
             if fp:
                 it["filename"] = fp
             if fp and os.path.isfile(fp):
@@ -1331,10 +1391,12 @@ def _run_task(task: Task, s: AppSettings, db: TaskDb) -> None:
     url = task.req.get("url", "")
     log.info("task start", gid=task.gid, url=url)
     db.update_status(task.gid, "active")
-    # shortcut: a playlist URL downloads every entry but only the last file
-    # is tracked in the snapshot — single-item adds are the app's path.
     try:
         if task.playlist_items:
+            # The destination is known before the first item lands — the row
+            # and details drawer show the folder while the task runs.
+            with task.lock:
+                task.filename = _playlist_folder(task, s)
             infos = _run_playlist_workers(task, s, db, url)
             info = None
         else:

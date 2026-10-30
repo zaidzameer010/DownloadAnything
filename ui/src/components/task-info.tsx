@@ -205,7 +205,7 @@ export function TaskInfoDrawer({
                   />
                   {item?.playlist && (
                     <InfoRow
-                      label="Items"
+                      label="Items done"
                       value={`${item.playlist.items.filter((i) => i.status === 'complete').length} / ${item.playlist.items.length}`}
                     />
                   )}
